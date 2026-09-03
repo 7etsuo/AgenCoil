@@ -2,7 +2,6 @@ import {
   FOOD_COLORS,
   MAX_BOTS,
   START_MASS,
-  TICK,
   fillOf,
   lerp,
   type Camera,
@@ -125,7 +124,6 @@ export class CoilEngine {
   private running = false;
   private raf = 0;
   private last = 0;
-  private acc = 0;
   private dpr = 1;
   private best = 0;
   private look: Look = { name: "anon", skin: 0 };
@@ -267,16 +265,14 @@ export class CoilEngine {
     this.last = performance.now();
     const loop = (now: number) => {
       if (!this.running) return;
+      // One simulation step per displayed frame, by the real elapsed time,
+      // as slither.io does. A fixed 60 Hz step drifted against the display
+      // clock (0 or 2 steps on some frames) and moved every other frame on
+      // 120 Hz screens; both read as stutter. Every consumer of dt below is
+      // frame-rate independent. Long gaps (tab hidden) are clamped.
       const raw = Math.min(0.1, (now - this.last) / 1000);
       this.last = now;
-      this.acc += raw;
-      let steps = 0;
-      while (this.acc >= TICK && steps < 2) {
-        this.tick(TICK);
-        this.acc -= TICK;
-        steps++;
-      }
-      if (this.acc > TICK * 2) this.acc = TICK;
+      if (raw > 0) this.tick(Math.min(raw, 1 / 20));
       this.draw();
       this.frames++;
       this.fpsT += raw;
@@ -719,7 +715,7 @@ export class CoilEngine {
       // Keep the server mirror current so the switch back is seamless.
       if (this.online) this.net!.update(dt, this.pointer, false);
     }
-    this.trailFx();
+    this.trailFx(dt);
     this.stepDeathFx(dt);
     this.updateCam(dt);
     // The moment of death plays out in slow motion for a beat.
@@ -876,12 +872,13 @@ export class CoilEngine {
   }
 
   /** Boost trails per cosmetic id, spawned behind the tail each tick. */
-  private trailFx(): void {
+  private trailFx(dt: number): void {
     for (const s of this.world.snakes) {
       if (!s.boosting || !s.trail || !s.points.length) continue;
       const tail = s.points[0]!;
       const r = radiusOf(s.mass);
-      if (Math.random() > 0.6) continue;
+      // About 24 particles per second per snake, whatever the frame rate.
+      if (Math.random() > 24 * dt) continue;
       const color =
         s.trail === 3
           ? `hsl(${(performance.now() / 4) % 360} 90% 60%)`
