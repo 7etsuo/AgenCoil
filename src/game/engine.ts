@@ -54,7 +54,9 @@ export interface Look {
 
 const ZOOM_MIN = 0.55;
 const ZOOM_MAX = 1.7;
-const CAM_LEAD = 48;
+const CAM_LEAD = 0;
+/** How far ahead of the head the aim point sits, in world units. */
+const AIM_REACH = 240;
 const SPAWN_TIMEOUT_MS = 4000;
 
 interface DeathFx {
@@ -75,6 +77,8 @@ export class CoilEngine {
   private local: World | null = null;
   private cam: Camera = { x: 0, y: 0, z: 0.55, trauma: 0 };
   private pointer: Vec = { x: 80, y: 0 };
+  /** Cursor position relative to the canvas centre, in CSS pixels. */
+  private aimScreen: Vec | null = null;
   private boosting = false;
   private holdBoost = false;
   private keys = new Set<string>();
@@ -280,8 +284,9 @@ export class CoilEngine {
   private snapCamTo(s: Snake): void {
     this.cam.x = s.x;
     this.cam.y = s.y;
-    this.pointer.x = s.x + Math.cos(s.angle) * 80;
-    this.pointer.y = s.y + Math.sin(s.angle) * 80;
+    this.aimScreen = null;
+    this.pointer.x = s.x + Math.cos(s.angle) * AIM_REACH;
+    this.pointer.y = s.y + Math.sin(s.angle) * AIM_REACH;
   }
 
   respawn(): void {
@@ -394,8 +399,9 @@ export class CoilEngine {
     const dy = st.y - st.oy;
     const d = Math.hypot(dx, dy);
     if (d < 6) return;
-    this.pointer.x = p.x + (dx / d) * 240;
-    this.pointer.y = p.y + (dy / d) * 240;
+    this.aimScreen = null;
+    this.pointer.x = p.x + (dx / d) * AIM_REACH;
+    this.pointer.y = p.y + (dy / d) * AIM_REACH;
   }
   private onPointerDown = (e: PointerEvent): void => {
     if (e.button !== undefined && e.button !== 0) return;
@@ -436,12 +442,36 @@ export class CoilEngine {
     this.boosting = this.phase === "play" && (this.holdBoost || key);
   }
 
+  /**
+   * Like slither.io, the cursor sets a direction from the head, not a point in
+   * the world: a still mouse keeps the snake on a straight line.
+   */
   private clientToAim(clientX: number, clientY: number): void {
     const rect = this.canvas.getBoundingClientRect();
-    const x = clientX - rect.left - rect.width / 2;
-    const y = clientY - rect.top - rect.height / 2;
-    this.pointer.x = this.cam.x + x / this.cam.z;
-    this.pointer.y = this.cam.y + y / this.cam.z;
+    this.aimScreen = {
+      x: clientX - rect.left - rect.width / 2,
+      y: clientY - rect.top - rect.height / 2,
+    };
+    this.refreshAim();
+  }
+
+  private refreshAim(): void {
+    const a = this.aimScreen;
+    const p = this.world.player;
+    if (!a) return;
+    if (!p) {
+      this.pointer.x = this.cam.x + a.x / this.cam.z;
+      this.pointer.y = this.cam.y + a.y / this.cam.z;
+      return;
+    }
+    const hx = (p.x - this.cam.x) * this.cam.z;
+    const hy = (p.y - this.cam.y) * this.cam.z;
+    const dx = a.x - hx;
+    const dy = a.y - hy;
+    const d = Math.hypot(dx, dy);
+    if (d < 4) return;
+    this.pointer.x = p.x + (dx / d) * AIM_REACH;
+    this.pointer.y = p.y + (dy / d) * AIM_REACH;
   }
 
   private resize(): void {
@@ -454,6 +484,7 @@ export class CoilEngine {
   }
 
   private tick(dt: number): void {
+    this.refreshAim();
     this.applyKeyboardAim();
     const boost = this.phase === "play" && this.boosting;
     if (this.online) {
@@ -511,8 +542,9 @@ export class CoilEngine {
     if (!dx && !dy) return;
     const p = this.world.player;
     const origin = p ?? { x: this.cam.x, y: this.cam.y };
-    this.pointer.x = origin.x + dx * 240;
-    this.pointer.y = origin.y + dy * 240;
+    this.aimScreen = null;
+    this.pointer.x = origin.x + dx * AIM_REACH;
+    this.pointer.y = origin.y + dy * AIM_REACH;
   }
 
   private eatFx(x: number, y: number, v: number, c: number): void {
@@ -728,6 +760,9 @@ export class CoilEngine {
       instance: this.net?.instance ?? "",
       rtt: this.net?.rttMs ?? 0,
       score: p ? Math.floor(p.mass) : 0,
+      headX: p ? Math.round(p.x) : 0,
+      headY: p ? Math.round(p.y) : 0,
+      angle: p ? Math.round(p.angle * 1000) / 1000 : 0,
       playerPts: p?.points.length ?? 0,
       snakes: world.snakes.length,
       foods: world.foods.length,

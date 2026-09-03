@@ -4,7 +4,16 @@
  * your own snake is predicted from your inputs and nudged toward what the
  * server says, and orbs arrive as add/remove deltas for the area on screen.
  */
-import { INTERP_DELAY, MIN_MASS, type Food, type Snake, type Vec, lerp, wrapAngle } from "./model";
+import {
+  BOOST_MIN_MASS,
+  INTERP_DELAY,
+  speedOf,
+  type Food,
+  type Snake,
+  type Vec,
+  lerp,
+  wrapAngle,
+} from "./model";
 import { C2S, Reader, S2C, Writer, readFood, readSnakeEntry, writeBands } from "./protocol";
 import { World } from "./world";
 
@@ -473,7 +482,7 @@ export class NetSession {
     const me = this.world.player;
     if (me) {
       this.world.steerToward(me, aim.x, aim.y, dt);
-      me.boosting = wantBoost && me.mass > MIN_MASS + 0.4;
+      me.boosting = wantBoost && me.mass > BOOST_MIN_MASS;
       // Predict the move, but hold at the first touch of another body so the
       // head does not visibly sink in while the server's verdict is in flight.
       const px = me.x;
@@ -492,7 +501,7 @@ export class NetSession {
       if (srv) {
         // Where the server thinks we are by now, then ease toward it.
         const elapsed = Math.min(0.3, (now - srv.t) / 1000);
-        const speed = srv.boosting ? 370 : 185;
+        const speed = speedOf(srv.mass, srv.boosting);
         const sx = srv.x + Math.cos(srv.angle) * speed * elapsed;
         const sy = srv.y + Math.sin(srv.angle) * speed * elapsed;
         const ex = sx - me.x;
@@ -546,7 +555,7 @@ function sample(buf: Snap[], at: number): Snap {
   // Past the newest snapshot: extrapolate briefly so motion never stalls.
   const last = buf[buf.length - 1]!;
   const over = Math.min(0.15, (at - last.t) / 1000);
-  const speed = last.boosting ? 370 : 185;
+  const speed = speedOf(last.mass, last.boosting);
   return {
     ...last,
     x: last.x + Math.cos(last.angle) * speed * over,

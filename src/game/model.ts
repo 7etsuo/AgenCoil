@@ -1,19 +1,24 @@
-export const ARENA_RADIUS = 6400;
-export const FOOD_TARGET = 11000;
+/**
+ * Units follow slither.io's client: a fresh snake is 29 units wide, the map
+ * radius there is 21600 for hundreds of players, so ours is scaled to the
+ * bot count. Speed, turn rate, scale and spacing are slither.io's formulas.
+ */
+export const ARENA_RADIUS = 7200;
+export const FOOD_TARGET = 16000;
 export const TICK = 1 / 60;
-export const BASE_SPEED = 185;
-export const BOOST_SPEED = 370;
-export const START_MASS = 14;
+export const START_MASS = 10;
 export const MIN_MASS = 10;
-export const BOOST_DROP_EVERY = 0.12;
+/** You need a little length in the bank before boosting is allowed. */
+export const BOOST_MIN_MASS = 11;
+/** Boosting sheds a constant length per second, as six pellets per second. */
+export const BOOST_DRAIN = 15;
+export const BOOST_DROP_EVERY = 1 / 6;
 export const SPAWN_INVULN = 1.6;
 export const NET_INTERVAL = 1000 / 18;
 export const INTERP_DELAY = 110;
 export const MAX_NET_POINTS = 56;
-export const MAX_BOTS = 22;
-/** Bots on the authoritative server, where CPU is cheaper than an empty arena. */
-export const SERVER_BOTS = 40;
-export const CHASE_ORBS = 14;
+export const MAX_BOTS = 24;
+export const CHASE_ORBS = 16;
 export const MAGNET_SPEED = 420;
 export const BOT_RESPAWN_DELAY = 2.5;
 export const SERVER_TICK_HZ = 40;
@@ -21,6 +26,10 @@ export const SNAPSHOT_HZ = 20;
 export const FOOD_SYNC_HZ = 10;
 export const DISCONNECT_GRACE_MS = 10_000;
 export const MAX_CUSTOM_BANDS = 6;
+/** Bots on the authoritative server, where CPU is cheaper than an empty arena. */
+export const SERVER_BOTS = 50;
+export const MAX_SCALE = 4.86;
+export const BASE_WIDTH = 29;
 
 export type Phase = "menu" | "play" | "dead";
 
@@ -226,28 +235,68 @@ export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
-/** Body half-width. Grows quickly at first, then flattens out like slither.io. */
-export function radiusOf(mass: number): number {
-  return 7 + Math.pow(Math.max(mass, 1), 0.46) * 1.42;
+/**
+ * slither.io's body scale: 1 at the start, growing with length toward
+ * MAX_SCALE. The client derives it from body-part count; we map it from mass
+ * so that length 1000 is about 2x, 4000 about 2.9x and 12000 about 4x.
+ */
+export function scaleOf(mass: number): number {
+  return Math.min(MAX_SCALE, 1 + Math.pow(Math.max(0, mass - 10) / 990, 0.45));
 }
 
-/** Body length in world units. */
+/** Body half-width: slither.io's `sc * 29` width. */
+export function radiusOf(mass: number): number {
+  return (BASE_WIDTH / 2) * scaleOf(mass);
+}
+
+/** Body parts, slither.io's `sct`: 2 + 106 per unit of scale. */
+export function partsOf(mass: number): number {
+  return 2 + 106 * (scaleOf(mass) - 1);
+}
+
+/** Distance between body parts: slither.io's `wsep = 6 * sc`. */
+export function spacingOf(mass: number): number {
+  return 6 * scaleOf(mass);
+}
+
+/** Body length in world units: parts times spacing, never under ~3 widths. */
 export function lengthOf(mass: number): number {
-  return 70 + mass * 3.05;
+  const sc = scaleOf(mass);
+  return Math.max(BASE_WIDTH * sc * 3.2, partsOf(mass) * 6 * sc);
 }
 
 /**
- * Turn rate in radians per second. Small snakes turn inside about three body
- * widths, huge ones need four or more, which is what makes coiling possible.
+ * Head speed in units per second. slither.io moves `sp / 4` units per 8 ms
+ * frame with `sp = 5.39 + 0.4 * sc` (14 + 0.4 * sc while boosting).
  */
-export function turnRateOf(mass: number): number {
-  const r = radiusOf(mass);
-  return clamp(96 / Math.pow(r, 1.18), 0.75, 5.2);
+export function speedOf(mass: number, boosting: boolean): number {
+  const sc = scaleOf(mass);
+  return ((boosting ? 14 : 5.39) + 0.4 * sc) * 31.25;
 }
 
+/**
+ * Turn rate in radians per second: slither.io's `mamu` (0.033 rad per 8 ms)
+ * times `scang = 0.13 + 0.87 * ((7 - sc) / 6)^2`. The turning circle stays
+ * between one and two body widths at every size.
+ */
+export function turnRateOf(mass: number): number {
+  const sc = scaleOf(mass);
+  const scang = 0.13 + 0.87 * Math.pow((7 - sc) / 6, 2);
+  return 4.125 * scang;
+}
+
+/** Camera zoom: 0.9 for a fresh snake, easing out to about half at max scale. */
 export function zoomOf(mass: number): number {
-  const r = radiusOf(mass);
-  return clamp(0.9 / (0.85 + r / 30), 0.3, 1.0);
+  return clamp(0.9 - (scaleOf(mass) - 1) * 0.11, 0.48, 0.9);
+}
+
+export function maxPointsOf(mass: number): number {
+  return Math.max(12, Math.round(lengthOf(mass) / spacingOf(mass)) + 6);
+}
+
+/** Mass lost per second while boosting: constant, like slither.io. */
+export function boostDrainOf(_mass: number): number {
+  return BOOST_DRAIN;
 }
 
 /** Resolve the colour bands a snake is drawn with. */
@@ -260,20 +309,6 @@ export function bandsOf(s: { skin: number; bands?: string[] }): string[] {
 export function fillOf(s: { skin: number; bands?: string[] }): string {
   if (s.bands && s.bands.length) return s.bands[0]!;
   return SKINS[s.skin % SKINS.length]!.fill;
-}
-
-/** Distance between recorded path points. */
-export function spacingOf(mass: number): number {
-  return Math.max(5.5, radiusOf(mass) * 0.5);
-}
-
-export function maxPointsOf(mass: number): number {
-  return Math.max(12, Math.round(lengthOf(mass) / spacingOf(mass)) + 6);
-}
-
-/** Mass lost per second while boosting. */
-export function boostDrainOf(mass: number): number {
-  return 2.4 + mass * 0.018;
 }
 
 export function randRange(a: number, b: number): number {

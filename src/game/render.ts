@@ -14,6 +14,7 @@ import {
   dist2,
   lengthOf,
   radiusOf,
+  spacingOf,
   zoomOf,
 } from "./model";
 import type { World } from "./world";
@@ -275,7 +276,7 @@ export class Renderer {
     // subsampled remote body looks identical to a local one.
     const size = r * 2.08;
     const half = size / 2;
-    const step = Math.max(2.5, r * 0.5);
+    const step = Math.max(2.5, spacingOf(s.mass));
     const bandLen = Math.max(1, s.bands ? 3 : SKINS[s.skin % SKINS.length]!.band);
     const nBands = bands.length;
     const sprites = bands.map((c) => this.segmentSprite(c));

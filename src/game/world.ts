@@ -1,8 +1,7 @@
 import {
   ARENA_RADIUS,
-  BASE_SPEED,
   BOOST_DROP_EVERY,
-  BOOST_SPEED,
+  BOOST_MIN_MASS,
   BOT_RESPAWN_DELAY,
   CHASE_COLOR,
   CHASE_ORBS,
@@ -26,6 +25,7 @@ import {
   randRange,
   randomInDisk,
   spacingOf,
+  speedOf,
   turnRateOf,
   wrapAngle,
 } from "./model";
@@ -33,7 +33,7 @@ import {
 export const CELL = 96;
 const GRID_OFF = 256;
 const GRID_SPAN = 512;
-const CHASE_SPEED = 215;
+const CHASE_SPEED = 265;
 const CHASE_SENSE = 320;
 
 export interface EatEvent {
@@ -306,7 +306,7 @@ export class World {
   pelletsFrom(s: Snake): Food[] {
     const out: Food[] = [];
     const n = Math.round(clamp(8 + s.mass * 0.3, 8, 150));
-    const each = Math.max(1, (s.mass * 0.72) / n);
+    const each = Math.max(1, (s.mass * 0.85) / n);
     const pts = s.points.length ? s.points : [{ x: s.x, y: s.y }];
     for (let i = 0; i < n; i++) {
       const p = pts[((i / n) * (pts.length - 1)) | 0]!;
@@ -340,11 +340,11 @@ export class World {
       const input = this.inputs.get(s.id);
       if (input) {
         this.steerHeading(s, input.angle, dt);
-        s.boosting = input.boost && s.mass > MIN_MASS + 0.4;
+        s.boosting = input.boost && s.mass > BOOST_MIN_MASS;
         this.advance(s, dt);
       } else if (s.id === this.playerId) {
         this.steerToward(s, aimX, aimY, dt);
-        s.boosting = wantBoost && s.mass > MIN_MASS + 0.4;
+        s.boosting = wantBoost && s.mass > BOOST_MIN_MASS;
         this.advance(s, dt);
       } else if (s.isBot && this.host) {
         this.thinkBot(s, dt);
@@ -449,7 +449,7 @@ export class World {
 
   /** Move the head forward one tick without any rules (client prediction). */
   moveHead(s: Snake, dt: number): void {
-    const speed = s.boosting ? BOOST_SPEED : BASE_SPEED;
+    const speed = speedOf(s.mass, s.boosting);
     s.x += Math.cos(s.angle) * speed * dt;
     s.y += Math.sin(s.angle) * speed * dt;
   }
@@ -467,13 +467,13 @@ export class World {
         s.dropped = 0;
         const tail = s.points[0];
         if (tail) {
-          const v = Math.round(boostDrainOf(s.mass) * BOOST_DROP_EVERY * 0.85 * 10) / 10;
+          const v = Math.round(boostDrainOf(s.mass) * BOOST_DROP_EVERY * 0.9 * 10) / 10;
           this.addFood({
             x: tail.x + randRange(-4, 4),
             y: tail.y + randRange(-4, 4),
             v: Math.max(0.3, v),
             c: this.skinFoodColor(s.skin),
-            r: 4 + Math.random() * 1.6,
+            r: 4.5 + Math.random() * 1.5,
             k: 1,
           });
         }
@@ -561,7 +561,7 @@ export class World {
     }
 
     this.steerHeading(s, s.wander, dt);
-    s.boosting = s.boostLeft > 0 && s.mass > MIN_MASS + 6;
+    s.boosting = s.boostLeft > 0 && s.mass > BOOST_MIN_MASS + 5;
   }
 
   /** Long-horizon intent: flee, coil, hunt, eat, or drift. Stored in `wander`. */
@@ -635,7 +635,7 @@ export class World {
       }
     }
     if (prey && s.mass > 18 && Math.random() < 0.35 + bold * 0.6) {
-      const lead = 70 + radiusOf(prey.mass) * 2 + (prey.boosting ? BOOST_SPEED : BASE_SPEED) * 0.45;
+      const lead = 70 + radiusOf(prey.mass) * 2 + speedOf(prey.mass, prey.boosting) * 0.45;
       s.wander = Math.atan2(
         prey.y + Math.sin(prey.angle) * lead - s.y,
         prey.x + Math.cos(prey.angle) * lead - s.x,
@@ -669,7 +669,7 @@ export class World {
   /** Short-horizon safety: bend the goal heading toward open space. */
   private pickHeading(s: Snake): void {
     const r = radiusOf(s.mass);
-    const speed = s.boosting ? BOOST_SPEED : BASE_SPEED;
+    const speed = speedOf(s.mass, s.boosting);
     const look = speed * 0.55 + r * 3.5;
     const safe = r * 2.6 + 26;
     const cap = look + safe;
@@ -884,7 +884,7 @@ export class World {
     // A share of orbs spawn beside an existing natural orb, which builds the
     // loose clusters slither.io has instead of a uniform sprinkle.
     let at: Vec | null = null;
-    if (this.foods.length > 50 && Math.random() < 0.45) {
+    if (this.foods.length > 50 && Math.random() < 0.25) {
       const near = this.foods[(Math.random() * this.foods.length) | 0]!;
       if (near.k === 0) {
         const p = { x: near.x + randRange(-70, 70), y: near.y + randRange(-70, 70) };
@@ -893,26 +893,30 @@ export class World {
     }
     const p = at ?? randomInDisk(ARENA_RADIUS * 0.96);
     const roll = Math.random();
-    const prize = roll < 0.03;
-    const mid = !prize && roll < 0.2;
-    const v = prize ? 3 + ((Math.random() * 3) | 0) : mid ? 2 : 1;
+    const prize = roll < 0.02;
+    const mid = !prize && roll < 0.12;
+    const small = !prize && !mid && roll < 0.45;
+    const v = prize ? 3 + ((Math.random() * 2) | 0) : mid ? 2 : small ? 1 : 0.6;
+    const r = prize
+      ? 8 + Math.random() * 4
+      : mid
+        ? 5.5 + Math.random() * 2
+        : small
+          ? 4 + Math.random() * 1.5
+          : 3 + Math.random() * 1.2;
     return {
       x: p.x,
       y: p.y,
       v,
       c: (Math.random() * FOOD_COLORS.length) | 0,
-      r: prize
-        ? 7.5 + Math.random() * 4
-        : mid
-          ? 4.6 + Math.random() * 2
-          : 2.8 + Math.random() * 1.6,
+      r,
       k: 0,
     };
   }
 
   private makeChaser(): Food {
     const p = randomInDisk(ARENA_RADIUS * 0.85);
-    return { x: p.x, y: p.y, v: 14 + ((Math.random() * 8) | 0), c: CHASE_COLOR, r: 13, k: 3 };
+    return { x: p.x, y: p.y, v: 30 + ((Math.random() * 50) | 0), c: CHASE_COLOR, r: 14, k: 3 };
   }
 
   private fillFood(target: number): void {
