@@ -185,3 +185,57 @@ test("lag compensation judges against the other snake as the player saw it", () 
     "with 150 ms of view lag the rewound head is not there yet",
   );
 });
+
+test("rewind follows actual travel when the other snake just stopped boosting", () => {
+  const world = new World(false);
+  world.host = true;
+  const other = place(world, "other", 0, 0, 0, 200);
+  world.inputs.get("other").boost = true;
+  for (let i = 0; i < 8; i++) world.step(1 / 40, 0, 0, false); // 200 ms boosting
+  world.inputs.get("other").boost = false;
+  world.step(1 / 40, 0, 0, false);
+  // Sum of the last 8 ticks of travel (mostly boosted) vs nominal unboosted.
+  const log = other.travel;
+  const actual = log.slice(-8).reduce((a, b) => a + b, 0);
+  const nominal = model.speedOf(other.mass, false) * 0.2;
+  assert.ok(
+    actual > nominal * 1.8,
+    `boosted travel ${actual.toFixed(0)} should far exceed nominal ${nominal.toFixed(0)}`,
+  );
+  // A head placed where the nominal rewind would put the other head is NOT a
+  // hit, because the real rewound head is much further back.
+  const sum = model.radiusOf(20) + model.radiusOf(200);
+  place(world, "me", other.x - nominal + sum * 0.5, sum * 0.3, Math.PI / 2, 20);
+  world.lags.set("me", 0.2);
+  world.step(1 / 40, 0, 0, false);
+  assert.ok(!world.deaths.some((d) => d.snake.id === "me"), "nominal rewind spot must be clear");
+});
+
+test("the tail that existed then still kills after a rewind", () => {
+  const world = new World(false);
+  world.host = true;
+  const other = place(world, "other", 0, 0, 0, 60);
+  for (let i = 0; i < 40; i++) world.step(1 / 40, 0, 0, false); // 1 s: the tail has moved
+  const tail = other.points[0];
+  // Sit just behind the current tail, where the tail was 200 ms ago.
+  const back = model.speedOf(other.mass, false) * 0.15;
+  const sum = model.radiusOf(20) + model.radiusOf(60);
+  place(world, "me", tail.x - back, tail.y + sum * 0.5, Math.PI / 2, 20);
+  const noLag = () => {
+    const w2 = new World(false);
+    w2.host = true;
+    const o2 = place(w2, "other", 0, 0, 0, 60);
+    for (let i = 0; i < 40; i++) w2.step(1 / 40, 0, 0, false);
+    const t2 = o2.points[0];
+    place(w2, "me", t2.x - back, t2.y + sum * 0.5, Math.PI / 2, 20);
+    w2.step(1 / 40, 0, 0, false);
+    return w2.deaths.some((d) => d.snake.id === "me");
+  };
+  world.lags.set("me", 0.2);
+  world.step(1 / 40, 0, 0, false);
+  assert.equal(noLag(), false, "at zero lag the spot behind the tail is clear");
+  assert.ok(
+    world.deaths.some((d) => d.snake.id === "me"),
+    "with lag the old tail is still there",
+  );
+});

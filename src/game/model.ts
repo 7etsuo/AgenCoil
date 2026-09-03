@@ -16,7 +16,8 @@ export const BOOST_DROP_EVERY = 1 / 6;
 export const SPAWN_INVULN = 1.6;
 export const NET_INTERVAL = 1000 / 18;
 export const INTERP_DELAY = 110;
-export const MAX_NET_POINTS = 56;
+/** Body points in a full snake entry. High so a coiled body arrives faithful. */
+export const MAX_NET_POINTS = 220;
 export const MAX_BOTS = 24;
 export const CHASE_ORBS = 16;
 export const MAGNET_SPEED = 420;
@@ -96,6 +97,10 @@ export interface Snake {
   deathFx?: number;
   /** Last near-miss time per other snake id (server side, not on the wire). */
   nearMark?: Map<string, number>;
+  /** Server side: distance moved per tick, newest last, for exact rewinds. */
+  travel?: number[];
+  /** Server side: body points trimmed off the tail recently, oldest first. */
+  tailHist?: Vec[];
 }
 
 export interface Camera {

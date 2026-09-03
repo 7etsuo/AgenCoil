@@ -1017,6 +1017,8 @@ export class GameServer {
         .str(s.name)
         .u32(Math.floor(s.mass))
         .u16(s.kills)
+        .f32(s.x)
+        .f32(s.y)
         .finish();
       const bounty = this.bountyOf.get(s.id) ?? 0;
       const killerClient = d.killerId ? [...this.clients].find((c) => c.sid === d.killerId) : null;

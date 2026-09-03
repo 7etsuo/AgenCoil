@@ -30,6 +30,9 @@ export interface DeathInfo {
   name: string;
   finalLen: number;
   kills: number;
+  /** Where the server judged the death (absent from older servers). */
+  x?: number;
+  y?: number;
 }
 
 export interface StatsInfo {
@@ -380,7 +383,7 @@ export class NetSession {
         .f32(view.hh)
         // View lag in 4 ms units: how far in the past other snakes are drawn
         // (interpolation buffer) plus the round trip our inputs take.
-        .u8(Math.min(255, Math.round((this.interpDelay + this.rttMs) / 4)))
+        .u8(Math.min(255, Math.round((this.interpDelay + this.rttMs + 17) / 4)))
         .finish(),
     );
   }
@@ -513,7 +516,20 @@ export class NetSession {
           finalLen: r.u32(),
           kills: r.u16(),
         };
+        if (r.remaining >= 8) {
+          d.x = r.f32();
+          d.y = r.f32();
+        }
         const id = String(d.nid);
+        if (d.nid === this.selfNid && d.x !== undefined && d.y !== undefined) {
+          // Show the death where it happened, not a round trip further on.
+          const me = this.world.player;
+          if (me) {
+            me.x = d.x;
+            me.y = d.y;
+            this.world.recordTrail(me);
+          }
+        }
         if (d.nid === this.selfNid) {
           this.serverSelf = null;
           this.token = "";

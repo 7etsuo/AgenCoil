@@ -38,6 +38,9 @@ export const CELL = 96;
 const HIT_CONTACT = 0.95;
 /** Longest view lag a player may be compensated for, in seconds. */
 const MAX_LAG_COMP = 0.35;
+/** Ticks of travel and tail history kept for rewinds (0.5 s at 40 Hz). */
+const TRAVEL_LOG = 20;
+const TAIL_HIST = 40;
 /** Bots past this length boost freely, shedding what they cannot use. */
 const BOT_SOFT_CAP = 2000;
 /** Bots past this length retire soon after, turning into a big pile of remains. */
@@ -553,7 +556,14 @@ export class World {
 
   private advance(s: Snake, dt: number): void {
     if (s.invuln > 0) s.invuln = Math.max(0, s.invuln - dt);
+    const bx = s.x;
+    const by = s.y;
     this.moveHead(s, dt);
+    // Exact per-tick travel, so a rewind for lag compensation follows what
+    // the snake actually did, boosting or not.
+    const log = (s.travel ??= []);
+    log.push(Math.hypot(s.x - bx, s.y - by));
+    if (log.length > TRAVEL_LOG) log.shift();
     this.recordTrail(s);
 
     if (s.boosting) {
@@ -606,9 +616,15 @@ export class World {
       const d = Math.hypot(a.x - b.x, a.y - b.y);
       if (total + d >= want) {
         const t = clamp((want - total) / Math.max(d, 1e-6), 0, 1);
+        // Keep what the tail is about to lose: a rewind may need it.
+        if (i - 1 > 0) {
+          const hist = (s.tailHist ??= []);
+          for (let j = 0; j < i - 1; j++) hist.push(pts[j]!);
+          if (hist.length > TAIL_HIST) hist.splice(0, hist.length - TAIL_HIST);
+          pts.splice(0, i - 1);
+        }
         b.x = a.x + (b.x - a.x) * t;
         b.y = a.y + (b.y - a.y) * t;
-        if (i - 1 > 0) pts.splice(0, i - 1);
         break;
       }
       total += d;
@@ -915,9 +931,19 @@ export class World {
    * has travelled since. Returns the index of the last body point that was
    * already behind that head, and the rewound head position.
    */
-  private rewind(o: Snake, lag: number): { cut: number; hx: number; hy: number } {
+  private rewind(o: Snake, lag: number): { cut: number; hx: number; hy: number; d: number } {
     const pts = o.points;
-    let d = speedOf(o.mass, o.boosting) * lag;
+    // Distance actually travelled over the lag window, from the tick log;
+    // fall back to nominal speed if the log is short.
+    const ticks = Math.round(lag * 40);
+    let d = 0;
+    const log = o.travel ?? [];
+    if (log.length >= ticks) {
+      for (let i = log.length - ticks; i < log.length; i++) d += log[i]!;
+    } else {
+      d = speedOf(o.mass, o.boosting) * lag;
+    }
+    const dist = d;
     let hx = o.x;
     let hy = o.y;
     let cut = pts.length - 1;
@@ -938,7 +964,32 @@ export class World {
       hy = b.y;
       cut = i - 1;
     }
-    return { cut, hx, hy };
+    return { cut, hx, hy, d: dist };
+  }
+
+  /**
+   * The tail as it was `d` units of travel ago: the body then extended past
+   * the current tail along the recently trimmed points.
+   */
+  private tailThen(o: Snake, d: number): Vec[] {
+    const hist = o.tailHist;
+    if (!hist || !hist.length || d <= 0) return [];
+    const out: Vec[] = [];
+    let left = d;
+    let prev: Vec = o.points[0]!;
+    for (let i = hist.length - 1; i >= 0 && left > 0; i--) {
+      const q = hist[i]!;
+      const seg = Math.hypot(prev.x - q.x, prev.y - q.y);
+      if (seg >= left) {
+        const t = seg > 0 ? left / seg : 0;
+        out.push({ x: prev.x + (q.x - prev.x) * t, y: prev.y + (q.y - prev.y) * t });
+        break;
+      }
+      out.push(q);
+      left -= seg;
+      prev = q;
+    }
+    return out;
   }
 
   private resolveKills(): void {
@@ -965,7 +1016,8 @@ export class World {
         const reach = lengthOf(o.mass) + hitR + 24;
         if (dist2(s.x, s.y, o.x, o.y) > reach * reach) continue;
         // Lag compensation: the other snake as this player last saw it.
-        const rw = lag > 0 ? this.rewind(o, lag) : { cut: o.points.length - 1, hx: o.x, hy: o.y };
+        const rw =
+          lag > 0 ? this.rewind(o, lag) : { cut: o.points.length - 1, hx: o.x, hy: o.y, d: 0 };
         // Head on head: both lose.
         if (dist2(s.x, s.y, rw.hx, rw.hy) <= hitR2) {
           kills.push({ s, o });
@@ -993,6 +1045,22 @@ export class World {
         if (end < pts.length - 1) {
           const a = pts[end]!;
           if (pointSegDist2(s.x, s.y, a.x, a.y, rw.hx, rw.hy) <= hitR2) {
+            kills.push({ s, o });
+            break;
+          }
+        }
+        // And the stretch of tail that still existed then.
+        if (rw.d > 0) {
+          let prev: Vec = pts[0]!;
+          let hit = false;
+          for (const q of this.tailThen(o, rw.d)) {
+            if (pointSegDist2(s.x, s.y, prev.x, prev.y, q.x, q.y) <= hitR2) {
+              hit = true;
+              break;
+            }
+            prev = q;
+          }
+          if (hit) {
             kills.push({ s, o });
             break;
           }
