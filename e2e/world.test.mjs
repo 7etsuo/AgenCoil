@@ -283,8 +283,13 @@ test("the boss takes a hit point when a player's head touches its body, and only
   const world2 = new World(false);
   world2.host = true;
   const b2 = world2.spawnBoss({ x: 0, y: 0 });
-  b2.angle = Math.PI;
-  const p = place(world2, "p", 120, 0, Math.PI, 60);
+  // Boss heading +x with its body trailing to -x; the player comes at its
+  // face from +x so the first contact is head to head.
+  b2.angle = 0;
+  b2.wander = 0;
+  b2.points = [];
+  for (let x = -600; x <= 0; x += 20) b2.points.push({ x, y: 0 });
+  const p = place(world2, "p", 160, 0, Math.PI, 60);
   b2.x = 0;
   b2.y = 0;
   const died = stepUntil(world2, () => !p.alive, 120);

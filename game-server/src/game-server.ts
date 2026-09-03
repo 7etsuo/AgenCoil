@@ -964,7 +964,8 @@ export class GameServer {
     for (const c of this.clients) {
       const w = c.wisp;
       if (!w) continue;
-      if (now >= w.until) {
+      // Out of time, or the bank is full: the wisp ends at once either way.
+      if (now >= w.until || w.bank >= WISP_BANK_MAX) {
         this.endWisp(c);
         continue;
       }

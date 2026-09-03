@@ -4,6 +4,7 @@ import {
   START_MASS,
   fillOf,
   lengthOf,
+  WISP_BANK_MAX,
   WISP_BOOST,
   WISP_SPEED,
   lerp,
@@ -271,7 +272,15 @@ export class CoilEngine {
           }
           this.wispBank = bank;
           this.wispSecs = secsLeft;
-          if (secsLeft === 0 && this.phase === "wisp") this.endWisp();
+          if (secsLeft === 0 && this.phase === "wisp") {
+            const full = bank >= WISP_BANK_MAX;
+            this.endWisp();
+            // A full bank goes straight back in: no card, no click.
+            if (full) {
+              this.pushFeed(`wisp full: +${bank} banked, back in`);
+              this.respawn();
+            }
+          }
         },
         onProfile: (p) => {
           this.profile = p;
