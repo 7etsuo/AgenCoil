@@ -33,7 +33,16 @@ const CONTROLS_KEY = "agencoil-controls";
 const BEST_KEY = "agencoil-best";
 const TRAIL_KEY = "agencoil-trail";
 const DEATHFX_KEY = "agencoil-deathfx";
-const TURNSTILE_SITE_KEY = (import.meta.env.VITE_TURNSTILE_SITE_KEY as string | undefined)?.trim();
+const CONFIGURED_TURNSTILE_SITE_KEY = (
+  import.meta.env.VITE_TURNSTILE_SITE_KEY as string | undefined
+)?.trim();
+const PUBLIC_HOSTNAME = (import.meta.env.VITE_PUBLIC_HOSTNAME as string | undefined)?.trim();
+// Grok injects VITE_PUBLIC_HOSTNAME, but it does not carry project-defined
+// VITE_* values. The site key is intentionally public; the secret stays only
+// on agencoil-server.
+const TURNSTILE_SITE_KEY =
+  CONFIGURED_TURNSTILE_SITE_KEY ||
+  (PUBLIC_HOSTNAME === "snek.grok.me" ? "0x4AAAAAAEl7GSq_ytb3LoEo" : undefined);
 
 function readInt(key: string, max: number): number {
   try {
