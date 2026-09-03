@@ -7,6 +7,7 @@ import {
   SKINS,
   START_MASS,
   TICK,
+  lerp,
   type Camera,
   type Floater,
   type Food,
@@ -14,8 +15,6 @@ import {
   type Phase,
   type Snake,
   type Vec,
-  lerp,
-  radiusOf,
 } from "./model";
 import { World } from "./world";
 import { Renderer, desiredZoom } from "./render";
@@ -27,6 +26,7 @@ export interface HudState {
   best: number;
   rank: number;
   count: number;
+  kills: number;
   board: { name: string; mass: number; you: boolean }[];
   killNotice: string | null;
   deathReason: string | null;
@@ -42,7 +42,9 @@ export interface NetHandle {
   joined: boolean;
   broadcast: (data: unknown) => void;
   send: (data: unknown, peerId?: string) => void;
-  onMessage: (fn: (from: string, data: unknown, channel: "state" | "reliable") => void) => () => void;
+  onMessage: (
+    fn: (from: string, data: unknown, channel: "state" | "reliable") => void,
+  ) => () => void;
 }
 
 interface Snap {
@@ -80,6 +82,9 @@ type WireDeath = {
 
 type WireMsg = WireSnake | WireDeath | { t: "h"; id: string; n: string; k: number };
 
+const ZOOM_MIN = 0.55;
+const ZOOM_MAX = 1.7;
+
 export class CoilEngine {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -87,9 +92,10 @@ export class CoilEngine {
   private renderer = new Renderer();
   readonly audio = new GameAudio();
   phase: Phase = "menu";
-  private cam: Camera = { x: 0, y: 0, z: 0.48, trauma: 0 };
+  private cam: Camera = { x: 0, y: 0, z: 0.55, trauma: 0 };
   private pointer: Vec = { x: 80, y: 0 };
   private boosting = false;
+  private holdBoost = false;
   private keys = new Set<string>();
   private particles: Particle[] = [];
   private floaters: Floater[] = [];
@@ -101,6 +107,7 @@ export class CoilEngine {
   private best = 0;
   private nick = "anon";
   private skin = 0;
+  private kills = 0;
   private killNotice: string | null = null;
   private deathReason: string | null = null;
   private killerName: string | null = null;
@@ -122,11 +129,15 @@ export class CoilEngine {
   private selfId = "local";
   private killerId: string | null = null;
   private corpse: Snake | null = null;
+  private zoomMul = 1;
+  private dbgWall = 0;
+  private dbgSnake = 0;
   private onResize = () => this.resize();
   private onBlur = () => {
     this.keys.clear();
     this.boosting = false;
     this.pointerDown = false;
+    this.holdBoost = false;
   };
 
   constructor(canvas: HTMLCanvasElement) {
@@ -187,6 +198,7 @@ export class CoilEngine {
     window.removeEventListener("pointerdown", this.onPointerDown);
     window.removeEventListener("pointerup", this.onPointerUp);
     window.removeEventListener("pointercancel", this.onPointerUp);
+    window.removeEventListener("wheel", this.onWheel);
   }
 
   setNet(net: NetHandle | null): void {
@@ -198,12 +210,19 @@ export class CoilEngine {
     this.unsub = net.onMessage((from, data, channel) => this.onNet(from, data, channel));
   }
 
+  /** Hold-to-boost from an on-screen control (touch). */
+  setBoost(on: boolean): void {
+    this.holdBoost = on;
+    this.syncBoost();
+  }
+
   play(nick: string, skin: number): void {
     this.audio.unlock();
     this.nick = nick.slice(0, 16) || "anon";
     this.skin = skin % SKINS.length;
     this.phase = "play";
     this.boosting = false;
+    this.kills = 0;
     this.killNotice = null;
     this.deathReason = null;
     this.killerName = null;
@@ -248,7 +267,8 @@ export class CoilEngine {
       best: this.best,
       rank: rank || alive.length,
       count: alive.length,
-      board: alive.slice(0, 8).map((s) => ({
+      kills: this.kills,
+      board: alive.slice(0, 10).map((s) => ({
         name: s.name,
         mass: Math.floor(s.mass),
         you: s.id === this.world.playerId,
@@ -256,10 +276,14 @@ export class CoilEngine {
       killNotice: this.killNotice,
       deathReason: this.deathReason,
       killerName: this.killerName,
-      peers: this.net?.peers.length ?? 0,
+      peers: this.connectedPeers().length,
       joined: this.net?.joined ?? false,
       host: this.world.host,
     };
+  }
+
+  private connectedPeers(): { id: string }[] {
+    return (this.net?.peers ?? []).filter((p) => p.connectionState === "connected");
   }
 
   private bind(): void {
@@ -271,6 +295,7 @@ export class CoilEngine {
     window.addEventListener("pointerdown", this.onPointerDown);
     window.addEventListener("pointerup", this.onPointerUp);
     window.addEventListener("pointercancel", this.onPointerUp);
+    window.addEventListener("wheel", this.onWheel, { passive: true });
   }
 
   private onKeyDown = (e: KeyboardEvent): void => {
@@ -282,24 +307,19 @@ export class CoilEngine {
       this.respawn();
       return;
     }
-    if (e.code === "Space" || e.code === "ArrowUp") {
-      if (this.phase === "play") {
-        this.boosting = true;
-        e.preventDefault();
-      }
-    }
-    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) e.preventDefault();
+    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code))
+      e.preventDefault();
     this.keys.add(e.code);
+    this.syncBoost();
   };
   private onKeyUp = (e: KeyboardEvent): void => {
     this.keys.delete(e.code);
-    if (e.code === "Space" || e.code === "ArrowUp") {
-      if (!this.pointerDown) this.boosting = false;
-    }
+    this.syncBoost();
   };
 
   private pointerDown = false;
   private onPointerMove = (e: PointerEvent): void => {
+    if (e.pointerType === "touch" && !this.pointerDown) return;
     this.clientToAim(e.clientX, e.clientY);
   };
   private onPointerDown = (e: PointerEvent): void => {
@@ -312,13 +332,25 @@ export class CoilEngine {
     }
     if (this.phase !== "play") return;
     this.pointerDown = true;
-    this.boosting = true;
+    // A mouse click boosts; a finger only steers (the boost button boosts).
+    if (e.pointerType !== "touch") this.holdBoost = true;
     this.clientToAim(e.clientX, e.clientY);
+    this.syncBoost();
   };
-  private onPointerUp = (): void => {
+  private onPointerUp = (e: PointerEvent): void => {
+    if (e.pointerType !== "touch") this.holdBoost = false;
     this.pointerDown = false;
-    if (!this.keys.has("Space") && !this.keys.has("ArrowUp")) this.boosting = false;
+    this.syncBoost();
   };
+  private onWheel = (e: WheelEvent): void => {
+    const k = Math.exp(-e.deltaY * 0.0012);
+    this.zoomMul = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, this.zoomMul * k));
+  };
+
+  private syncBoost(): void {
+    const key = this.keys.has("Space") || this.keys.has("ArrowUp") || this.keys.has("ShiftLeft");
+    this.boosting = this.phase === "play" && (this.holdBoost || key);
+  }
 
   private clientToAim(clientX: number, clientY: number): void {
     const rect = this.canvas.getBoundingClientRect();
@@ -351,7 +383,7 @@ export class CoilEngine {
       this.killTimer -= dt;
       if (this.killTimer <= 0) this.killNotice = null;
     }
-    if (this.phase === "play" && this.boosting) {
+    if (this.phase === "play" && this.world.player?.boosting) {
       const now = performance.now();
       if (now - this.lastBoostSound > 140) {
         this.audio.boost();
@@ -366,7 +398,7 @@ export class CoilEngine {
     let dy = 0;
     if (this.keys.has("KeyA") || this.keys.has("ArrowLeft")) dx -= 1;
     if (this.keys.has("KeyD") || this.keys.has("ArrowRight")) dx += 1;
-    if (this.keys.has("KeyW") || this.keys.has("ArrowUp")) dy -= 1;
+    if (this.keys.has("KeyW")) dy -= 1;
     if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) dy += 1;
     if (!dx && !dy) return;
     const p = this.world.player;
@@ -379,20 +411,30 @@ export class CoilEngine {
     for (const e of this.world.eats) {
       if (e.id === this.world.playerId) {
         this.audio.eat(e.v);
-        this.burst(e.x, e.y, FOOD_COLORS[e.c % FOOD_COLORS.length]!, 5, 40);
-        this.floaters.push({ x: e.x, y: e.y, text: `+${e.v}`, life: 0.7, color: "#e8eaee" });
+        this.burst(e.x, e.y, FOOD_COLORS[e.c % FOOD_COLORS.length]!, e.v >= 3 ? 10 : 4, 40);
+        if (e.v >= 2) {
+          const v = Math.round(e.v);
+          this.floaters.push({ x: e.x, y: e.y, text: `+${v}`, life: 0.7, color: "#e8eaee" });
+        }
       }
     }
     for (const d of this.world.deaths) {
+      if (d.reason === "wall") this.dbgWall++;
+      else this.dbgSnake++;
       const skin = SKINS[d.snake.skin % SKINS.length]!;
       this.burst(d.snake.x, d.snake.y, skin.fill, 28, 140);
-      this.cam.trauma = Math.min(1, this.cam.trauma + (d.snake.id === this.world.playerId ? 0.7 : 0.28));
+      this.cam.trauma = Math.min(
+        1,
+        this.cam.trauma + (d.snake.id === this.world.playerId ? 0.7 : 0.28),
+      );
       if (d.snake.id === this.world.playerId) {
         this.dieLocal(d.reason, d.killerName, d.killerId);
         this.broadcastDeath(d.snake);
       } else {
         if (d.killerId === this.world.playerId) {
-          this.killNotice = `you killed ${d.snake.name}`;
+          this.kills++;
+          this.audio.kill();
+          this.killNotice = `you took down ${d.snake.name}`;
           this.killTimer = 2.4;
         }
         if (d.snake.isBot && this.net) this.broadcastDeath(d.snake);
@@ -400,30 +442,52 @@ export class CoilEngine {
     }
   }
 
-  private dieLocal(reason: "wall" | "snake", killerName: string | null, killerId: string | null): void {
+  private dieLocal(
+    reason: "wall" | "snake",
+    killerName: string | null,
+    killerId: string | null,
+  ): void {
     this.audio.death();
     const p = this.world.player;
     this.deathMass = p?.mass ?? this.deathMass;
     this.deathCam = { x: p?.x ?? this.cam.x, y: p?.y ?? this.cam.y };
     this.corpse = p ? { ...p, points: p.points.map((q) => ({ ...q })) } : null;
     this.phase = "dead";
-    this.deathReason = reason === "wall" ? "you hit the rim" : killerName ? `killed by ${killerName}` : "you crashed";
+    this.boosting = false;
+    this.holdBoost = false;
+    this.deathReason =
+      reason === "wall"
+        ? "you hit the rim"
+        : killerName
+          ? `you ran into ${killerName}`
+          : "you crashed";
     this.killerName = killerName;
     this.killerId = killerId;
     this.emitHud();
   }
 
+  /**
+   * The smallest id among this client and its *connected* peers runs the bots.
+   * Roster entries that never connected (a stale tab, a peer mid-handshake)
+   * must not silence the arena.
+   */
   private electHost(): void {
-    const ids = [this.selfId, ...(this.net?.peers.map((p) => p.id) ?? [])].sort();
-    this.world.host = ids[0] === this.selfId || !this.net;
-    if (this.world.host) {
-      const bots = this.world.snakes.filter((s) => s.isBot).length;
-      if (bots < MAX_BOTS) {
-        const used = new Set(this.world.snakes.map((s) => s.name.toLowerCase()));
-        while (this.world.snakes.filter((s) => s.isBot).length < MAX_BOTS) this.world.spawnBot(used);
+    const ids = [this.selfId, ...this.connectedPeers().map((p) => p.id)].sort();
+    const host = ids[0] === this.selfId || !this.net;
+    const was = this.world.host;
+    this.world.host = host;
+    this.world.desiredBots = host ? MAX_BOTS : 0;
+    if (!host && was) this.world.clearBots();
+    if (host && !was) {
+      // The previous host's bots vanish; a fresh set spawns here at once.
+      for (const id of Array.from(this.remoteBuf.keys())) {
+        if (id.startsWith("b-")) {
+          this.remoteBuf.delete(id);
+          this.lastRemote.delete(id);
+          this.world.removeSnake(id, false);
+        }
       }
-    } else {
-      this.world.clearBots();
+      this.world.resetLocalBots(MAX_BOTS);
     }
   }
 
@@ -431,7 +495,9 @@ export class CoilEngine {
     const now = performance.now();
     const live = new Set(this.net?.peers.map((p) => p.id) ?? []);
     for (const [id, t] of this.lastRemote) {
-      if (now - t > 2500 || !live.has(id)) {
+      const stale = now - t > 2500;
+      const gone = !id.startsWith("b-") && !live.has(id);
+      if (stale || gone) {
         this.remoteBuf.delete(id);
         this.lastRemote.delete(id);
         if (id !== this.selfId) this.world.removeSnake(id, false);
@@ -446,7 +512,7 @@ export class CoilEngine {
     this.lastNet = now;
     const p = this.world.player;
     if (this.phase === "play" && p) this.net.broadcast(packSnake("s", p));
-    if (this.world.host) {
+    if (this.world.host && this.connectedPeers().length) {
       for (const s of this.world.snakes) {
         if (s.isBot && s.alive) this.net.broadcast(packSnake("b", s));
       }
@@ -462,6 +528,8 @@ export class CoilEngine {
 
   private pushSnap(msg: WireSnake): void {
     if (msg.id === this.selfId) return;
+    // Only the elected host's bots are real; ignore bot echoes while hosting.
+    if (msg.t === "b" && this.world.host) return;
     const pts = unpackPoints(msg.p);
     const snap: Snap = {
       t: performance.now(),
@@ -485,7 +553,8 @@ export class CoilEngine {
     if (msg.id === this.selfId) return;
     this.world.removeSnake(msg.id, false);
     this.remoteBuf.delete(msg.id);
-    for (const p of msg.pellets) this.world.addFood(p);
+    this.lastRemote.delete(msg.id);
+    for (const p of msg.pellets) this.world.addFood({ ...p, k: p.k ?? 2 });
     this.cam.trauma = Math.min(1, this.cam.trauma + 0.25);
   }
 
@@ -497,7 +566,7 @@ export class CoilEngine {
       id: s.id,
       n: s.name,
       k: s.skin,
-      pellets: pellets.slice(0, 72),
+      pellets: pellets.slice(0, 90),
     } satisfies WireDeath);
   }
 
@@ -529,7 +598,6 @@ export class CoilEngine {
         dropped: 0,
       };
       this.world.upsertRemote(snake);
-      if (this.phase === "play") this.world.cosmeticEatNear(snap.x, snap.y, radiusOf(snap.mass) + 8);
     }
   }
 
@@ -555,7 +623,7 @@ export class CoilEngine {
       }
     }
     const mass = this.world.player?.mass ?? this.deathMass;
-    const z = desiredZoom(mass, this.phase);
+    const z = desiredZoom(mass, this.phase) * (this.phase === "play" ? this.zoomMul : 1);
     this.cam.z = lerp(this.cam.z, z, 1 - Math.pow(0.02, dt));
   }
 
@@ -567,8 +635,7 @@ export class CoilEngine {
       this.canvas.height,
       this.dpr,
       this.cam,
-      this.world.foods,
-      this.world.snakes,
+      this.world,
       this.particles,
       this.floaters,
       this.world.playerId,
@@ -605,10 +672,15 @@ export class CoilEngine {
     (window as unknown as { __coil?: unknown }).__coil = {
       phase: this.phase,
       score: p ? Math.floor(p.mass) : 0,
+      playerPts: p?.points.length ?? 0,
       snakes: this.world.snakes.length,
       foods: this.world.foods.length,
       host: this.world.host,
       pts,
+      kills: this.kills,
+      deathsWall: this.dbgWall,
+      deathsSnake: this.dbgSnake,
+      peers: this.net?.peers.map((p) => `${p.id}:${p.connectionState ?? "?"}`) ?? [],
       fps: Math.round(this.fps),
     };
   }
@@ -640,13 +712,14 @@ function unpackPoints(p: number[]): Vec[] {
   return out;
 }
 
+/** Keep the first and last points (tail and head) and spread the rest. */
 function subsample(pts: Vec[], max: number): Vec[] {
   if (pts.length <= max) return pts;
   const out: Vec[] = [];
   const n = pts.length - 1;
   for (let i = 0; i < max; i++) {
     const t = (i / (max - 1)) * n;
-    const i0 = Math.min(n, t | 0);
+    const i0 = Math.min(n, Math.round(t));
     out.push(pts[i0]!);
   }
   return out;

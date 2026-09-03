@@ -7,7 +7,9 @@ export class GameAudio {
       if (this.ctx.state === "suspended") void this.ctx.resume();
       return;
     }
-    const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const AC =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     this.ctx = new AC();
   }
 
@@ -26,6 +28,11 @@ export class GameAudio {
 
   death(): void {
     this.blip(140, 0.18, 0.12, "sine");
+  }
+
+  kill(): void {
+    this.blip(660, 0.09, 0.09, "triangle");
+    setTimeout(() => this.blip(880, 0.12, 0.09, "triangle"), 70);
   }
 
   private blip(freq: number, dur: number, gain: number, type: OscillatorType): void {

@@ -1,17 +1,21 @@
 import {
   ARENA_RADIUS,
   BASE_SPEED,
-  BOOST_DRAIN,
   BOOST_DROP_EVERY,
   BOOST_SPEED,
+  BOT_RESPAWN_DELAY,
+  CHASE_COLOR,
+  CHASE_ORBS,
   FOOD_COLORS,
   FOOD_TARGET,
+  MAGNET_SPEED,
   MIN_MASS,
   SPAWN_INVULN,
   START_MASS,
   type Food,
   type Snake,
   type Vec,
+  boostDrainOf,
   clamp,
   dist2,
   lengthOf,
@@ -27,6 +31,10 @@ import {
 } from "./model";
 
 const CELL = 96;
+const GRID_OFF = 256;
+const GRID_SPAN = 512;
+const CHASE_SPEED = 215;
+const CHASE_SENSE = 320;
 
 export interface EatEvent {
   x: number;
@@ -44,15 +52,29 @@ export interface DeathEvent {
   pellets: Food[];
 }
 
+function cellKey(x: number, y: number): number {
+  const gx = Math.floor(x / CELL) + GRID_OFF;
+  const gy = Math.floor(y / CELL) + GRID_OFF;
+  return gx * GRID_SPAN + gy;
+}
+
 export class World {
   snakes: Snake[] = [];
   foods: Food[] = [];
   playerId: string | null = null;
   host = true;
+  /** How many bots this world should keep alive (0 when not host). */
+  desiredBots = 0;
   eats: EatEvent[] = [];
   deaths: DeathEvent[] = [];
-  private grid = new Map<string, number[]>();
-  private foodCursor = 0;
+  private grid = new Map<number, Food[]>();
+  private foodIndex = new Map<Food, number>();
+  private chasers: Food[] = [];
+  private botTimer = 0;
+
+  constructor() {
+    this.fillFood(FOOD_TARGET);
+  }
 
   get player(): Snake | undefined {
     return this.snakes.find((s) => s.id === this.playerId);
@@ -62,6 +84,8 @@ export class World {
     this.snakes = this.snakes.filter((s) => !s.isBot);
     const used = new Set(this.snakes.map((s) => s.name.toLowerCase()));
     for (let i = 0; i < n; i++) this.spawnBot(used);
+    this.desiredBots = n;
+    this.botTimer = 0;
   }
 
   clearBots(): void {
@@ -79,9 +103,16 @@ export class World {
   spawnBot(used: Set<string>): Snake {
     const name = pickBotName(used);
     used.add(name.toLowerCase());
-    const s = this.makeSnake(`b-${Math.random().toString(36).slice(2, 9)}`, name, (Math.random() * 16) | 0, true);
-    s.mass = START_MASS + Math.random() * 36;
-    if (Math.random() < 0.22) s.mass += 70 + Math.random() * 140;
+    const s = this.makeSnake(
+      `b-${Math.random().toString(36).slice(2, 9)}`,
+      name,
+      (Math.random() * 16) | 0,
+      true,
+    );
+    const roll = Math.random();
+    s.mass = START_MASS + Math.random() * 40;
+    if (roll < 0.35) s.mass += 60 + Math.random() * 160;
+    if (roll < 0.1) s.mass += 300 + Math.random() * 700;
     s.points = [];
     this.ensureTrail(s);
     this.snakes.push(s);
@@ -105,7 +136,7 @@ export class World {
       isBot,
       invuln: SPAWN_INVULN,
       wander: angle,
-      think: Math.random() * 0.4,
+      think: Math.random() * 0.3,
       avoid: 0,
       avoidDir: 1,
       boostLeft: 0,
@@ -129,44 +160,110 @@ export class World {
   }
 
   addFood(f: Food): void {
+    this.foodIndex.set(f, this.foods.length);
     this.foods.push(f);
-    this.indexFood(this.foods.length - 1);
+    const key = cellKey(f.x, f.y);
+    const bucket = this.grid.get(key);
+    if (bucket) bucket.push(f);
+    else this.grid.set(key, [f]);
+    if (f.k === 3) this.chasers.push(f);
   }
 
+  removeFood(f: Food): void {
+    const idx = this.foodIndex.get(f);
+    if (idx === undefined) return;
+    const last = this.foods.length - 1;
+    const moved = this.foods[last]!;
+    this.foods[idx] = moved;
+    this.foodIndex.set(moved, idx);
+    this.foods.pop();
+    this.foodIndex.delete(f);
+    this.unbucket(f);
+    if (f.k === 3) {
+      const ci = this.chasers.indexOf(f);
+      if (ci >= 0) this.chasers.splice(ci, 1);
+    }
+  }
+
+  private unbucket(f: Food): void {
+    const key = cellKey(f.x, f.y);
+    const bucket = this.grid.get(key);
+    if (!bucket) return;
+    const i = bucket.indexOf(f);
+    if (i >= 0) {
+      bucket[i] = bucket[bucket.length - 1]!;
+      bucket.pop();
+    }
+    if (!bucket.length) this.grid.delete(key);
+  }
+
+  private moveFood(f: Food, x: number, y: number): void {
+    const before = cellKey(f.x, f.y);
+    const after = cellKey(x, y);
+    if (before === after) {
+      f.x = x;
+      f.y = y;
+      return;
+    }
+    this.unbucket(f);
+    f.x = x;
+    f.y = y;
+    const bucket = this.grid.get(after);
+    if (bucket) bucket.push(f);
+    else this.grid.set(after, [f]);
+  }
+
+  /** Visit every orb whose cell overlaps the rectangle. */
+  forEachFoodIn(x0: number, y0: number, x1: number, y1: number, fn: (f: Food) => void): void {
+    const gx0 = Math.floor(x0 / CELL);
+    const gx1 = Math.floor(x1 / CELL);
+    const gy0 = Math.floor(y0 / CELL);
+    const gy1 = Math.floor(y1 / CELL);
+    for (let gx = gx0; gx <= gx1; gx++) {
+      for (let gy = gy0; gy <= gy1; gy++) {
+        const bucket = this.grid.get((gx + GRID_OFF) * GRID_SPAN + (gy + GRID_OFF));
+        if (!bucket) continue;
+        for (const f of bucket) fn(f);
+      }
+    }
+  }
+
+  queryFood(x: number, y: number, r: number): Food[] {
+    const out: Food[] = [];
+    this.forEachFoodIn(x - r, y - r, x + r, y + r, (f) => out.push(f));
+    return out;
+  }
+
+  /** The glowing remains a snake leaves behind: worth most of its mass. */
   pelletsFrom(s: Snake): Food[] {
     const out: Food[] = [];
-    const n = Math.min(90, 8 + Math.floor(s.mass * 0.42));
+    const n = Math.round(clamp(8 + s.mass * 0.3, 8, 150));
+    const each = Math.max(1, (s.mass * 0.72) / n);
     const pts = s.points.length ? s.points : [{ x: s.x, y: s.y }];
     for (let i = 0; i < n; i++) {
       const p = pts[((i / n) * (pts.length - 1)) | 0]!;
+      const v = Math.round(each * randRange(0.7, 1.3) * 10) / 10;
       out.push({
-        x: p.x + randRange(-6, 6),
-        y: p.y + randRange(-6, 6),
-        v: 1 + ((Math.random() * 2) | 0),
-        c: s.skin % FOOD_COLORS.length,
-        r: 7 + Math.random() * 7,
+        x: p.x + randRange(-9, 9),
+        y: p.y + randRange(-9, 9),
+        v,
+        c: this.skinFoodColor(s.skin),
+        r: clamp(6 + Math.sqrt(v) * 2.4, 6, 17),
+        k: 2,
       });
     }
     return out;
   }
 
-  cosmeticEatNear(x: number, y: number, reach: number): void {
-    const hit = this.queryFood(x, y, reach);
-    hit.sort((a, b) => b - a);
-    const seen = new Set<number>();
-    for (const idx of hit) {
-      if (seen.has(idx)) continue;
-      seen.add(idx);
-      const f = this.foods[idx];
-      if (!f) continue;
-      if (dist2(x, y, f.x, f.y) <= (reach + f.r) * (reach + f.r)) this.removeFoodAt(idx);
-    }
+  private skinFoodColor(skin: number): number {
+    return skin % FOOD_COLORS.length;
   }
 
   step(dt: number, aimX: number, aimY: number, wantBoost: boolean): void {
     this.deaths = [];
     this.eats = [];
     this.maintainFood();
+    this.maintainBots(dt);
 
     for (const s of this.snakes) {
       if (!s.alive) continue;
@@ -180,44 +277,62 @@ export class World {
       }
     }
 
+    this.magnet(dt);
+    this.moveChasers(dt);
     this.resolveEats();
     this.resolveKills();
     this.cullDead();
   }
 
   private findSpawn(): Vec {
-    for (let n = 0; n < 18; n++) {
-      const p = randomInDisk(ARENA_RADIUS * 0.72);
+    for (let n = 0; n < 24; n++) {
+      const p = randomInDisk(ARENA_RADIUS * 0.8);
       let ok = true;
       for (const s of this.snakes) {
         if (!s.alive) continue;
-        if (dist2(p.x, p.y, s.x, s.y) < 220 * 220) {
+        const keep = 260 + radiusOf(s.mass) * 4;
+        if (dist2(p.x, p.y, s.x, s.y) < keep * keep) {
           ok = false;
           break;
         }
+        const stride = Math.max(1, (s.points.length / 20) | 0);
+        for (let i = 0; i < s.points.length; i += stride) {
+          const q = s.points[i]!;
+          if (dist2(p.x, p.y, q.x, q.y) < 180 * 180) {
+            ok = false;
+            break;
+          }
+        }
+        if (!ok) break;
       }
       if (ok) return p;
     }
     return randomInDisk(ARENA_RADIUS * 0.5);
   }
 
+  /** Lay a straight body behind the head. The last point is the head itself. */
   private ensureTrail(s: Snake): void {
     if (s.points.length) return;
     const sp = spacingOf(s.mass);
     const n = Math.max(8, Math.round(lengthOf(s.mass) / sp));
-    for (let i = n - 1; i >= 0; i--) {
+    for (let i = n; i >= 1; i--) {
       s.points.push({
-        x: s.x - Math.cos(s.angle) * sp * (n - i),
-        y: s.y - Math.sin(s.angle) * sp * (n - i),
+        x: s.x - Math.cos(s.angle) * sp * i,
+        y: s.y - Math.sin(s.angle) * sp * i,
       });
     }
+    s.points.push({ x: s.x, y: s.y });
   }
 
   private steerToward(s: Snake, tx: number, ty: number, dt: number): void {
     const desired = Math.atan2(ty - s.y, tx - s.x);
+    this.steerHeading(s, desired, dt);
+  }
+
+  private steerHeading(s: Snake, desired: number, dt: number): void {
     const maxTurn = turnRateOf(s.mass) * dt;
     const delta = wrapAngle(desired - s.angle);
-    s.angle += clamp(delta, -maxTurn, maxTurn);
+    s.angle = wrapAngle(s.angle + clamp(delta, -maxTurn, maxTurn));
   }
 
   private advance(s: Snake, dt: number): void {
@@ -226,35 +341,42 @@ export class World {
     s.x += Math.cos(s.angle) * speed * dt;
     s.y += Math.sin(s.angle) * speed * dt;
 
+    // points[last] always sits on the head; a new point is committed once the
+    // head has travelled one spacing away from the previous committed point.
     const pts = s.points;
-    const last = pts[pts.length - 1];
-    if (!last) {
+    const head = pts[pts.length - 1];
+    const anchor = pts[pts.length - 2];
+    if (!head) {
+      pts.push({ x: s.x, y: s.y });
+    } else if (!anchor) {
       pts.push({ x: s.x, y: s.y });
     } else {
-      const dx = s.x - last.x;
-      const dy = s.y - last.y;
       const sp = spacingOf(s.mass);
-      if (dx * dx + dy * dy >= sp * sp) pts.push({ x: s.x, y: s.y });
-      else {
-        last.x = s.x;
-        last.y = s.y;
+      if (dist2(s.x, s.y, anchor.x, anchor.y) >= sp * sp) {
+        pts.push({ x: s.x, y: s.y });
+      } else {
+        head.x = s.x;
+        head.y = s.y;
       }
     }
     this.trimBody(s);
 
     if (s.boosting) {
-      s.mass -= BOOST_DRAIN * dt;
+      const drain = boostDrainOf(s.mass) * dt;
+      s.mass -= drain;
       s.dropped += dt;
       if (s.dropped >= BOOST_DROP_EVERY) {
         s.dropped = 0;
         const tail = s.points[0];
         if (tail) {
+          const v = Math.round(boostDrainOf(s.mass) * BOOST_DROP_EVERY * 0.85 * 10) / 10;
           this.addFood({
-            x: tail.x + randRange(-3, 3),
-            y: tail.y + randRange(-3, 3),
-            v: 1,
-            c: s.skin % FOOD_COLORS.length,
-            r: 4.2 + Math.random() * 1.8,
+            x: tail.x + randRange(-4, 4),
+            y: tail.y + randRange(-4, 4),
+            v: Math.max(0.3, v),
+            c: this.skinFoodColor(s.skin),
+            r: 4 + Math.random() * 1.6,
+            k: 1,
           });
         }
       }
@@ -265,7 +387,7 @@ export class World {
       }
     }
 
-    const rr = ARENA_RADIUS - radiusOf(s.mass) * 0.6;
+    const rr = ARENA_RADIUS - radiusOf(s.mass) * 0.5;
     if (s.x * s.x + s.y * s.y > rr * rr) {
       if (s.invuln > 0) {
         const d = Math.hypot(s.x, s.y) || 1;
@@ -300,113 +422,227 @@ export class World {
     if (pts.length > cap) pts.splice(0, pts.length - cap);
   }
 
+  /**
+   * Free space in front of a point: distance to the nearest foreign body
+   * (minus that body's radius) or to the rim, whichever is closer.
+   */
+  private clearance(self: Snake, px: number, py: number, cap: number): number {
+    let best = Math.min(cap, ARENA_RADIUS - Math.hypot(px, py) - radiusOf(self.mass));
+    for (const o of this.snakes) {
+      if (o === self || !o.alive) continue;
+      const orad = radiusOf(o.mass);
+      const reach = cap + lengthOf(o.mass) + orad;
+      if (dist2(px, py, o.x, o.y) > reach * reach) continue;
+      const pts = o.points;
+      const stride = Math.max(1, Math.ceil(pts.length / 48));
+      for (let i = 0; i < pts.length; i += stride) {
+        const q = pts[i]!;
+        const d = Math.sqrt(dist2(px, py, q.x, q.y)) - orad;
+        if (d < best) best = d;
+      }
+      const dh = Math.sqrt(dist2(px, py, o.x, o.y)) - orad;
+      if (dh < best) best = dh;
+    }
+    return best;
+  }
+
   private thinkBot(s: Snake, dt: number): void {
     s.think -= dt;
     s.avoid -= dt;
     s.boostLeft -= dt;
 
-    const wall = Math.hypot(s.x, s.y);
-    const danger = ARENA_RADIUS * 0.82;
-    if (wall > danger) {
-      this.steerToward(s, 0, 0, dt);
-      s.boosting = false;
-      return;
-    }
-
-    const look = (s.boosting ? BOOST_SPEED : BASE_SPEED) * 0.4 + radiusOf(s.mass) * 3;
-    const fx = s.x + Math.cos(s.angle) * look;
-    const fy = s.y + Math.sin(s.angle) * look;
-    const lookR = look * 0.45;
-    let blocked = false;
-    for (const o of this.snakes) {
-      if (o.id === s.id || !o.alive) continue;
-      const orad = radiusOf(o.mass);
-      const maxd = look + lengthOf(o.mass) + orad;
-      if (dist2(s.x, s.y, o.x, o.y) > maxd * maxd) continue;
-      const hit = (lookR + orad) * (lookR + orad);
-      const stride = Math.max(1, (o.points.length / 24) | 0);
-      for (let i = 0; i < o.points.length; i += stride) {
-        const p = o.points[i]!;
-        if (dist2(fx, fy, p.x, p.y) < hit) {
-          blocked = true;
-          break;
-        }
-      }
-      if (blocked) break;
-    }
-    if (blocked) {
-      if (s.avoid <= 0) s.avoidDir = Math.random() < 0.5 ? -1 : 1;
-      s.avoid = 0.35;
-      s.angle += s.avoidDir * turnRateOf(s.mass) * dt * 1.4;
-      s.boosting = false;
-      return;
-    }
-
     if (s.think <= 0) {
-      s.think = 0.18 + Math.random() * 0.25;
-      let best: Food | null = null;
-      let bestScore = Infinity;
-      const nearbyFood = this.queryFood(s.x, s.y, 420);
-      for (const idx of nearbyFood) {
-        const f = this.foods[idx];
-        if (!f) continue;
-        const d = dist2(s.x, s.y, f.x, f.y);
-        const score = d / (f.v + 0.5);
-        if (score < bestScore) {
-          bestScore = score;
-          best = f;
-        }
-      }
-      if (best) s.wander = Math.atan2(best.y - s.y, best.x - s.x);
-      else s.wander += randRange(-0.7, 0.7);
-
-      let hunt: Snake | null = null;
-      let huntD = 380 * 380;
-      for (const o of this.snakes) {
-        if (o.id === s.id || !o.alive) continue;
-        if (o.mass > s.mass * 0.9) continue;
-        const d = dist2(s.x, s.y, o.x, o.y);
-        if (d < huntD) {
-          huntD = d;
-          hunt = o;
-        }
-      }
-      if (hunt && s.mass > 16) {
-        const lead = 80 + radiusOf(hunt.mass);
-        s.wander = Math.atan2(
-          hunt.y + Math.sin(hunt.angle) * lead - s.y,
-          hunt.x + Math.cos(hunt.angle) * lead - s.x,
-        );
-        s.boostLeft = 0.4 + Math.random() * 0.5;
-      }
+      s.think = 0.2 + Math.random() * 0.2;
+      this.chooseGoal(s);
+    }
+    if (s.avoid <= 0) {
+      s.avoid = 0.08;
+      this.pickHeading(s);
     }
 
-    this.steerToward(s, s.x + Math.cos(s.wander) * 80, s.y + Math.sin(s.wander) * 80, dt);
-    s.boosting = s.boostLeft > 0 && s.mass > MIN_MASS + 4;
+    this.steerHeading(s, s.wander, dt);
+    s.boosting = s.boostLeft > 0 && s.mass > MIN_MASS + 6;
+  }
+
+  /** Long-horizon intent: flee, hunt, eat, or drift. Stored in `wander`. */
+  private chooseGoal(s: Snake): void {
+    const r = radiusOf(s.mass);
+    const far = Math.hypot(s.x, s.y);
+    if (far > ARENA_RADIUS * 0.86) {
+      s.wander = Math.atan2(-s.y, -s.x) + randRange(-0.5, 0.5);
+      s.boostLeft = 0;
+      return;
+    }
+
+    // Flee a bigger head that is close and pointed at us.
+    let threat: Snake | null = null;
+    let threatD = (300 + r * 4) ** 2;
+    for (const o of this.snakes) {
+      if (o === s || !o.alive || o.mass < s.mass * 1.15) continue;
+      const d = dist2(s.x, s.y, o.x, o.y);
+      if (d > threatD) continue;
+      const toward = Math.abs(wrapAngle(Math.atan2(s.y - o.y, s.x - o.x) - o.angle));
+      if (toward < 1.1) {
+        threatD = d;
+        threat = o;
+      }
+    }
+    if (threat) {
+      s.wander = Math.atan2(s.y - threat.y, s.x - threat.x) + randRange(-0.4, 0.4);
+      if (Math.random() < 0.6) s.boostLeft = 0.35 + Math.random() * 0.4;
+      return;
+    }
+
+    // Hunt: cut across the path of a smaller snake that is ahead of us.
+    let prey: Snake | null = null;
+    let preyD = (360 + r * 3) ** 2;
+    for (const o of this.snakes) {
+      if (o === s || !o.alive || o.mass > s.mass * 0.8 || o.invuln > 0) continue;
+      const d = dist2(s.x, s.y, o.x, o.y);
+      if (d > preyD) continue;
+      const ahead = Math.abs(wrapAngle(Math.atan2(o.y - s.y, o.x - s.x) - s.angle));
+      if (ahead < 1.6) {
+        preyD = d;
+        prey = o;
+      }
+    }
+    if (prey && s.mass > 18) {
+      const lead = 70 + radiusOf(prey.mass) * 2 + (prey.boosting ? BOOST_SPEED : BASE_SPEED) * 0.45;
+      s.wander = Math.atan2(
+        prey.y + Math.sin(prey.angle) * lead - s.y,
+        prey.x + Math.cos(prey.angle) * lead - s.x,
+      );
+      if (Math.sqrt(preyD) < 280 && Math.random() < 0.55) s.boostLeft = 0.3 + Math.random() * 0.5;
+      return;
+    }
+
+    // Eat: nearest worthwhile orb, clusters and remains preferred.
+    let best: Food | null = null;
+    let bestScore = 0;
+    const nearby = this.queryFood(s.x, s.y, 520);
+    for (const f of nearby) {
+      const d = Math.sqrt(dist2(s.x, s.y, f.x, f.y));
+      const ahead = Math.abs(wrapAngle(Math.atan2(f.y - s.y, f.x - s.x) - s.angle));
+      const score = (f.v + 0.4) / (d + 60) / (1 + ahead * 0.4);
+      if (score > bestScore) {
+        bestScore = score;
+        best = f;
+      }
+    }
+    if (best) {
+      s.wander = Math.atan2(best.y - s.y, best.x - s.x);
+      if (best.k === 3 && Math.random() < 0.4) s.boostLeft = 0.4;
+      return;
+    }
+    s.wander = wrapAngle(s.angle + randRange(-0.9, 0.9));
+  }
+
+  /** Short-horizon safety: bend the goal heading toward open space. */
+  private pickHeading(s: Snake): void {
+    const r = radiusOf(s.mass);
+    const speed = s.boosting ? BOOST_SPEED : BASE_SPEED;
+    const look = speed * 0.55 + r * 3.5;
+    const safe = r * 2.6 + 26;
+    const cap = look + safe;
+    const goal = s.wander;
+    const offsets = [0, -0.5, 0.5, -1.0, 1.0, -1.6, 1.6, -2.3, 2.3];
+    let bestAngle = goal;
+    let bestScore = -Infinity;
+    let goalClear = -Infinity;
+    for (const off of offsets) {
+      const a = goal + off;
+      const dx = Math.cos(a);
+      const dy = Math.sin(a);
+      const c1 = this.clearance(s, s.x + dx * look, s.y + dy * look, cap);
+      const c2 = this.clearance(s, s.x + dx * look * 0.5, s.y + dy * look * 0.5, cap);
+      const c = Math.min(c1, c2);
+      if (off === 0) goalClear = c;
+      const turn = Math.abs(wrapAngle(a - s.angle));
+      const score = Math.min(c, safe * 2) - Math.abs(off) * 6 - turn * 4;
+      if (score > bestScore) {
+        bestScore = score;
+        bestAngle = a;
+      }
+    }
+    if (goalClear >= safe) {
+      s.wander = goal;
+      return;
+    }
+    s.wander = wrapAngle(bestAngle);
+    if (goalClear < r * 1.4) {
+      // Nothing good ahead: brake off boosting so the turn is tighter.
+      s.boostLeft = 0;
+    }
+  }
+
+  private magnet(dt: number): void {
+    const step = MAGNET_SPEED * dt;
+    for (const s of this.snakes) {
+      if (!s.alive) continue;
+      const r = radiusOf(s.mass);
+      const range = r * 2.3 + 18;
+      const range2 = range * range;
+      const nearby = this.queryFood(s.x, s.y, range);
+      for (const f of nearby) {
+        if (f.k === 3) continue;
+        const d2 = dist2(f.x, f.y, s.x, s.y);
+        if (d2 > range2) continue;
+        const d = Math.sqrt(d2) || 1;
+        const pull = Math.min(step * (1.2 - (d / range) * 0.6), d);
+        this.moveFood(f, f.x + ((s.x - f.x) / d) * pull, f.y + ((s.y - f.y) / d) * pull);
+      }
+    }
+  }
+
+  private moveChasers(dt: number): void {
+    const sense2 = CHASE_SENSE * CHASE_SENSE;
+    for (const f of this.chasers) {
+      let nearest: Snake | null = null;
+      let nd = sense2;
+      for (const s of this.snakes) {
+        if (!s.alive) continue;
+        const d = dist2(f.x, f.y, s.x, s.y);
+        if (d < nd) {
+          nd = d;
+          nearest = s;
+        }
+      }
+      let nx = f.x;
+      let ny = f.y;
+      if (nearest) {
+        const d = Math.sqrt(nd) || 1;
+        const away =
+          Math.atan2(f.y - nearest.y, f.x - nearest.x) + Math.sin(f.x * 0.01 + f.y * 0.013) * 0.6;
+        const k = clamp(1.4 - d / CHASE_SENSE, 0.4, 1.2);
+        nx += Math.cos(away) * CHASE_SPEED * k * dt;
+        ny += Math.sin(away) * CHASE_SPEED * k * dt;
+      } else {
+        nx += Math.cos(f.x * 0.003 + f.y * 0.002) * 30 * dt;
+        ny += Math.sin(f.y * 0.003 - f.x * 0.002) * 30 * dt;
+      }
+      const lim = ARENA_RADIUS * 0.92;
+      const rr = Math.hypot(nx, ny);
+      if (rr > lim) {
+        nx = (nx / rr) * lim;
+        ny = (ny / rr) * lim;
+      }
+      this.moveFood(f, nx, ny);
+    }
   }
 
   private resolveEats(): void {
     for (const s of this.snakes) {
       if (!s.alive) continue;
-      if (!(s.id === this.playerId || (s.isBot && this.host))) continue;
-      const reach = radiusOf(s.mass) + 10;
-      const nearby = this.queryFood(s.x, s.y, reach + 16);
-      const hit: number[] = [];
-      for (const idx of nearby) {
-        const f = this.foods[idx];
-        if (!f) continue;
-        if (dist2(s.x, s.y, f.x, f.y) <= (reach + f.r) * (reach + f.r)) hit.push(idx);
-      }
-      hit.sort((a, b) => b - a);
-      const seen = new Set<number>();
-      for (const idx of hit) {
-        if (seen.has(idx)) continue;
-        seen.add(idx);
-        const f = this.foods[idx];
-        if (!f) continue;
-        s.mass += f.v;
-        this.eats.push({ x: f.x, y: f.y, v: f.v, c: f.c, id: s.id });
-        this.removeFoodAt(idx);
+      const gains = s.id === this.playerId || (s.isBot && this.host);
+      const reach = radiusOf(s.mass) + 3;
+      const nearby = this.queryFood(s.x, s.y, reach + 18);
+      for (const f of nearby) {
+        if (dist2(s.x, s.y, f.x, f.y) > (reach + f.r * 0.6) ** 2) continue;
+        if (gains) {
+          s.mass += f.v;
+          this.eats.push({ x: f.x, y: f.y, v: f.v, c: f.c, id: s.id });
+        }
+        this.removeFood(f);
       }
     }
   }
@@ -415,31 +651,26 @@ export class World {
     for (const s of this.snakes) {
       if (!s.alive || s.invuln > 0) continue;
       if (!(s.id === this.playerId || (s.isBot && this.host))) continue;
-      const hr = radiusOf(s.mass) * 0.7;
+      const hr = radiusOf(s.mass) * 0.8;
       for (const o of this.snakes) {
         if (o.id === s.id || !o.alive) continue;
         const orad = radiusOf(o.mass);
-        const hitR = hr + orad * 0.9;
+        const hitR = hr + orad * 0.88;
         const hitR2 = hitR * hitR;
         const reach = lengthOf(o.mass) + hitR + 24;
         if (dist2(s.x, s.y, o.x, o.y) > reach * reach) continue;
+        // Head on head: both lose.
+        if (dist2(s.x, s.y, o.x, o.y) <= hitR2) {
+          this.kill(s, "snake", o.id, o.name);
+          break;
+        }
         const pts = o.points;
         if (pts.length < 2) continue;
-        let end = 1;
-        let acc = 0;
-        const skipDist = (hr + orad) * 1.2;
-        for (let i = pts.length - 1; i > 1; i--) {
-          acc += Math.hypot(pts[i]!.x - pts[i - 1]!.x, pts[i]!.y - pts[i - 1]!.y);
-          if (acc >= skipDist) {
-            end = i;
-            break;
-          }
-        }
         const minX = s.x - hitR;
         const maxX = s.x + hitR;
         const minY = s.y - hitR;
         const maxY = s.y + hitR;
-        for (let i = 1; i < end; i++) {
+        for (let i = 1; i < pts.length; i++) {
           const a = pts[i - 1]!;
           const b = pts[i]!;
           if ((a.x < minX && b.x < minX) || (a.x > maxX && b.x > maxX)) continue;
@@ -454,11 +685,17 @@ export class World {
     }
   }
 
-  private kill(s: Snake, reason: "wall" | "snake", killerId: string | null, killerName: string | null): void {
+  private kill(
+    s: Snake,
+    reason: "wall" | "snake",
+    killerId: string | null,
+    killerName: string | null,
+  ): void {
     if (!s.alive) return;
     s.alive = false;
     s.boosting = false;
-    const pellets = this.pelletsFrom(s);
+    // Like slither.io, the rim eats you whole: no remains.
+    const pellets = reason === "wall" ? [] : this.pelletsFrom(s);
     for (const p of pellets) this.addFood(p);
     this.deaths.push({ snake: s, reason, killerId, killerName, pellets });
   }
@@ -467,69 +704,69 @@ export class World {
     this.snakes = this.snakes.filter((s) => s.alive);
   }
 
-  private makeFood(at?: Vec, v = 0, c = -1): Food {
-    const p = at ?? randomInDisk(ARENA_RADIUS * 0.93);
+  private maintainBots(dt: number): void {
+    if (!this.host) return;
+    const bots = this.snakes.reduce((n, s) => n + (s.isBot && s.alive ? 1 : 0), 0);
+    if (bots >= this.desiredBots) {
+      this.botTimer = BOT_RESPAWN_DELAY;
+      return;
+    }
+    this.botTimer -= dt;
+    if (this.botTimer > 0) return;
+    this.botTimer = BOT_RESPAWN_DELAY * randRange(0.6, 1.4);
+    const used = new Set(this.snakes.map((s) => s.name.toLowerCase()));
+    this.spawnBot(used);
+  }
+
+  private makeFood(): Food {
+    // A share of orbs spawn beside an existing natural orb, which builds the
+    // loose clusters slither.io has instead of a uniform sprinkle.
+    let at: Vec | null = null;
+    if (this.foods.length > 50 && Math.random() < 0.45) {
+      const near = this.foods[(Math.random() * this.foods.length) | 0]!;
+      if (near.k === 0) {
+        const p = { x: near.x + randRange(-70, 70), y: near.y + randRange(-70, 70) };
+        if (p.x * p.x + p.y * p.y < (ARENA_RADIUS * 0.96) ** 2) at = p;
+      }
+    }
+    const p = at ?? randomInDisk(ARENA_RADIUS * 0.96);
     const roll = Math.random();
-    const prize = !v && roll < 0.035;
-    const mid = !v && !prize && roll < 0.2;
+    const prize = roll < 0.03;
+    const mid = !prize && roll < 0.2;
+    const v = prize ? 3 + ((Math.random() * 3) | 0) : mid ? 2 : 1;
     return {
       x: p.x,
       y: p.y,
-      v: v || (prize ? 4 + ((Math.random() * 3) | 0) : mid ? 2 : 1),
-      c: c >= 0 ? c : (Math.random() * FOOD_COLORS.length) | 0,
-      r: prize ? 8 + Math.random() * 5 : mid ? 4.6 + Math.random() * 2.2 : 2.5 + Math.random() * 1.6,
+      v,
+      c: (Math.random() * FOOD_COLORS.length) | 0,
+      r: prize
+        ? 7.5 + Math.random() * 4
+        : mid
+          ? 4.6 + Math.random() * 2
+          : 2.8 + Math.random() * 1.6,
+      k: 0,
     };
+  }
+
+  private makeChaser(): Food {
+    const p = randomInDisk(ARENA_RADIUS * 0.85);
+    return { x: p.x, y: p.y, v: 14 + ((Math.random() * 8) | 0), c: CHASE_COLOR, r: 13, k: 3 };
+  }
+
+  private fillFood(target: number): void {
+    while (this.foods.length < target) this.addFood(this.makeFood());
+    while (this.chasers.length < CHASE_ORBS) this.addFood(this.makeChaser());
   }
 
   private maintainFood(): void {
     let n = 0;
-    while (this.foods.length < FOOD_TARGET && n++ < 8) this.addFood(this.makeFood());
-    if (this.foods.length > FOOD_TARGET + 180) {
-      for (let i = this.foods.length - 1; i >= 0 && this.foods.length > FOOD_TARGET; i--) {
-        if (this.foods[i]!.r < 5 && Math.random() < 0.08) this.removeFoodAt(i);
+    while (this.foods.length < FOOD_TARGET && n++ < 24) this.addFood(this.makeFood());
+    if (this.chasers.length < CHASE_ORBS && Math.random() < 0.02) this.addFood(this.makeChaser());
+    if (this.foods.length > FOOD_TARGET + 2500) {
+      for (let i = 0; i < 12; i++) {
+        const f = this.foods[(Math.random() * this.foods.length) | 0]!;
+        if (f.k === 0 && f.v <= 1) this.removeFood(f);
       }
-    }
-  }
-
-  queryFood(x: number, y: number, r: number): number[] {
-    const out: number[] = [];
-    const x0 = Math.floor((x - r) / CELL);
-    const x1 = Math.floor((x + r) / CELL);
-    const y0 = Math.floor((y - r) / CELL);
-    const y1 = Math.floor((y + r) / CELL);
-    for (let gx = x0; gx <= x1; gx++) {
-      for (let gy = y0; gy <= y1; gy++) {
-        const bucket = this.grid.get(`${gx}:${gy}`);
-        if (bucket) out.push(...bucket);
-      }
-    }
-    return out;
-  }
-
-  private indexFood(idx: number): void {
-    const f = this.foods[idx];
-    if (!f) return;
-    const key = `${Math.floor(f.x / CELL)}:${Math.floor(f.y / CELL)}`;
-    const bucket = this.grid.get(key);
-    if (bucket) bucket.push(idx);
-    else this.grid.set(key, [idx]);
-  }
-
-  private rebuildGrid(): void {
-    this.grid.clear();
-    for (let i = 0; i < this.foods.length; i++) this.indexFood(i);
-  }
-
-  private removeFoodAt(idx: number): void {
-    const last = this.foods.length - 1;
-    this.foods[idx] = this.foods[last]!;
-    this.foods.pop();
-    this.foodCursor++;
-    if (this.foodCursor > 24) {
-      this.foodCursor = 0;
-      this.rebuildGrid();
-    } else {
-      this.rebuildGrid();
     }
   }
 }

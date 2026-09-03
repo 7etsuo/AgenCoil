@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Volume2, VolumeX } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Volume2, VolumeX, Zap } from "lucide-react";
 import { CoilEngine, type HudState } from "@/game/engine";
 import { SKINS } from "@/game/model";
 import { useP2PRoom } from "@/lib/multiplayer/use-p2p-room";
@@ -7,6 +7,7 @@ import { useP2PRoom } from "@/lib/multiplayer/use-p2p-room";
 const NICK_KEY = "agencoil-nick";
 const SKIN_KEY = "agencoil-skin";
 const MUTE_KEY = "agencoil-mute";
+const ARENA = "agencoil-arena";
 
 function readNick(): string {
   try {
@@ -35,6 +36,13 @@ function persist(nick: string, skin: number): void {
   }
 }
 
+function skinGradient(i: number): string {
+  const s = SKINS[i % SKINS.length]!;
+  const n = s.bands.length;
+  const stops = s.bands.map((c, k) => `${c} ${(k / n) * 100}% ${((k + 1) / n) * 100}%`).join(", ");
+  return `linear-gradient(90deg, ${stops})`;
+}
+
 export function CoilApp() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<CoilEngine | null>(null);
@@ -42,9 +50,7 @@ export function CoilApp() {
   const [nick, setNick] = useState("anon");
   const [skin, setSkin] = useState(0);
   const [muted, setMuted] = useState(false);
-  const [privateRoom, setPrivateRoom] = useState(false);
-  const [code, setCode] = useState("");
-  const [invite, setInvite] = useState("");
+  const [touch, setTouch] = useState(false);
 
   useEffect(() => {
     const n = readNick() || `coil${(Math.random() * 90 + 10) | 0}`;
@@ -55,20 +61,11 @@ export function CoilApp() {
     } catch {
       /* ignore */
     }
-    const q = new URLSearchParams(window.location.search).get("room");
-    if (q) {
-      setPrivateRoom(true);
-      setCode(q);
-    }
+    setTouch(window.matchMedia("(pointer: coarse)").matches);
   }, []);
 
-  const room = useMemo(() => {
-    if (typeof window === "undefined") return "agencoil";
-    if (privateRoom && code.trim()) return `agencoil-${code.trim().slice(0, 24)}`;
-    return `agencoil-${window.location.hostname.split(".")[0]}`.slice(0, 64);
-  }, [privateRoom, code]);
-
-  const p2p = useP2PRoom({ room, name: nick });
+  // One public arena for everyone; the hook shards it when a mesh fills up.
+  const p2p = useP2PRoom({ room: ARENA, name: nick });
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -114,16 +111,9 @@ export function CoilApp() {
     }
   };
 
-  const shareRoom = () => {
-    const c = code.trim() || Math.random().toString(36).slice(2, 8);
-    setCode(c);
-    setPrivateRoom(true);
-    const url = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(c)}`;
-    setInvite(url);
-    void navigator.clipboard?.writeText(url).catch(() => undefined);
-  };
-
   const phase = hud?.phase ?? "menu";
+  const boostOn = () => engineRef.current?.setBoost(true);
+  const boostOff = () => engineRef.current?.setBoost(false);
 
   return (
     <div className="relative h-dvh w-full overflow-hidden bg-bg text-fg">
@@ -137,16 +127,22 @@ export function CoilApp() {
         <div className="pointer-events-none absolute inset-0 p-4 pt-[max(1rem,env(safe-area-inset-top))]">
           <div className="flex items-start justify-between gap-3">
             <div className="rounded-xl border border-line/80 bg-bg/70 px-3 py-2 tabular-nums">
-              <div className="text-xs tracking-wide text-muted">length</div>
-              <div className="text-xl font-medium leading-tight">{hud.score}</div>
+              <div className="text-xs tracking-wide text-muted">your length</div>
+              <div className="text-2xl font-semibold leading-tight">{hud.score}</div>
+              <div className="mt-0.5 text-xs text-subtle">
+                rank {hud.rank} of {hud.count} · kills {hud.kills}
+              </div>
               <div className="text-xs text-subtle">best {hud.best}</div>
             </div>
-            <div className="hidden min-w-40 rounded-xl border border-line/80 bg-bg/70 px-3 py-2 sm:block">
-              <div className="mb-1 text-xs tracking-wide text-muted">arena</div>
+            <div className="hidden min-w-44 rounded-xl border border-line/80 bg-bg/70 px-3 py-2 sm:block">
+              <div className="mb-1 text-xs tracking-wide text-muted">leaderboard</div>
               <ol className="space-y-0.5 text-sm">
                 {hud.board.map((row, i) => (
-                  <li key={`${row.name}-${i}`} className={row.you ? "text-fg" : "text-muted"}>
-                    <span className="inline-block w-4 text-subtle">{i + 1}</span>
+                  <li
+                    key={`${row.name}-${i}`}
+                    className={row.you ? "font-semibold text-fg" : "text-muted"}
+                  >
+                    <span className="inline-block w-5 text-subtle">{i + 1}</span>
                     <span className="font-medium">{row.name}</span>
                     <span className="float-right tabular-nums">{row.mass}</span>
                   </li>
@@ -154,22 +150,49 @@ export function CoilApp() {
               </ol>
             </div>
           </div>
-          <div className="absolute left-4 top-24 rounded-full border border-line bg-bg/70 px-3 py-1 text-xs text-muted">
-            {hud.peers > 0 ? `${hud.peers} linked` : hud.joined ? "open arena · bots" : "local · bots"}
+          <div className="absolute left-4 top-[calc(6.5rem+env(safe-area-inset-top))] rounded-full border border-line bg-bg/70 px-3 py-1 text-xs text-muted">
+            {`${hud.count} in the arena`}
+            {hud.peers > 0 ? ` · ${hud.peers} linked` : ""}
           </div>
           {hud.killNotice && (
-            <div className="absolute left-1/2 top-24 -translate-x-1/2 rounded-full border border-line bg-bg/80 px-4 py-1.5 text-sm">
+            <div className="absolute left-1/2 top-[calc(6.5rem+env(safe-area-inset-top))] -translate-x-1/2 rounded-full border border-line bg-bg/80 px-4 py-1.5 text-sm">
               {hud.killNotice}
             </div>
           )}
         </div>
       )}
 
+      {phase === "play" && touch && (
+        <button
+          data-ui
+          type="button"
+          aria-label="Boost"
+          onPointerDown={(e) => {
+            e.preventDefault();
+            boostOn();
+          }}
+          onPointerUp={boostOff}
+          onPointerCancel={boostOff}
+          onPointerLeave={boostOff}
+          onContextMenu={(e) => e.preventDefault()}
+          className="absolute bottom-[max(1.25rem,env(safe-area-inset-bottom))] right-4 z-10 flex h-20 w-20 select-none items-center justify-center rounded-full border border-line bg-surface/80 text-fg shadow-[0_8px_30px_rgba(0,0,0,0.45)] active:bg-accent active:text-accent-fg"
+          style={{ touchAction: "none" }}
+        >
+          <Zap size={30} />
+        </button>
+      )}
+
       {phase === "menu" && (
-        <div data-ui className="absolute inset-0 flex items-end justify-center p-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] sm:items-center">
+        <div
+          data-ui
+          className="absolute inset-0 flex items-end justify-center p-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] sm:items-center"
+        >
           <div className="w-full max-w-md rounded-xl border border-line bg-surface/92 p-6 shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
             <p className="text-xs tracking-[0.22em] text-muted uppercase">multiplayer arena</p>
-            <h1 className="mt-2 text-5xl font-semibold tracking-tight text-fg" style={{ letterSpacing: "-0.04em" }}>
+            <h1
+              className="mt-2 text-5xl font-semibold tracking-tight text-fg"
+              style={{ letterSpacing: "-0.04em" }}
+            >
               AgenCoil
             </h1>
             <p className="mt-2 text-sm text-muted">eat · grow · survive</p>
@@ -189,13 +212,13 @@ export function CoilApp() {
             <div className="mt-2 grid grid-cols-8 gap-2">
               {SKINS.map((s, i) => (
                 <button
-                  key={s.fill}
+                  key={`${s.fill}-${i}`}
                   type="button"
                   aria-label={`Skin ${i + 1}`}
                   onClick={() => setSkin(i)}
                   className="h-9 w-full rounded-md border"
                   style={{
-                    background: s.fill,
+                    background: skinGradient(i),
                     borderColor: i === skin ? "#e8eaee" : "transparent",
                     boxShadow: i === skin ? "0 0 0 1px #e8eaee" : "none",
                   }}
@@ -211,31 +234,12 @@ export function CoilApp() {
               Play
             </button>
 
-            <div className="mt-4 flex items-center justify-between gap-3 text-sm text-muted">
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={privateRoom}
-                  onChange={(e) => setPrivateRoom(e.target.checked)}
-                />
-                Private room
-              </label>
-              <button type="button" onClick={shareRoom} className="text-fg underline-offset-2 hover:underline">
-                Invite
-              </button>
-            </div>
-            {privateRoom && (
-              <input
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                placeholder="room code"
-                className="mt-2 h-10 w-full rounded-md border border-line bg-elevated px-3 text-sm text-fg outline-none"
-              />
-            )}
-            {invite && <p className="mt-2 break-all text-xs text-subtle">{invite}</p>}
-
             <p className="mt-5 text-xs leading-relaxed text-subtle">
-              Mouse or WASD to steer. Hold click or space to boost. Crash into another body and you pop.
+              {touch
+                ? "Drag to steer. Hold the lightning button to boost. Boosting sheds length behind you."
+                : "Mouse or WASD to steer. Hold click, space or shift to boost. Scroll to zoom."}{" "}
+              Your head touching any other body pops you. Coil around smaller snakes and eat what
+              they leave behind.
             </p>
           </div>
         </div>
@@ -247,9 +251,20 @@ export function CoilApp() {
             <p className="text-xs tracking-[0.2em] text-muted uppercase">down</p>
             <h2 className="mt-2 text-3xl font-semibold tracking-tight">you popped</h2>
             <p className="mt-2 text-sm text-muted">{hud.deathReason}</p>
-            <p className="mt-4 text-sm tabular-nums text-fg">
-              length {hud.score} · best {hud.best}
-            </p>
+            <div className="mt-5 grid grid-cols-3 gap-2 text-center tabular-nums">
+              <div className="rounded-lg border border-line bg-elevated/70 px-2 py-2">
+                <div className="text-xs text-muted">length</div>
+                <div className="text-xl font-semibold">{hud.score}</div>
+              </div>
+              <div className="rounded-lg border border-line bg-elevated/70 px-2 py-2">
+                <div className="text-xs text-muted">kills</div>
+                <div className="text-xl font-semibold">{hud.kills}</div>
+              </div>
+              <div className="rounded-lg border border-line bg-elevated/70 px-2 py-2">
+                <div className="text-xs text-muted">best</div>
+                <div className="text-xl font-semibold">{hud.best}</div>
+              </div>
+            </div>
             <button
               type="button"
               onClick={() => engineRef.current?.respawn()}
@@ -257,6 +272,7 @@ export function CoilApp() {
             >
               Play again
             </button>
+            <p className="mt-3 text-xs text-subtle">tap anywhere or press space</p>
           </div>
         </div>
       )}

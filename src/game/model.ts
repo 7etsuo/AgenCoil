@@ -1,17 +1,19 @@
-export const ARENA_RADIUS = 3800;
-export const FOOD_TARGET = 640;
+export const ARENA_RADIUS = 6400;
+export const FOOD_TARGET = 11000;
 export const TICK = 1 / 60;
-export const BASE_SPEED = 172;
-export const BOOST_SPEED = 348;
-export const START_MASS = 22;
-export const MIN_MASS = 12;
-export const BOOST_DRAIN = 3.6;
-export const BOOST_DROP_EVERY = 0.09;
-export const SPAWN_INVULN = 1.7;
+export const BASE_SPEED = 185;
+export const BOOST_SPEED = 370;
+export const START_MASS = 14;
+export const MIN_MASS = 10;
+export const BOOST_DROP_EVERY = 0.12;
+export const SPAWN_INVULN = 1.6;
 export const NET_INTERVAL = 1000 / 18;
 export const INTERP_DELAY = 110;
 export const MAX_NET_POINTS = 56;
-export const MAX_BOTS = 14;
+export const MAX_BOTS = 22;
+export const CHASE_ORBS = 14;
+export const MAGNET_SPEED = 420;
+export const BOT_RESPAWN_DELAY = 2.5;
 
 export type Phase = "menu" | "play" | "dead";
 
@@ -20,12 +22,17 @@ export interface Vec {
   y: number;
 }
 
+/**
+ * One orb. `k` is the kind: 0 natural, 1 boost trail, 2 remains of a dead
+ * snake, 3 chase orb (flees from heads, worth the most).
+ */
 export interface Food {
   x: number;
   y: number;
   v: number;
   c: number;
   r: number;
+  k: number;
 }
 
 export interface Snake {
@@ -74,29 +81,45 @@ export interface Floater {
   color: string;
 }
 
+/**
+ * A skin is a repeating band pattern. `bands` lists segment colors in order
+ * and `band` is how many segments each color runs before the next one.
+ * `fill` is the representative color (menu swatch, minimap, remains).
+ */
 export interface Skin {
   fill: string;
-  alt: string;
   shine: string;
+  bands: string[];
+  band: number;
 }
 
 export const SKINS: Skin[] = [
-  { fill: "#3ee0c4", alt: "#1aae96", shine: "#b8fff2" },
-  { fill: "#6ea8ff", alt: "#3b74d9", shine: "#d6e7ff" },
-  { fill: "#e45fa0", alt: "#b83278", shine: "#ffd0e7" },
-  { fill: "#f0c14a", alt: "#c99218", shine: "#ffe9ad" },
-  { fill: "#c45c6a", alt: "#8f3b47", shine: "#ffc4cc" },
-  { fill: "#9b8cff", alt: "#6b5ad6", shine: "#ddd6ff" },
-  { fill: "#7dcf6a", alt: "#4ea63b", shine: "#d4f7cb" },
-  { fill: "#f28b5c", alt: "#c45f32", shine: "#ffd4c0" },
-  { fill: "#5ad0e8", alt: "#2a9bb3", shine: "#c8f4ff" },
-  { fill: "#e8eaee", alt: "#9aa3b2", shine: "#ffffff" },
-  { fill: "#d45dff", alt: "#9b32c4", shine: "#f0c4ff" },
-  { fill: "#ff6b8a", alt: "#c43b58", shine: "#ffc8d4" },
-  { fill: "#4fd1a5", alt: "#2a9a78", shine: "#c8ffe8" },
-  { fill: "#ffb347", alt: "#d4891c", shine: "#ffe0a8" },
-  { fill: "#7aa2ff", alt: "#4a70d0", shine: "#d4e2ff" },
-  { fill: "#c8d0dc", alt: "#7a8494", shine: "#f4f6fa" },
+  { fill: "#3ee0c4", shine: "#b8fff2", bands: ["#3ee0c4", "#1aae96"], band: 3 },
+  {
+    fill: "#6ea8ff",
+    shine: "#d6e7ff",
+    bands: ["#6ea8ff", "#3b74d9", "#6ea8ff", "#f4f7ff"],
+    band: 2,
+  },
+  { fill: "#e45fa0", shine: "#ffd0e7", bands: ["#e45fa0", "#b83278"], band: 4 },
+  { fill: "#f0c14a", shine: "#ffe9ad", bands: ["#f0c14a", "#2a2f3a"], band: 2 },
+  { fill: "#c45c6a", shine: "#ffc4cc", bands: ["#c45c6a", "#8f3b47", "#ffb3bd"], band: 3 },
+  { fill: "#9b8cff", shine: "#ddd6ff", bands: ["#9b8cff", "#6b5ad6"], band: 5 },
+  { fill: "#7dcf6a", shine: "#d4f7cb", bands: ["#7dcf6a", "#4ea63b", "#f7f3a6"], band: 2 },
+  { fill: "#f28b5c", shine: "#ffd4c0", bands: ["#f28b5c", "#c45f32"], band: 3 },
+  { fill: "#5ad0e8", shine: "#c8f4ff", bands: ["#5ad0e8", "#2a9bb3", "#ffffff"], band: 2 },
+  { fill: "#e8eaee", shine: "#ffffff", bands: ["#e8eaee", "#9aa3b2"], band: 4 },
+  { fill: "#d45dff", shine: "#f0c4ff", bands: ["#d45dff", "#9b32c4", "#3ee0c4"], band: 2 },
+  { fill: "#ff6b8a", shine: "#ffc8d4", bands: ["#ff6b8a", "#c43b58"], band: 3 },
+  { fill: "#4fd1a5", shine: "#c8ffe8", bands: ["#4fd1a5", "#2a9a78", "#f0c14a"], band: 3 },
+  { fill: "#ffb347", shine: "#ffe0a8", bands: ["#ffb347", "#d4891c"], band: 6 },
+  {
+    fill: "#7aa2ff",
+    shine: "#d4e2ff",
+    bands: ["#ff6b8a", "#ffb347", "#f7f3a6", "#7dcf6a", "#5ad0e8", "#9b8cff"],
+    band: 2,
+  },
+  { fill: "#c8d0dc", shine: "#f4f6fa", bands: ["#c8d0dc", "#2a2f3a"], band: 1 },
 ];
 
 export const FOOD_COLORS = [
@@ -113,6 +136,9 @@ export const FOOD_COLORS = [
   "#d45dff",
   "#ff6b8a",
 ];
+
+/** Index into FOOD_COLORS used by chase orbs. */
+export const CHASE_COLOR = 3;
 
 export const BOT_NAMES = [
   "onyx",
@@ -135,6 +161,34 @@ export const BOT_NAMES = [
   "sol",
   "nyx",
   "flux",
+  "orbit",
+  "tide",
+  "fable",
+  "cinder",
+  "moth",
+  "pixel",
+  "gale",
+  "zinc",
+  "noodle",
+  "snek",
+  "danger",
+  "worm",
+  "mia",
+  "leo",
+  "ava",
+  "kai",
+  "zed",
+  "big boi",
+  "tiny",
+  "juju",
+  "rex",
+  "nova",
+  "milo",
+  "pip",
+  "lucky",
+  "ghost",
+  "turbo",
+  "mango",
 ];
 
 export function clamp(n: number, a: number, b: number): number {
@@ -157,30 +211,42 @@ export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
+/** Body half-width. Grows quickly at first, then flattens out like slither.io. */
 export function radiusOf(mass: number): number {
-  return 7.2 + Math.pow(Math.max(mass, 1), 0.46) * 1.48;
+  return 7 + Math.pow(Math.max(mass, 1), 0.46) * 1.42;
 }
 
+/** Body length in world units. */
 export function lengthOf(mass: number): number {
-  return 78 + mass * 3.05;
+  return 70 + mass * 3.05;
 }
 
+/**
+ * Turn rate in radians per second. Small snakes turn inside about three body
+ * widths, huge ones need four or more, which is what makes coiling possible.
+ */
 export function turnRateOf(mass: number): number {
   const r = radiusOf(mass);
-  return 5.4 * (14 / (14 + r));
+  return clamp(96 / Math.pow(r, 1.18), 0.75, 5.2);
 }
 
 export function zoomOf(mass: number): number {
   const r = radiusOf(mass);
-  return clamp(0.78 / (0.7 + r / 42 + mass / 1300), 0.2, 1.05);
+  return clamp(0.9 / (0.85 + r / 30), 0.3, 1.0);
 }
 
+/** Distance between recorded path points. */
 export function spacingOf(mass: number): number {
-  return Math.max(5.8, radiusOf(mass) * 0.52);
+  return Math.max(5.5, radiusOf(mass) * 0.5);
 }
 
 export function maxPointsOf(mass: number): number {
   return Math.max(12, Math.round(lengthOf(mass) / spacingOf(mass)) + 6);
+}
+
+/** Mass lost per second while boosting. */
+export function boostDrainOf(mass: number): number {
+  return 2.4 + mass * 0.018;
 }
 
 export function randRange(a: number, b: number): number {
@@ -195,7 +261,9 @@ export function randomInDisk(r: number): Vec {
 
 export function pickBotName(used: Set<string>): string {
   const pool = BOT_NAMES.filter((n) => !used.has(n.toLowerCase()));
-  return pool.length ? pool[(Math.random() * pool.length) | 0]! : `bot-${(Math.random() * 99) | 0}`;
+  return pool.length
+    ? pool[(Math.random() * pool.length) | 0]!
+    : `${BOT_NAMES[(Math.random() * BOT_NAMES.length) | 0]}${(Math.random() * 99) | 0}`;
 }
 
 export function pointSegDist2(
