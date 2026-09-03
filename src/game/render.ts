@@ -1,5 +1,6 @@
 import {
   LANDMARKS,
+  WISP_REACH,
   type SkinStyle,
   ARENA_RADIUS,
   FOOD_COLORS,
@@ -253,12 +254,19 @@ export class Renderer {
       ctx.fillStyle = `rgba(191,233,255,${a})`;
       ctx.fill();
     }
-    const g = ctx.createRadialGradient(w.x, w.y, 0, w.x, w.y, 46);
+    const g = ctx.createRadialGradient(w.x, w.y, 0, w.x, w.y, WISP_REACH);
     g.addColorStop(0, "rgba(255,255,255,0.9)");
-    g.addColorStop(0.25, "rgba(191,233,255,0.5)");
+    g.addColorStop(0.2, "rgba(191,233,255,0.45)");
+    g.addColorStop(0.7, "rgba(191,233,255,0.1)");
     g.addColorStop(1, "rgba(191,233,255,0)");
     ctx.fillStyle = g;
-    ctx.fillRect(w.x - 46, w.y - 46, 92, 92);
+    ctx.fillRect(w.x - WISP_REACH, w.y - WISP_REACH, WISP_REACH * 2, WISP_REACH * 2);
+    // The pickup halo, so the reach is something you can see and aim with.
+    ctx.beginPath();
+    ctx.arc(w.x, w.y, WISP_REACH, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(191,233,255,0.28)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
     ctx.globalCompositeOperation = "source-over";
     ctx.beginPath();
     ctx.arc(w.x, w.y, 7, 0, Math.PI * 2);

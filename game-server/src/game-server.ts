@@ -977,9 +977,10 @@ export class GameServer {
         w.y *= (ARENA_RADIUS - 40) / d;
       }
       if (w.bank >= WISP_BANK_MAX) continue;
+      // Everything but chase and event orbs, anywhere inside the halo.
       for (const f of this.world.queryFood(w.x, w.y, WISP_REACH + 12)) {
         if (f.k > 2 || f.id === undefined) continue;
-        if (Math.hypot(f.x - w.x, f.y - w.y) > WISP_REACH + f.r * 0.5) continue;
+        if (Math.hypot(f.x - w.x, f.y - w.y) > WISP_REACH + f.r) continue;
         w.bank = Math.min(WISP_BANK_MAX, w.bank + f.v);
         this.world.removeFood(f);
         if (w.bank >= WISP_BANK_MAX) break;

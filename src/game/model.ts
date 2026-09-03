@@ -59,10 +59,11 @@ export type Phase = "menu" | "play" | "dead" | "wisp";
 
 /** Afterlife: a wisp between lives that banks starting length for the next one. */
 export const WISP_SECS = 20;
-export const WISP_SPEED = 300;
-export const WISP_BOOST = 480;
-export const WISP_BANK_MAX = 60;
-export const WISP_REACH = 26;
+export const WISP_SPEED = 340;
+export const WISP_BOOST = 540;
+export const WISP_BANK_MAX = 150;
+/** Pickup radius: a wide halo, so a pass through a cluster clears it. */
+export const WISP_REACH = 70;
 
 /** The Boss Hour: a server snake with hit points that everyone cuts together. */
 export const BOSS_MASS = 2500;
