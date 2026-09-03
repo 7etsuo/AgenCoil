@@ -27,6 +27,13 @@ export interface HudState {
   board: { name: string; mass: number; you: boolean }[];
   daily: { name: string; best: number }[];
   killNotice: string | null;
+  /** Recent notable deaths, newest last. */
+  feed: string[];
+  /** Your rank when you died, and how many were in the arena. */
+  deathRank: number;
+  deathCount: number;
+  /** Today's best run, from the server. */
+  topToday: { name: string; best: number } | null;
   /** Top snakes you can watch after dying. */
   watchable: { nid: number; name: string }[];
   watching: number | null;
@@ -116,6 +123,9 @@ export class CoilEngine {
   private stickId: number | null = null;
   private watchNid: number | null = null;
   private spawnWait = 0;
+  private feed: { text: string; t: number }[] = [];
+  private deathRank = 0;
+  private deathCount = 0;
   private dbgWall = 0;
   private dbgSnake = 0;
   private onResize = () => this.resize();
@@ -326,6 +336,10 @@ export class CoilEngine {
       board,
       daily: st?.daily ?? [],
       killNotice: this.killNotice,
+      feed: this.feed.map((f) => f.text),
+      deathRank: this.deathRank,
+      deathCount: this.deathCount,
+      topToday: this.stats?.daily[0] ?? null,
       watchable: st ? st.board.slice(0, 3).map((b) => ({ nid: b.nid, name: b.name })) : [],
       watching: this.watchNid,
       deathReason: this.deathReason,
@@ -528,6 +542,7 @@ export class CoilEngine {
       this.killTimer -= dt;
       if (this.killTimer <= 0) this.killNotice = null;
     }
+    if (this.feed.length && performance.now() - this.feed[0]!.t > 7000) this.feed.shift();
     if (this.phase === "play" && this.world.player?.boosting) {
       const now = performance.now();
       if (now - this.lastBoostSound > 140) {
@@ -566,10 +581,24 @@ export class CoilEngine {
       if (d.reason === "wall") this.dbgWall++;
       else this.dbgSnake++;
       this.deathBurst(d.snake);
-      if (d.snake.id === w.playerId) {
+      const mine = d.snake.id === w.playerId;
+      const byMe = d.killerId === w.playerId;
+      if (mine) {
         this.dieLocal(d.reason, d.killerName, d.killerId);
-      } else if (d.killerId === w.playerId) {
+      } else if (byMe) {
         this.registerKill(d.snake.name);
+      }
+      if (mine || byMe || d.snake.mass >= 150) {
+        const who = mine ? "you" : d.snake.name;
+        const by = byMe ? "you" : d.killerName;
+        const len = Math.floor(d.snake.mass);
+        this.pushFeed(
+          d.reason === "wall"
+            ? `${who} hit the rim at ${len}`
+            : by
+              ? `${by} took down ${who} (${len})`
+              : `${who} crashed at ${len}`,
+        );
       }
     }
   }
@@ -579,11 +608,30 @@ export class CoilEngine {
     const id = String(d.nid);
     const s = net.world.snakes.find((x) => x.id === id);
     if (s) this.deathBurst(s);
-    if (d.nid === net.selfNid) {
+    const mine = d.nid === net.selfNid;
+    const byMe = d.killerNid !== 0 && d.killerNid === net.selfNid;
+    if (mine) {
       this.dieLocal(d.reason, d.killerName || null, d.killerNid ? String(d.killerNid) : null);
-    } else if (d.killerNid && d.killerNid === net.selfNid) {
+    } else if (byMe) {
       this.registerKill(d.name);
     }
+    // Notable deaths make the feed: anything you were part of, or a big one.
+    if (mine || byMe || d.finalLen >= 150) {
+      const who = mine ? "you" : d.name;
+      const by = byMe ? "you" : d.killerName;
+      this.pushFeed(
+        d.reason === "wall"
+          ? `${who} hit the rim at ${d.finalLen}`
+          : by
+            ? `${by} took down ${who} (${d.finalLen})`
+            : `${who} crashed at ${d.finalLen}`,
+      );
+    }
+  }
+
+  private pushFeed(text: string): void {
+    this.feed.push({ text, t: performance.now() });
+    if (this.feed.length > 4) this.feed.shift();
   }
 
   private registerKill(victim: string): void {
@@ -644,6 +692,11 @@ export class CoilEngine {
     this.audio.death();
     const p = this.world.player;
     this.deathMass = p?.mass ?? this.deathMass;
+    {
+      const h = this.hud();
+      this.deathRank = h.rank;
+      this.deathCount = h.count;
+    }
     this.deathCam = { x: p?.x ?? this.cam.x, y: p?.y ?? this.cam.y };
     this.corpse = p ? { ...p, points: p.points.map((q) => ({ ...q })) } : null;
     this.phase = "dead";
@@ -763,6 +816,7 @@ export class CoilEngine {
       mode: this.net?.state ?? "offline",
       instance: this.net?.instance ?? "",
       rtt: this.net?.rttMs ?? 0,
+      eatMisses: this.net?.eatMisses ?? 0,
       score: p ? Math.floor(p.mass) : 0,
       headX: p ? Math.round(p.x) : 0,
       headY: p ? Math.round(p.y) : 0,

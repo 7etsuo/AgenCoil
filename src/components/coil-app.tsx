@@ -262,6 +262,15 @@ export function CoilApp() {
               {hud.killNotice}
             </div>
           )}
+          {hud.feed.length > 0 && (
+            <ul className="absolute left-4 top-[calc(8.75rem+env(safe-area-inset-top))] space-y-0.5 text-xs text-muted">
+              {hud.feed.map((line, i) => (
+                <li key={`${line}-${i}`} className="rounded-full bg-bg/60 px-2 py-0.5">
+                  {line}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 
@@ -301,7 +310,15 @@ export function CoilApp() {
             >
               AgenCoil
             </h1>
-            <p className="mt-2 text-sm text-muted">eat · grow · survive</p>
+            <p className="mt-2 text-sm text-muted">
+              eat · grow · survive
+              {hud?.topToday && (
+                <span className="text-subtle">
+                  {" "}
+                  · top today {hud.topToday.name} {hud.topToday.best}
+                </span>
+              )}
+            </p>
 
             <label className="mt-6 block text-xs text-muted" htmlFor="nick">
               Nickname
@@ -441,6 +458,11 @@ export function CoilApp() {
             <p className="text-xs tracking-[0.2em] text-muted uppercase">down</p>
             <h2 className="mt-2 text-3xl font-semibold tracking-tight">you popped</h2>
             <p className="mt-2 text-sm text-muted">{hud.deathReason}</p>
+            {hud.deathRank > 0 && (
+              <p className="mt-1 text-xs text-subtle">
+                you were #{hud.deathRank} of {hud.deathCount}
+              </p>
+            )}
             <div className="mt-5 grid grid-cols-3 gap-2 text-center tabular-nums">
               <div className="rounded-lg border border-line bg-elevated/70 px-2 py-2">
                 <div className="text-xs text-muted">length</div>

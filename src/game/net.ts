@@ -7,6 +7,8 @@
 import {
   BOOST_MIN_MASS,
   INTERP_DELAY,
+  dist2,
+  radiusOf,
   speedOf,
   type Food,
   type Snake,
@@ -70,7 +72,9 @@ interface Look {
   bands?: string[];
 }
 
-const INPUT_HZ = 20;
+const INPUT_HZ = 30;
+/** A predicted eat the server has not confirmed by then is put back. */
+const EAT_CONFIRM_MS = 700;
 const OFFLINE_AFTER_MS = 6000;
 const SNAP_CORRECT_DIST = 140;
 const TOKEN_KEY = "agencoil-resume";
@@ -112,6 +116,10 @@ export class NetSession {
   private frozenSince = 0;
   /** Set on spawn: the next full entry for us carries the real body shape. */
   private awaitingBody = false;
+  /** Orbs removed locally the moment the head reaches them, awaiting FOOD_DEL. */
+  private pendingEats = new Map<number, { food: Food; t: number }>();
+  /** Predicted eats the server never confirmed (diagnostic). */
+  eatMisses = 0;
 
   constructor(
     private readonly url: string,
@@ -273,6 +281,7 @@ export class NetSession {
         const mass = r.f32();
         this.selfNid = nid;
         this.frozenSince = 0;
+        this.pendingEats.clear();
         const id = String(nid);
         this.world.snakes = this.world.snakes.filter((s) => s.id !== id);
         const s = this.world.makeSnake(id, this.look?.name ?? "anon", this.look?.skin ?? 0, false);
@@ -297,14 +306,19 @@ export class NetSession {
         const n = r.u16();
         for (let i = 0; i < n; i++) {
           const f = readFood(r);
-          if (f.id !== undefined && this.world.foodById.has(f.id)) continue;
+          if (f.id !== undefined && (this.world.foodById.has(f.id) || this.pendingEats.has(f.id)))
+            continue;
           this.world.addFood(f);
         }
         break;
       }
       case S2C.FOOD_DEL: {
         const n = r.u16();
-        for (let i = 0; i < n; i++) this.world.removeFoodById(r.u32());
+        for (let i = 0; i < n; i++) {
+          const id = r.u32();
+          this.pendingEats.delete(id);
+          this.world.removeFoodById(id);
+        }
         break;
       }
       case S2C.STATS: {
@@ -326,11 +340,15 @@ export class NetSession {
         break;
       }
       case S2C.EAT: {
+        // Eats are predicted locally with their own effects; the server's
+        // list only matters for orbs the prediction missed (none in view).
         const n = r.u16();
-        const eats: EatInfo[] = [];
-        for (let i = 0; i < n; i++)
-          eats.push({ x: r.f32(), y: r.f32(), v: r.u16() / 10, c: r.u8() });
-        this.hooks.onEats(eats);
+        for (let i = 0; i < n; i++) {
+          r.f32();
+          r.f32();
+          r.u16();
+          r.u8();
+        }
         break;
       }
       case S2C.DEATH: {
@@ -535,6 +553,31 @@ export class NetSession {
     }
 
     this.world.magnet(dt);
+    if (me) this.predictEats(me, now);
+  }
+
+  /**
+   * Remove orbs the head has reached right away and play their effects, so
+   * eating feels instant; the server's FOOD_DEL confirms, and anything not
+   * confirmed in time comes back.
+   */
+  private predictEats(me: Snake, now: number): void {
+    const reach = radiusOf(me.mass) + 3;
+    const eats: EatInfo[] = [];
+    for (const f of this.world.queryFood(me.x, me.y, reach + 18)) {
+      if (f.id === undefined) continue;
+      if (dist2(me.x, me.y, f.x, f.y) > (reach + f.r * 0.6) ** 2) continue;
+      this.pendingEats.set(f.id, { food: f, t: now });
+      this.world.removeFood(f);
+      eats.push({ x: f.x, y: f.y, v: f.v, c: f.c });
+    }
+    if (eats.length) this.hooks.onEats(eats);
+    for (const [id, p] of this.pendingEats) {
+      if (now - p.t < EAT_CONFIRM_MS) continue;
+      this.pendingEats.delete(id);
+      this.eatMisses++;
+      if (!this.world.foodById.has(id)) this.world.addFood(p.food);
+    }
   }
 
   /** Foods the mirror knows about, for the debug overlay. */
