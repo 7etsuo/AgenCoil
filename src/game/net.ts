@@ -254,7 +254,9 @@ export class NetSession {
     this.setState(this.state === "online" ? "connecting" : this.state);
     let ws: WebSocket;
     try {
-      ws = new WebSocket(this.url);
+      // Announce the wire protocol on the URL so the server knows it before
+      // the first snapshot (see `proto` on the server's client record).
+      ws = new WebSocket(this.url + (this.url.includes("?") ? "&" : "?") + "v=2");
     } catch {
       this.scheduleRetry();
       return;

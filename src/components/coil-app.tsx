@@ -30,6 +30,7 @@ import {
 } from "@/game/challenges";
 import { Link } from "@tanstack/react-router";
 import { Turnstile } from "@/components/turnstile";
+import { SkinPreview } from "@/components/skin-preview";
 
 const NICK_KEY = "agencoil-nick";
 const SKIN_KEY = "agencoil-skin";
@@ -168,6 +169,7 @@ export function CoilApp() {
   const [deathFx, setDeathFx] = useState(0);
   const [party, setParty] = useState("");
   const [invited, setInvited] = useState(false);
+  const [tab, setTab] = useState<"look" | "goals" | "controls">("look");
   const [turnstileToken, setTurnstileToken] = useState("");
   const [turnstileReset, setTurnstileReset] = useState(0);
   const [verificationState, setVerificationState] = useState<
@@ -326,7 +328,7 @@ export function CoilApp() {
     setParty(code);
     const url = `${window.location.origin}${window.location.pathname}?with=${code}`;
     try {
-      if (navigator.share) await navigator.share({ title: "AgenCoil", text: "Play with me", url });
+      if (navigator.share) await navigator.share({ title: "snek", text: "Play with me", url });
       else await navigator.clipboard?.writeText(url);
       setInvited(true);
     } catch {
@@ -367,16 +369,16 @@ export function CoilApp() {
 
   const share = async () => {
     if (!hud) return;
-    const text = `I reached length ${hud.score} with ${hud.kills} kill${hud.kills === 1 ? "" : "s"} in AgenCoil. Beat me.`;
+    const text = `I reached length ${hud.score} with ${hud.kills} kill${hud.kills === 1 ? "" : "s"} in snek. Beat me.`;
     const url = typeof window !== "undefined" ? window.location.origin : "";
     const bands = skin === CUSTOM ? custom : SKINS[skin % SKINS.length]!.bands;
     const blob = await renderShareCard(hud, nick, bands);
     try {
       const file = blob ? new File([blob], "agencoil-run.png", { type: "image/png" }) : null;
       if (file && navigator.canShare?.({ files: [file] })) {
-        await navigator.share({ title: "AgenCoil", text, files: [file] });
+        await navigator.share({ title: "snek", text, files: [file] });
       } else if (navigator.share) {
-        await navigator.share({ title: "AgenCoil", text, url });
+        await navigator.share({ title: "snek", text, url });
       } else if (blob) {
         window.open(URL.createObjectURL(blob), "_blank");
       } else {
@@ -397,6 +399,12 @@ export function CoilApp() {
       : hud?.mode === "connecting"
         ? "connecting"
         : "offline · practice arena";
+  const previewBands: string[] =
+    skin === CUSTOM
+      ? custom
+      : skin === WEEKLY
+        ? weeklySkinFor(isoWeek()).bands
+        : (SKINS[skin] ?? SKINS[0]!).bands;
   const needsVerification = Boolean(TURNSTILE_SITE_KEY) && hud?.mode !== "offline";
   const playDisabled =
     verificationState === "verifying" ||
@@ -496,7 +504,7 @@ export function CoilApp() {
             </div>
           )}
           {hud.hint && (
-            <div className="absolute left-1/2 top-[calc(3.2rem+env(safe-area-inset-top))] -translate-x-1/2 rounded-full border border-accent/50 bg-bg/85 px-4 py-1.5 text-sm text-fg">
+            <div className="absolute left-1/2 top-[calc(9.5rem+env(safe-area-inset-top))] w-max max-w-[80vw] -translate-x-1/2 rounded-full border border-accent/50 bg-bg/85 px-4 py-1.5 text-center text-sm text-fg sm:top-[calc(3.2rem+env(safe-area-inset-top))]">
               {hud.hint}
             </div>
           )}
@@ -590,274 +598,75 @@ export function CoilApp() {
           className="absolute inset-0 flex items-end justify-center overflow-y-auto p-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-[max(4.5rem,env(safe-area-inset-top))] sm:items-center sm:pt-4"
         >
           <div className="mt-auto w-full max-w-md rounded-xl border border-line bg-surface/92 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.45)] sm:my-auto sm:p-6">
-            <div className="flex items-baseline justify-between">
-              <p className="text-xs tracking-[0.22em] text-muted uppercase">multiplayer arena</p>
-              <p className="text-xs text-subtle">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <SnekMark colors={previewBands} />
+                <h1
+                  className="text-5xl font-semibold leading-none tracking-tight text-fg sm:text-6xl"
+                  style={{ letterSpacing: "-0.05em" }}
+                >
+                  snek
+                </h1>
+              </div>
+              <p className="text-right text-[11px] leading-tight text-subtle">
                 {hud?.watchingTop
                   ? `watching ${hud.watchingTop.name} · ${hud.watchingTop.mass}`
                   : hud
                     ? modeLabel
                     : ""}
+                {hud?.topToday && (
+                  <>
+                    <br />
+                    top today {hud.topToday.name} {hud.topToday.best}
+                  </>
+                )}
               </p>
             </div>
-            <h1
-              className="mt-1 text-4xl font-semibold tracking-tight text-fg sm:mt-2 sm:text-5xl"
-              style={{ letterSpacing: "-0.04em" }}
-            >
-              AgenCoil
-            </h1>
             {hud?.profile && (
-              <p className="mt-2 text-xs text-subtle">
-                {titleOf(hud.profile) ? `${titleOf(hud.profile)} · ` : ""}Lv
-                {levelOf(hud.profile.eaten)} · all-time best {hud.profile.best} · kills{" "}
-                {hud.profile.kills} · games {hud.profile.games} ·{" "}
-                {hud.profile.rank > 0 ? `rank #${hud.profile.rank}` : "unranked"}
-                {!hud.profile.persistent && " (this server only)"}
-              </p>
+              <div className="mt-3 flex flex-wrap gap-1.5 text-[11px]">
+                <Chip>Lv{levelOf(hud.profile.eaten)}</Chip>
+                {titleOf(hud.profile) && <Chip tone="gold">{titleOf(hud.profile)}</Chip>}
+                <Chip>best {hud.profile.best}</Chip>
+                <Chip>
+                  {hud.profile.rank > 0 ? `#${hud.profile.rank}` : "unranked"}
+                  {!hud.profile.persistent && " here"}
+                </Chip>
+                <Chip tone={hud.profile.streak > 0 ? "fire" : undefined}>
+                  🔥 {hud.profile.streak > 0 ? `${hud.profile.streak}d` : "start a streak"}
+                </Chip>
+                <Chip tone="violet">{LEAGUES[leagueOf(hud.profile.weekBest)]!.name}</Chip>
+                {hud.arenaMode.id > 0 && (
+                  <Chip tone="violet">
+                    {MODES.find((m) => m.id === hud.arenaMode.id)?.name} ·{" "}
+                    {Math.ceil(hud.arenaMode.secsLeft / 60)}m
+                  </Chip>
+                )}
+              </div>
             )}
-            {hud?.profile && (
-              <p className="mt-1 text-xs text-subtle">
-                {hud.profile.streak > 0
-                  ? `🔥 ${hud.profile.streak}-day streak`
-                  : "🔥 play today to start a streak"}
-                {hud.profile.freezes > 0 ? " · freeze banked" : ""}
-                {(() => {
-                  const next = STREAK_MILESTONES.find((m) => m.days > hud.profile!.streak);
-                  return next
-                    ? ` · ${next.days - hud.profile!.streak} more days to ${next.label}`
-                    : "";
-                })()}
-                {" · "}
-                {LEAGUES[leagueOf(hud.profile.weekBest)]!.name} league this week
-                {(() => {
-                  const t = leagueOf(hud.profile!.weekBest);
-                  const nxt = LEAGUES[t + 1];
-                  return nxt ? ` (${nxt.min - hud.profile!.weekBest} to ${nxt.name})` : "";
-                })()}
-                {hud.profile.prevTier > 0 &&
-                  ` · finished last week in ${LEAGUES[hud.profile.prevTier - 1]?.name ?? ""}`}
-              </p>
-            )}
-            {hud && hud.arenaMode.id === 0 && hud.arenaMode.secsToNext > 0 && (
-              <p className="mt-1 text-xs text-subtle">
-                next event in {Math.ceil(hud.arenaMode.secsToNext / 60)} min: every hour, 15 minutes
-                of a twist
-              </p>
-            )}
-            {hud && hud.arenaMode.id > 0 && (
-              <p className="mt-1 text-xs text-[#c9bfff]">
-                event now: {MODES.find((m) => m.id === hud.arenaMode.id)?.text} ·{" "}
-                {Math.ceil(hud.arenaMode.secsLeft / 60)} min left
-              </p>
-            )}
-            <p className="mt-2 text-sm text-muted">
-              eat · grow · survive
-              {hud?.topToday && (
-                <span className="text-subtle">
-                  {" "}
-                  · top today {hud.topToday.name} {hud.topToday.best}
-                </span>
-              )}
-            </p>
 
-            <label className="mt-4 block text-xs text-muted sm:mt-6" htmlFor="nick">
+            <div className="mt-4 overflow-hidden rounded-lg border border-line bg-bg/60">
+              <SkinPreview bands={previewBands} boosting={trail > 0} />
+            </div>
+            <label className="sr-only" htmlFor="nick">
               Nickname
             </label>
-            <input
-              id="nick"
-              value={nick}
-              maxLength={16}
-              onChange={(e) => setNick(e.target.value)}
-              className="mt-1 h-11 w-full rounded-md border border-line bg-elevated px-3 text-base text-fg outline-none focus:border-accent"
-            />
-
-            <div className="mt-4 text-xs text-muted">Skin</div>
-            <div className="mt-2 grid grid-cols-8 gap-2">
-              {SKINS.map((s, i) => (
-                <button
-                  key={`${s.fill}-${i}`}
-                  type="button"
-                  aria-label={
-                    locked(i) ? `Skin ${i + 1}, unlocks at length ${UNLOCKS[i]}` : `Skin ${i + 1}`
-                  }
-                  onClick={() => {
-                    if (locked(i)) {
-                      setLockNote(`reach length ${UNLOCKS[i]} to unlock this skin (best ${best})`);
-                      return;
-                    }
-                    setLockNote(null);
-                    setSkin(i);
-                  }}
-                  className="relative h-9 w-full rounded-md border"
-                  style={{
-                    background: gradientOf(s.bands),
-                    borderColor: i === skin ? "#e8eaee" : "transparent",
-                    boxShadow: i === skin ? "0 0 0 1px #e8eaee" : "none",
-                    opacity: locked(i) ? 0.45 : 1,
-                  }}
-                >
-                  {locked(i) && (
-                    <span className="absolute inset-0 flex items-center justify-center text-fg">
-                      <Lock size={14} />
-                    </span>
-                  )}
-                </button>
-              ))}
+            <div className="mt-3 flex gap-2">
+              <input
+                id="nick"
+                value={nick}
+                maxLength={16}
+                onChange={(e) => setNick(e.target.value)}
+                className="h-12 flex-1 mt-1 h-11 w-full rounded-md border border-line bg-elevated px-3 text-base text-fg outline-none focus:border-accent"
+              />
               <button
                 type="button"
-                aria-label="Custom skin"
-                onClick={() => setSkin(CUSTOM)}
-                className="col-span-8 mt-1 flex h-9 items-center justify-between rounded-md border px-3 text-xs"
-                style={{
-                  background: gradientOf(custom),
-                  borderColor: skin === CUSTOM ? "#e8eaee" : "transparent",
-                  boxShadow: skin === CUSTOM ? "0 0 0 1px #e8eaee" : "none",
-                }}
+                onClick={() => void play()}
+                disabled={playDisabled}
+                className="h-12 shrink-0 rounded-lg bg-accent px-7 text-base font-semibold text-accent-fg shadow-[0_0_28px_rgba(215,221,232,0.25)] transition-transform enabled:hover:shadow-[0_0_36px_rgba(215,221,232,0.4)] enabled:active:scale-[0.98] disabled:cursor-wait disabled:opacity-50"
               >
-                <span className="rounded bg-bg/70 px-2 py-0.5 text-fg">build your own</span>
+                {verificationState === "verifying" ? "Checking…" : "Play"}
               </button>
             </div>
-            <button
-              type="button"
-              aria-label={`This week's skin: ${weekly.name}`}
-              onClick={() => {
-                if (!weekEarned) {
-                  setLockNote(
-                    `finish ${WEEKLY_GOAL} daily challenges this week to earn "${weekly.name}" (${Math.min(weekDone, WEEKLY_GOAL)}/${WEEKLY_GOAL})`,
-                  );
-                  return;
-                }
-                setLockNote(null);
-                setSkin(WEEKLY);
-              }}
-              className="mt-2 flex h-9 w-full items-center justify-between rounded-md border px-3 text-xs"
-              style={{
-                background: gradientOf(weekly.bands),
-                borderColor: skin === WEEKLY ? "#e8eaee" : "transparent",
-                boxShadow: skin === WEEKLY ? "0 0 0 1px #e8eaee" : "none",
-                opacity: weekEarned ? 1 : 0.6,
-              }}
-            >
-              <span className="rounded bg-bg/70 px-2 py-0.5 text-fg">
-                this week only · {weekly.name}
-              </span>
-              <span className="rounded bg-bg/70 px-2 py-0.5 text-fg">
-                {weekEarned
-                  ? "earned"
-                  : `${Math.min(weekDone, WEEKLY_GOAL)}/${WEEKLY_GOAL} challenges`}
-                {!weekEarned && <Lock size={10} className="ml-1 inline" />}
-              </span>
-            </button>
-            {lockNote && <p className="mt-2 text-xs text-subtle">{lockNote}</p>}
-            {skin === CUSTOM && (
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                {custom.map((c, i) => (
-                  <label
-                    key={i}
-                    className="relative h-9 w-9 overflow-hidden rounded-md border border-line"
-                  >
-                    <input
-                      type="color"
-                      value={c}
-                      aria-label={`Band ${i + 1} colour`}
-                      onChange={(e) =>
-                        setCustom(custom.map((x, k) => (k === i ? e.target.value : x)))
-                      }
-                      className="absolute -inset-2 h-14 w-14 cursor-pointer border-0 bg-transparent p-0"
-                    />
-                  </label>
-                ))}
-                {custom.length < MAX_CUSTOM_BANDS && (
-                  <button
-                    type="button"
-                    onClick={() => setCustom([...custom, custom[custom.length - 1] ?? "#ffffff"])}
-                    className="h-9 rounded-md border border-line px-3 text-xs text-muted hover:text-fg"
-                  >
-                    + band
-                  </button>
-                )}
-                {custom.length > 1 && (
-                  <button
-                    type="button"
-                    onClick={() => setCustom(custom.slice(0, -1))}
-                    className="h-9 rounded-md border border-line px-3 text-xs text-muted hover:text-fg"
-                  >
-                    remove
-                  </button>
-                )}
-              </div>
-            )}
-
-            <div className="mt-4 text-xs text-muted">Boost trail</div>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {TRAILS.map((t, i) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => trailOpen(i) && setTrail(i)}
-                  className={`rounded-md border px-3 py-1.5 text-xs ${trail === i ? "border-accent text-fg" : "border-line text-muted hover:text-fg"} ${trailOpen(i) ? "" : "opacity-45"}`}
-                >
-                  {t}
-                  {!trailOpen(i) && <Lock size={10} className="ml-1 inline" />}
-                </button>
-              ))}
-              <span className="mx-1 self-center text-xs text-subtle">death</span>
-              {DEATH_FX.map((t, i) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => deathOpen(i) && setDeathFx(i)}
-                  className={`rounded-md border px-3 py-1.5 text-xs ${deathFx === i ? "border-accent text-fg" : "border-line text-muted hover:text-fg"} ${deathOpen(i) ? "" : "opacity-45"}`}
-                >
-                  {t}
-                  {!deathOpen(i) && <Lock size={10} className="ml-1 inline" />}
-                </button>
-              ))}
-            </div>
-            {hud?.challenges && hud.challenges.length > 0 && (
-              <div className="mt-4">
-                <div className="text-xs text-muted">
-                  Today&apos;s challenges · each unlocks a cosmetic
-                </div>
-                <ul className="mt-2 space-y-1.5">
-                  {hud.challenges.map((c) => (
-                    <li key={c.id} className="text-xs">
-                      <div className="flex justify-between">
-                        <span className={c.done ? "text-fg" : "text-muted"}>
-                          {c.done ? "✓ " : ""}
-                          {c.text}
-                        </span>
-                        <span className="tabular-nums text-subtle">
-                          {Math.min(c.progress, c.target)}/{c.target}
-                        </span>
-                      </div>
-                      <div className="mt-1 h-1 w-full rounded bg-elevated">
-                        <div
-                          className={`h-1 rounded ${c.done ? "bg-[#f0c14a]" : "bg-accent"}`}
-                          style={{ width: `${Math.min(100, (c.progress / c.target) * 100)}%` }}
-                        />
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {touch && (
-              <div className="mt-4 flex items-center gap-2 text-xs text-muted">
-                <span>Steering</span>
-                {(["point", "stick"] as const).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => chooseControls(m)}
-                    className={`rounded-md border px-3 py-1.5 ${controls === m ? "border-accent text-fg" : "border-line hover:text-fg"}`}
-                  >
-                    {m === "point" ? "follow finger" : "joystick"}
-                  </button>
-                ))}
-              </div>
-            )}
-
             {needsVerification && TURNSTILE_SITE_KEY ? (
               <div className="mt-5">
                 <Turnstile
@@ -893,15 +702,275 @@ export function CoilApp() {
               </button>
             ) : null}
 
-            <button
-              type="button"
-              onClick={() => void play()}
-              disabled={playDisabled}
-              className="mt-4 h-12 w-full rounded-lg bg-accent text-base font-medium text-accent-fg transition-transform enabled:active:scale-[0.98] disabled:cursor-wait disabled:opacity-50 sm:mt-5"
-            >
-              {verificationState === "verifying" ? "Checking…" : "Play"}
-            </button>
-            <div className="mt-2 flex gap-2">
+            <div className="mt-4 flex gap-1 rounded-lg bg-bg/60 p-1 text-xs">
+              {(
+                [
+                  ["look", "your look"],
+                  ["goals", "goals"],
+                  ["controls", "how to play"],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setTab(id)}
+                  className={`flex-1 rounded-md py-1.5 ${tab === id ? "bg-elevated text-fg" : "text-muted hover:text-fg"}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {tab === "look" && (
+              <>
+                <div className="mt-4 text-xs text-muted">Skin</div>
+                <div className="mt-2 grid grid-cols-8 gap-2">
+                  {SKINS.map((s, i) => (
+                    <button
+                      key={`${s.fill}-${i}`}
+                      type="button"
+                      aria-label={
+                        locked(i)
+                          ? `Skin ${i + 1}, unlocks at length ${UNLOCKS[i]}`
+                          : `Skin ${i + 1}`
+                      }
+                      onClick={() => {
+                        if (locked(i)) {
+                          setLockNote(
+                            `reach length ${UNLOCKS[i]} to unlock this skin (best ${best})`,
+                          );
+                          return;
+                        }
+                        setLockNote(null);
+                        setSkin(i);
+                      }}
+                      className="relative h-9 w-full rounded-md border"
+                      style={{
+                        background: gradientOf(s.bands),
+                        borderColor: i === skin ? "#e8eaee" : "transparent",
+                        boxShadow: i === skin ? "0 0 0 1px #e8eaee" : "none",
+                        opacity: locked(i) ? 0.45 : 1,
+                      }}
+                    >
+                      {locked(i) && (
+                        <span className="absolute inset-0 flex items-center justify-center text-fg">
+                          <Lock size={14} />
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    aria-label="Custom skin"
+                    onClick={() => setSkin(CUSTOM)}
+                    className="col-span-8 mt-1 flex h-9 items-center justify-between rounded-md border px-3 text-xs"
+                    style={{
+                      background: gradientOf(custom),
+                      borderColor: skin === CUSTOM ? "#e8eaee" : "transparent",
+                      boxShadow: skin === CUSTOM ? "0 0 0 1px #e8eaee" : "none",
+                    }}
+                  >
+                    <span className="rounded bg-bg/70 px-2 py-0.5 text-fg">build your own</span>
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  aria-label={`This week's skin: ${weekly.name}`}
+                  onClick={() => {
+                    if (!weekEarned) {
+                      setLockNote(
+                        `finish ${WEEKLY_GOAL} daily challenges this week to earn "${weekly.name}" (${Math.min(weekDone, WEEKLY_GOAL)}/${WEEKLY_GOAL})`,
+                      );
+                      return;
+                    }
+                    setLockNote(null);
+                    setSkin(WEEKLY);
+                  }}
+                  className="mt-2 flex h-9 w-full items-center justify-between rounded-md border px-3 text-xs"
+                  style={{
+                    background: gradientOf(weekly.bands),
+                    borderColor: skin === WEEKLY ? "#e8eaee" : "transparent",
+                    boxShadow: skin === WEEKLY ? "0 0 0 1px #e8eaee" : "none",
+                    opacity: weekEarned ? 1 : 0.6,
+                  }}
+                >
+                  <span className="rounded bg-bg/70 px-2 py-0.5 text-fg">
+                    this week only · {weekly.name}
+                  </span>
+                  <span className="rounded bg-bg/70 px-2 py-0.5 text-fg">
+                    {weekEarned
+                      ? "earned"
+                      : `${Math.min(weekDone, WEEKLY_GOAL)}/${WEEKLY_GOAL} challenges`}
+                    {!weekEarned && <Lock size={10} className="ml-1 inline" />}
+                  </span>
+                </button>
+                {lockNote && <p className="mt-2 text-xs text-subtle">{lockNote}</p>}
+                {skin === CUSTOM && (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    {custom.map((c, i) => (
+                      <label
+                        key={i}
+                        className="relative h-9 w-9 overflow-hidden rounded-md border border-line"
+                      >
+                        <input
+                          type="color"
+                          value={c}
+                          aria-label={`Band ${i + 1} colour`}
+                          onChange={(e) =>
+                            setCustom(custom.map((x, k) => (k === i ? e.target.value : x)))
+                          }
+                          className="absolute -inset-2 h-14 w-14 cursor-pointer border-0 bg-transparent p-0"
+                        />
+                      </label>
+                    ))}
+                    {custom.length < MAX_CUSTOM_BANDS && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCustom([...custom, custom[custom.length - 1] ?? "#ffffff"])
+                        }
+                        className="h-9 rounded-md border border-line px-3 text-xs text-muted hover:text-fg"
+                      >
+                        + band
+                      </button>
+                    )}
+                    {custom.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => setCustom(custom.slice(0, -1))}
+                        className="h-9 rounded-md border border-line px-3 text-xs text-muted hover:text-fg"
+                      >
+                        remove
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                <div className="mt-4 text-xs text-muted">Boost trail</div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {TRAILS.map((t, i) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => trailOpen(i) && setTrail(i)}
+                      className={`rounded-md border px-3 py-1.5 text-xs ${trail === i ? "border-accent text-fg" : "border-line text-muted hover:text-fg"} ${trailOpen(i) ? "" : "opacity-45"}`}
+                    >
+                      {t}
+                      {!trailOpen(i) && <Lock size={10} className="ml-1 inline" />}
+                    </button>
+                  ))}
+                  <span className="mx-1 self-center text-xs text-subtle">death</span>
+                  {DEATH_FX.map((t, i) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => deathOpen(i) && setDeathFx(i)}
+                      className={`rounded-md border px-3 py-1.5 text-xs ${deathFx === i ? "border-accent text-fg" : "border-line text-muted hover:text-fg"} ${deathOpen(i) ? "" : "opacity-45"}`}
+                    >
+                      {t}
+                      {!deathOpen(i) && <Lock size={10} className="ml-1 inline" />}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+            {tab === "goals" && (
+              <>
+                {hud?.profile && (
+                  <p className="mt-4 text-xs text-subtle">
+                    {hud.profile.streak > 0
+                      ? `🔥 ${hud.profile.streak}-day streak`
+                      : "🔥 play today to start a streak"}
+                    {hud.profile.freezes > 0 ? " · freeze banked" : ""}
+                    {(() => {
+                      const next = STREAK_MILESTONES.find((m) => m.days > hud.profile!.streak);
+                      return next
+                        ? ` · ${next.days - hud.profile!.streak} more days to ${next.label}`
+                        : "";
+                    })()}
+                    {" · "}
+                    {LEAGUES[leagueOf(hud.profile.weekBest)]!.name} league this week
+                    {(() => {
+                      const t = leagueOf(hud.profile!.weekBest);
+                      const nxt = LEAGUES[t + 1];
+                      return nxt ? ` (${nxt.min - hud.profile!.weekBest} to ${nxt.name})` : "";
+                    })()}
+                    {hud.profile.prevTier > 0 &&
+                      ` · finished last week in ${LEAGUES[hud.profile.prevTier - 1]?.name ?? ""}`}
+                  </p>
+                )}
+                {hud && hud.arenaMode.id === 0 && hud.arenaMode.secsToNext > 0 && (
+                  <p className="mt-1 text-xs text-subtle">
+                    next event in {Math.ceil(hud.arenaMode.secsToNext / 60)} min: every hour, 15
+                    minutes of a twist
+                  </p>
+                )}
+                {hud && hud.arenaMode.id > 0 && (
+                  <p className="mt-1 text-xs text-[#c9bfff]">
+                    event now: {MODES.find((m) => m.id === hud.arenaMode.id)?.text} ·{" "}
+                    {Math.ceil(hud.arenaMode.secsLeft / 60)} min left
+                  </p>
+                )}
+                {hud?.challenges && hud.challenges.length > 0 && (
+                  <div className="mt-4">
+                    <div className="text-xs text-muted">
+                      Today&apos;s challenges · each unlocks a cosmetic
+                    </div>
+                    <ul className="mt-2 space-y-1.5">
+                      {hud.challenges.map((c) => (
+                        <li key={c.id} className="text-xs">
+                          <div className="flex justify-between">
+                            <span className={c.done ? "text-fg" : "text-muted"}>
+                              {c.done ? "✓ " : ""}
+                              {c.text}
+                            </span>
+                            <span className="tabular-nums text-subtle">
+                              {Math.min(c.progress, c.target)}/{c.target}
+                            </span>
+                          </div>
+                          <div className="mt-1 h-1 w-full rounded bg-elevated">
+                            <div
+                              className={`h-1 rounded ${c.done ? "bg-[#f0c14a]" : "bg-accent"}`}
+                              style={{ width: `${Math.min(100, (c.progress / c.target) * 100)}%` }}
+                            />
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </>
+            )}
+            {tab === "controls" && (
+              <>
+                {touch && (
+                  <div className="mt-4 flex items-center gap-2 text-xs text-muted">
+                    <span>Steering</span>
+                    {(["point", "stick"] as const).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => chooseControls(m)}
+                        className={`rounded-md border px-3 py-1.5 ${controls === m ? "border-accent text-fg" : "border-line hover:text-fg"}`}
+                      >
+                        {m === "point" ? "follow finger" : "joystick"}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <p className="mt-4 text-xs leading-relaxed text-muted">
+                  {touch
+                    ? "Drag to steer. Hold the lightning button, or a second finger anywhere, to boost. Boosting sheds length behind you."
+                    : "Mouse or WASD to steer. Hold click, space or shift to boost. Scroll to zoom."}{" "}
+                  Your head touching any other body pops you. Coil around smaller snakes and eat
+                  what they leave behind.
+                </p>
+                <p className="mt-2 text-xs text-muted">
+                  Keys 1 to 4 send an emote. Scroll to zoom.
+                </p>
+              </>
+            )}
+
+            <div className="mt-4 flex gap-2">
               <button
                 type="button"
                 onClick={() => void invite()}
@@ -922,14 +991,6 @@ export function CoilApp() {
                 top players
               </Link>
             </div>
-
-            <p className="mt-4 text-xs leading-relaxed text-subtle sm:mt-5">
-              {touch
-                ? "Drag to steer. Hold the lightning button, or a second finger anywhere, to boost. Boosting sheds length behind you."
-                : "Mouse or WASD to steer. Hold click, space or shift to boost. Scroll to zoom."}{" "}
-              Your head touching any other body pops you. Coil around smaller snakes and eat what
-              they leave behind.
-            </p>
           </div>
         </div>
       )}
@@ -1077,7 +1138,7 @@ async function renderShareCard(hud: HudState, nick: string, bands: string[]): Pr
     }
     ctx.fillStyle = "#e8eaee";
     ctx.font = "600 64px Outfit, system-ui, sans-serif";
-    ctx.fillText("AgenCoil", 80, 130);
+    ctx.fillText("snek", 80, 130);
     ctx.font = "500 34px Outfit, system-ui, sans-serif";
     ctx.fillStyle = "#8b93a1";
     ctx.fillText(nick, 80, 190);
@@ -1098,4 +1159,58 @@ async function renderShareCard(hud: HudState, nick: string, bands: string[]): Pr
   } catch {
     return null;
   }
+}
+
+function Chip({
+  children,
+  tone,
+}: {
+  children: React.ReactNode;
+  tone?: "gold" | "fire" | "violet";
+}) {
+  const cls =
+    tone === "gold"
+      ? "border-[#f0c14a]/50 text-[#f0c14a]"
+      : tone === "fire"
+        ? "border-[#ff8a3d]/50 text-[#ffb27a]"
+        : tone === "violet"
+          ? "border-[#9b8cff]/50 text-[#c9bfff]"
+          : "border-line text-muted";
+  return <span className={`rounded-full border px-2 py-0.5 leading-tight ${cls}`}>{children}</span>;
+}
+
+/** The snek mark: a coiled S in the chosen skin's first two colours. */
+function SnekMark({ colors }: { colors: string[] }) {
+  const a = colors[0] ?? "#2ad3b5";
+  const b = colors[1] ?? colors[0] ?? "#ffd166";
+  return (
+    <svg width="52" height="52" viewBox="0 0 64 64" aria-hidden="true" className="shrink-0">
+      <defs>
+        <linearGradient id="snekmark" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor={a} />
+          <stop offset="1" stopColor={b} />
+        </linearGradient>
+      </defs>
+      <path
+        d="M46 14c-6-6-22-6-24 4s16 8 22 14-2 18-14 18-16-6-18-10"
+        fill="none"
+        stroke="rgba(0,0,0,0.45)"
+        strokeWidth="14"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        transform="translate(2 3)"
+      />
+      <path
+        d="M46 14c-6-6-22-6-24 4s16 8 22 14-2 18-14 18-16-6-18-10"
+        fill="none"
+        stroke="url(#snekmark)"
+        strokeWidth="12"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="45" cy="13" r="6.5" fill={a} />
+      <circle cx="47.5" cy="11.5" r="2.4" fill="#fff" />
+      <circle cx="48.2" cy="11.8" r="1.1" fill="#101318" />
+    </svg>
+  );
 }

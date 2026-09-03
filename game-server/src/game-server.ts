@@ -83,6 +83,13 @@ interface Client {
   seq: number;
   /** Newer protocol: device key present, gets STATS2/PROFILE/NEAR/EVENT. */
   v2: boolean;
+  /**
+   * Wire protocol version announced on the socket URL (`?v=2`). Fixed for
+   * the whole connection, so the level byte after full snake entries is
+   * written consistently from the first snapshot; `v2` (device key seen)
+   * can only flip later, which would misalign snapshots sent before it.
+   */
+  proto: number;
   key: string;
   party: string;
   trail: number;
@@ -399,6 +406,7 @@ export class GameServer {
 
   private onConnection(ws: WebSocket, req: IncomingMessage): void {
     const ip = clientIp(req);
+    const proto = new URL(req.url ?? "/", "http://x").searchParams.get("v") === "2" ? 2 : 1;
     const now = Date.now();
     const recent = (this.connectLog.get(ip) ?? []).filter((t) => now - t < 60_000);
     recent.push(now);
@@ -439,6 +447,7 @@ export class GameServer {
       sentFood: new Set(),
       seq: 0,
       v2: false,
+      proto,
       key: "",
       party: "",
       trail: 0,
@@ -469,7 +478,7 @@ export class GameServer {
         .str(this.instance)
         .f32(ARENA_RADIUS)
         .u8(SERVER_TICK_HZ)
-        .u8(2)
+        .u8(client.proto)
         .finish(),
     );
   }
@@ -1250,7 +1259,7 @@ export class GameServer {
       const full = !c.known.has(s.id);
       const packed = s.trail ? { ...s, skin: packSkin(s.skin, s.trail) } : s;
       writeSnakeEntry(w, this.nidOf(s.id), packed, full, MAX_NET_POINTS);
-      if (full && c.v2) w.u8(Math.min(255, s.level ?? 0));
+      if (full && c.proto >= 2) w.u8(Math.min(255, s.level ?? 0));
       c.known.add(s.id);
     }
     const gone: number[] = [];

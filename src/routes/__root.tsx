@@ -3,7 +3,7 @@ import { AuthProvider } from "@/lib/auth/provider";
 import { PreviewHostBridge } from "@/components/preview-host-bridge";
 import appCss from "../styles.css?url";
 
-const APP_NAME = "AgenCoil";
+const APP_NAME = "snek";
 
 export const Route = createRootRoute({
   head: () => ({
@@ -19,7 +19,7 @@ export const Route = createRootRoute({
       {
         name: "description",
         content:
-          "Eat, grow, survive. A multiplayer slither arena — steer with the mouse, hold to boost.",
+          "snek: eat, grow, survive. A multiplayer slither arena. Steer with the mouse, hold to boost.",
       },
     ],
     links: [

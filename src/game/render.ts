@@ -33,6 +33,9 @@ export class Renderer {
   private segmentSprites = new Map<string, Sprite>();
   private hexTile: HTMLCanvasElement | null = null;
   private hexPattern: CanvasPattern | null = null;
+  private nebula: HTMLCanvasElement | null = null;
+  private nebulaPattern: CanvasPattern | null = null;
+  private vignette: { w: number; h: number; grd: CanvasGradient } | null = null;
   private time = 0;
 
   constructor() {
@@ -45,6 +48,7 @@ export class Renderer {
     }
     this.foodSprites = FOOD_COLORS.map((c) => makeFoodSprite(c));
     this.hexTile = makeHexTile();
+    this.nebula = makeNebula();
   }
 
   stepFx(dt: number, particles: Particle[], floaters: Floater[], cam: Camera): void {
@@ -90,8 +94,9 @@ export class Renderer {
     const z = cam.z;
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = "#07090f";
+    ctx.fillStyle = "#05070c";
     ctx.fillRect(0, 0, w, h);
+    this.drawDeepSpace(ctx, w, h, dpr, cam);
 
     ctx.setTransform(
       z * dpr,
@@ -129,8 +134,79 @@ export class Renderer {
     if (emotes && emotes.size) this.drawEmotes(ctx, snakes, emotes, z);
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.drawVignette(ctx, w, h, localId ? snakes.find((s) => s.id === localId) : undefined);
     this.drawNames(ctx, snakes, cam, w, h, dpr, z, ox, oy);
     this.drawMinimap(ctx, snakes, localId, w, h, dpr, phase, insets, event, ghost);
+  }
+
+  /**
+   * Two parallax layers behind the arena: a slow, seamless nebula wash and a
+   * field of distant stars. Both are repeating patterns shifted by a fraction
+   * of the camera position, so the world reads as deep rather than flat.
+   */
+  private drawDeepSpace(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+    dpr: number,
+    cam: Camera,
+  ): void {
+    if (!this.nebulaPattern && this.nebula) {
+      this.nebulaPattern = ctx.createPattern(this.nebula, "repeat");
+    }
+    // One pattern fill per frame: the star field is baked into the nebula
+    // tile, so a phone pays for a single full-screen pass.
+    const layers: [CanvasPattern | null, number, number][] = [[this.nebulaPattern, 0.08, 1.2]];
+    for (const [pat, parallax, scale] of layers) {
+      if (!pat) continue;
+      const k = dpr * scale;
+      const ox = -cam.x * parallax * dpr;
+      const oy = -cam.y * parallax * dpr;
+      ctx.setTransform(k, 0, 0, k, ox, oy);
+      ctx.fillStyle = pat;
+      ctx.fillRect(-ox / k, -oy / k, w / k, h / k);
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  /** Darkened corners, and a tint of your own colour at the edges while boosting. */
+  private drawVignette(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+    me: Snake | undefined,
+  ): void {
+    if (!this.vignette || this.vignette.w !== w || this.vignette.h !== h) {
+      const grd = ctx.createRadialGradient(
+        w / 2,
+        h / 2,
+        Math.min(w, h) * 0.42,
+        w / 2,
+        h / 2,
+        Math.max(w, h) * 0.78,
+      );
+      grd.addColorStop(0, "rgba(0,0,0,0)");
+      grd.addColorStop(1, "rgba(0,0,0,0.5)");
+      this.vignette = { w, h, grd };
+    }
+    ctx.fillStyle = this.vignette.grd;
+    ctx.fillRect(0, 0, w, h);
+    if (me && me.boosting && me.alive) {
+      const [r, g, b] = hexRgb(bandsOf(me)[0]!);
+      const pulse = 0.1 + Math.sin(this.time * 14) * 0.03;
+      const grd = ctx.createRadialGradient(
+        w / 2,
+        h / 2,
+        Math.min(w, h) * 0.38,
+        w / 2,
+        h / 2,
+        Math.max(w, h) * 0.7,
+      );
+      grd.addColorStop(0, `rgba(${r},${g},${b},0)`);
+      grd.addColorStop(1, `rgba(${r},${g},${b},${pulse})`);
+      ctx.fillStyle = grd;
+      ctx.fillRect(0, 0, w, h);
+    }
   }
 
   private drawEmotes(
@@ -245,10 +321,12 @@ export class Renderer {
       const pulse = 1 - wob + Math.sin(t * (f.k >= 3 ? 6 : 2.6) + f.x * 0.07 + f.y * 0.05) * wob;
       const dest = spr.size * (f.r / 15) * pulse;
       if (dest < minDest) return;
-      if (f.k === 3 || f.k === 4) {
-        ctx.globalAlpha = 0.22 + Math.sin(t * 5 + f.x) * 0.08;
+      if (f.k >= 2) {
+        ctx.globalCompositeOperation = "lighter";
+        ctx.globalAlpha = (f.k === 2 ? 0.16 : 0.26) + Math.sin(t * 5 + f.x) * 0.08;
         ctx.drawImage(spr.canvas, f.x - dest, f.y - dest, dest * 2, dest * 2);
         ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = "source-over";
       }
       ctx.drawImage(spr.canvas, f.x - dest * 0.5, f.y - dest * 0.5, dest, dest);
     });
@@ -299,12 +377,19 @@ export class Renderer {
     };
 
     if (s.boosting) {
-      const pulse = 0.28 + Math.sin(this.time * 18) * 0.1;
+      // Neon: the body's own colour, drawn additively in two widths.
+      const pulse = 0.22 + Math.sin(this.time * 18) * 0.08;
       tracePath(0, 0);
+      ctx.globalCompositeOperation = "lighter";
+      ctx.globalAlpha = pulse * 0.6;
+      ctx.strokeStyle = fill;
+      ctx.lineWidth = r * 4.2;
+      ctx.stroke();
       ctx.globalAlpha = pulse;
       ctx.strokeStyle = shine;
-      ctx.lineWidth = r * 3.2;
+      ctx.lineWidth = r * 2.6;
       ctx.stroke();
+      ctx.globalCompositeOperation = "source-over";
       ctx.globalAlpha = 1;
     } else if (s.invuln > 0) {
       tracePath(0, 0);
@@ -323,9 +408,9 @@ export class Renderer {
       return;
     }
 
-    tracePath(r * 0.22, r * 0.34);
-    ctx.strokeStyle = "rgba(0,0,0,0.32)";
-    ctx.lineWidth = r * 2;
+    tracePath(r * 0.22, r * 0.36);
+    ctx.strokeStyle = "rgba(0,0,0,0.34)";
+    ctx.lineWidth = r * 2.2;
     ctx.stroke();
 
     // Segments, tail to head, so each disc overlaps the one behind it. Discs
@@ -680,21 +765,100 @@ function makeSegmentSprite(color: string): Sprite {
   const rgb = hexRgb(color);
   const cx = 32;
   const cy = 32;
-  const grd = ctx.createRadialGradient(cx - 9, cy - 10, 2, cx, cy, 31);
-  grd.addColorStop(0, shade(rgb, 0.45));
-  grd.addColorStop(0.35, shade(rgb, 0.08));
-  grd.addColorStop(0.85, shade(rgb, -0.18));
-  grd.addColorStop(1, shade(rgb, -0.45));
+  // Glossy sphere: bright specular top-left, saturated mid, deep shadow at
+  // the rim, then a thin rim light and a dark outline so discs read as one
+  // rounded body rather than a chain of flat circles.
+  const grd = ctx.createRadialGradient(cx - 10, cy - 11, 2, cx, cy, 31);
+  grd.addColorStop(0, shade(rgb, 0.6));
+  grd.addColorStop(0.28, shade(rgb, 0.14));
+  grd.addColorStop(0.72, shade(rgb, -0.08));
+  grd.addColorStop(1, shade(rgb, -0.52));
   ctx.beginPath();
   ctx.arc(cx, cy, 31, 0, Math.PI * 2);
   ctx.fillStyle = grd;
   ctx.fill();
   ctx.beginPath();
-  ctx.arc(cx, cy, 30.4, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(0,0,0,0.28)";
-  ctx.lineWidth = 1.6;
+  ctx.arc(cx, cy, 28.5, Math.PI * 1.05, Math.PI * 1.55);
+  ctx.strokeStyle = "rgba(255,255,255,0.28)";
+  ctx.lineWidth = 2.2;
+  ctx.lineCap = "round";
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, cy, 28.5, Math.PI * 0.15, Math.PI * 0.6);
+  ctx.strokeStyle = "rgba(0,0,0,0.22)";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, cy, 30.3, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(0,0,0,0.38)";
+  ctx.lineWidth = 1.7;
   ctx.stroke();
   return { canvas, size };
+}
+
+/** A seamless 768px tile of soft colour clouds; drawn with parallax behind the grid. */
+function makeNebula(): HTMLCanvasElement {
+  const size = 768;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = "#05070c";
+  ctx.fillRect(0, 0, size, size);
+  const blobs: [number, number, number, string][] = [
+    [0.2, 0.3, 300, "36,120,150"],
+    [0.75, 0.2, 260, "95,70,170"],
+    [0.55, 0.7, 320, "40,80,150"],
+    [0.15, 0.85, 220, "150,60,120"],
+    [0.9, 0.65, 240, "30,110,120"],
+  ];
+  ctx.globalCompositeOperation = "lighter";
+  for (const [fx, fy, rad, rgb] of blobs) {
+    // Draw each blob at the eight wrapped positions too, so the tile repeats
+    // without seams.
+    for (let ox = -1; ox <= 1; ox++) {
+      for (let oy = -1; oy <= 1; oy++) {
+        const x = fx * size + ox * size;
+        const y = fy * size + oy * size;
+        const g = ctx.createRadialGradient(x, y, 0, x, y, rad);
+        g.addColorStop(0, `rgba(${rgb},0.22)`);
+        g.addColorStop(0.5, `rgba(${rgb},0.09)`);
+        g.addColorStop(1, `rgba(${rgb},0)`);
+        ctx.fillStyle = g;
+        ctx.fillRect(x - rad, y - rad, rad * 2, rad * 2);
+      }
+    }
+  }
+  ctx.globalCompositeOperation = "source-over";
+  const stars = makeStarTile();
+  for (let x = 0; x < size; x += 256)
+    for (let y = 0; y < size; y += 256) ctx.drawImage(stars, x, y, 256, 256);
+  return canvas;
+}
+
+/** A 512px tile of faint distant stars for the far parallax layer. */
+function makeStarTile(): HTMLCanvasElement {
+  const size = 512;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  let seed = 7;
+  const rnd = () => {
+    seed = (seed * 16807) % 2147483647;
+    return seed / 2147483647;
+  };
+  for (let i = 0; i < 90; i++) {
+    const x = rnd() * size;
+    const y = rnd() * size;
+    const r = 0.5 + rnd() * 1.1;
+    const a = 0.25 + rnd() * 0.5;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${rnd() > 0.8 ? "180,210,255" : "232,234,238"},${a})`;
+    ctx.fill();
+  }
+  return canvas;
 }
 
 /** One repeat of a pointy-top hexagon grid, drawn in world units. */
@@ -709,7 +873,7 @@ function makeHexTile(): HTMLCanvasElement {
   const sx = canvas.width / w;
   const sy = canvas.height / h;
   ctx.scale(sx, sy);
-  ctx.strokeStyle = "rgba(232,234,238,0.055)";
+  ctx.strokeStyle = "rgba(232,234,238,0.045)";
   ctx.lineWidth = 1.4;
   const hex = (cx: number, cy: number) => {
     ctx.beginPath();
