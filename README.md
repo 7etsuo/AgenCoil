@@ -41,6 +41,28 @@ Then set `VITE_GAME_SERVER=wss://agencoil-server.fly.dev/api/ws` for the client,
 
 Abuse controls live in the server: four connections per IP, twenty connects per minute, sixty messages per second, and a name filter. The Vercel project also carries a firewall rate limit on `/api/ws`.
 
+### Human verification
+
+Online spawning can be protected with Cloudflare Turnstile. Create a widget with the `play`
+action and configure its allowed hostname, then set these variables on the matching deployments:
+
+```text
+# Frontend (public)
+VITE_TURNSTILE_SITE_KEY=<site-key>
+
+# Game server (private)
+TURNSTILE_SECRET_KEY=<secret-key>
+TURNSTILE_HOSTNAMES=mmo.agenc.ag
+TURNSTILE_ACTION=play
+```
+
+When the secret is present, the server fails closed: the frontend exchanges the single-use
+Turnstile response at `POST /api/play-ticket`, then includes the resulting short-lived,
+IP-bound ticket in its WebSocket `HELLO`. A successful redemption permits respawns for 30
+minutes and is carried across short reconnects by the signed resume token. Keep `GAME_SECRET`
+stable across instances. Without `TURNSTILE_SECRET_KEY`, the play gate is disabled for local
+development and existing test environments.
+
 ## Tests
 
 ```bash

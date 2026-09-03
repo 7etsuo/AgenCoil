@@ -66,6 +66,7 @@ export interface HudState {
   players: number;
   mode: NetState;
   rtt: number;
+  verificationError: string | null;
 }
 
 export type Controls = "point" | "stick";
@@ -166,6 +167,7 @@ export class CoilEngine {
   private deathCount = 0;
   private dbgWall = 0;
   private dbgSnake = 0;
+  private verificationError: string | null = null;
   private onResize = () => this.resize();
   private onBlur = () => {
     this.keys.clear();
@@ -216,6 +218,7 @@ export class CoilEngine {
           this.pushFeed(text);
           if (kind === 2) this.audio.kill();
         },
+        onGateRequired: (message) => this.onGateRequired(message),
       });
       this.net.connect();
     } else {
@@ -345,6 +348,7 @@ export class CoilEngine {
     this.deathFx = null;
     this.boosting = false;
     this.watchNid = null;
+    this.verificationError = null;
     if (this.net && this.net.state !== "offline") {
       // Online, or still connecting: ask the server and wait for SPAWNED.
       // If nothing arrives within SPAWN_TIMEOUT_MS the tick starts a local game.
@@ -392,6 +396,11 @@ export class CoilEngine {
   }
   setParty(code: string): void {
     if (this.net) this.net.party = code;
+  }
+
+  /** Get a short-lived, server-signed play ticket from a Turnstile response. */
+  async authorize(turnstileToken: string): Promise<void> {
+    if (this.net && this.net.state !== "offline") await this.net.authorize(turnstileToken);
   }
 
   subscribe(fn: (h: HudState) => void): () => void {
@@ -465,7 +474,16 @@ export class CoilEngine {
       players: this.stats?.clients ?? (this.online ? 1 : 0),
       mode: this.net?.state ?? "offline",
       rtt: this.net?.rttMs ?? 0,
+      verificationError: this.verificationError,
     };
+  }
+
+  private onGateRequired(message: string): void {
+    this.spawnWait = 0;
+    this.net?.idle();
+    this.phase = "menu";
+    this.verificationError = message;
+    this.emitHud();
   }
 
   private onNetState(s: NetState): void {

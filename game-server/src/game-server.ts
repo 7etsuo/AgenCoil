@@ -7,7 +7,7 @@
  * process (see ../dev.ts). Nothing here depends on the host.
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import type { IncomingMessage, Server } from "node:http";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket, type RawData } from "ws";
 import {
   ARENA_RADIUS,
@@ -47,6 +47,7 @@ import {
 import { DailyBoard } from "./daily";
 import { ProfileStore, type Profile } from "./profiles";
 import { UNLOCK_DEATH, UNLOCK_TRAIL, isoWeek, type LifeStats } from "../../src/game/challenges";
+import { playGateFromEnv } from "./play-gate";
 
 interface View {
   cx: number;
@@ -86,6 +87,8 @@ interface Client {
   fp: { lastAt: number; lastAngle: number; n: number; sumDt: number; sumDt2: number; same: number };
   lastPing: number;
   alive: boolean;
+  /** A successful Turnstile redemption authorizes respawns until this time. */
+  verifiedUntil: number;
 }
 
 /** What the current life has done so far, for challenges and the profile. */
@@ -108,6 +111,22 @@ interface Token {
   name: string;
   kills: number;
   exp: number;
+  /** Carries human verification across a short reconnect or instance hop. */
+  humanExp?: number;
+}
+
+/** Compact wire shape: TOKEN messages use an 8-bit string length. */
+interface WireToken {
+  s: string;
+  m: number;
+  x: number;
+  y: number;
+  a: number;
+  k: number;
+  n: string;
+  z: number;
+  e: number;
+  h?: number;
 }
 
 const VIEW_MARGIN = 220;
@@ -130,9 +149,27 @@ function sanitizeName(raw: string): string {
 }
 
 function clientIp(req: IncomingMessage): string {
+  const cloudflare = req.headers["cf-connecting-ip"];
+  if (typeof cloudflare === "string" && cloudflare.trim()) return cloudflare.trim();
+  const real = req.headers["x-real-ip"];
+  if (typeof real === "string" && real.trim()) return real.trim();
   const fwd = req.headers["x-forwarded-for"];
   const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(",")[0]?.trim();
   return first || req.socket.remoteAddress || "unknown";
+}
+
+async function readJson(req: IncomingMessage, maxBytes = 4096): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > maxBytes) throw new Error("request too large");
+    chunks.push(buffer);
+  }
+  const value = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid json");
+  return value as Record<string, unknown>;
 }
 
 function sanitizeBands(bands: string[] | undefined): string[] | undefined {
@@ -145,6 +182,7 @@ export class GameServer {
   readonly world = new World(true);
   readonly instance = `${process.env.VERCEL_DEPLOYMENT_ID ?? "local"}-${randomBytes(3).toString("hex")}`;
   private readonly secret = process.env.GAME_SECRET ?? randomBytes(32).toString("hex");
+  private readonly playGate = playGateFromEnv(this.secret);
   private readonly clients = new Set<Client>();
   private readonly nids = new Map<string, number>();
   private readonly grace = new Map<string, NodeJS.Timeout>();
@@ -179,20 +217,72 @@ export class GameServer {
     this.wss.on("connection", (ws, req) => this.onConnection(ws, req));
     server.on("request", (req, res) => {
       if (req.headers.upgrade) return;
-      res.setHeader("content-type", "application/json");
-      res.setHeader("access-control-allow-origin", "*");
-      const url = new URL(req.url ?? "/", "http://x");
-      const top = url.searchParams.get("top");
-      if (top === "alltime" || top === "weekly") {
-        res.setHeader("cache-control", "public, max-age=30");
-        void this.profiles
-          .top(top, 100)
-          .then((rows) => res.end(JSON.stringify({ kind: top, week: isoWeek(), rows })))
-          .catch(() => res.end(JSON.stringify({ kind: top, rows: [] })));
-        return;
-      }
-      res.end(JSON.stringify(this.status()));
+      void this.onHttpRequest(req, res);
     });
+  }
+
+  private async onHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    res.setHeader("content-type", "application/json");
+    res.setHeader("access-control-allow-origin", "*");
+    res.setHeader("access-control-allow-headers", "content-type");
+    res.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
+
+    const url = new URL(req.url ?? "/", "http://arena.local");
+    const path = url.pathname;
+    const top = url.searchParams.get("top");
+    if (top === "alltime" || top === "weekly") {
+      res.setHeader("cache-control", "public, max-age=30");
+      try {
+        const rows = await this.profiles.top(top, 100);
+        res.end(JSON.stringify({ kind: top, week: isoWeek(), rows }));
+      } catch {
+        res.end(JSON.stringify({ kind: top, rows: [] }));
+      }
+      return;
+    }
+    // Vercel rewrites /api/play-ticket to the /api/ws function. POST is not
+    // otherwise used on /api/ws, so accept either URL inside that function.
+    const isPlayTicket =
+      path === "/api/play-ticket" || (path === "/api/ws" && req.method === "POST");
+    const isPlayTicketPreflight =
+      path === "/api/play-ticket" || (path === "/api/ws" && req.method === "OPTIONS");
+    if (!isPlayTicket && !isPlayTicketPreflight) {
+      res.end(JSON.stringify(this.status()));
+      return;
+    }
+    res.setHeader("cache-control", "no-store");
+    if (req.method === "OPTIONS") {
+      res.statusCode = 204;
+      res.removeHeader("content-type");
+      res.end();
+      return;
+    }
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.setHeader("allow", "POST, OPTIONS");
+      res.end(JSON.stringify({ ok: false, error: "Method not allowed." }));
+      return;
+    }
+
+    let body: Record<string, unknown>;
+    try {
+      body = await readJson(req);
+    } catch {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: "Invalid request." }));
+      return;
+    }
+    const result = await this.playGate.issue(
+      typeof body.turnstileToken === "string" ? body.turnstileToken : "",
+      clientIp(req),
+    );
+    if (!result.ok) {
+      res.statusCode = result.status;
+      if (result.retryAfter) res.setHeader("retry-after", String(result.retryAfter));
+      res.end(JSON.stringify({ ok: false, error: result.error }));
+      return;
+    }
+    res.end(JSON.stringify({ ok: true, ticket: result.ticket, expiresAt: result.expiresAt }));
   }
 
   status(): Record<string, unknown> {
@@ -207,6 +297,7 @@ export class GameServer {
       uptimeSec: Math.round((Date.now() - this.startedAt) / 1000),
       tick: this.tick,
       stepMs: Math.round(this.stepMs * 100) / 100,
+      playGate: this.playGate.enabled,
       hot: this.hotSpots(12),
       daily: this.daily.top(3),
     };
@@ -326,6 +417,7 @@ export class GameServer {
       fp: { lastAt: 0, lastAngle: 0, n: 0, sumDt: 0, sumDt2: 0, same: 0 },
       lastPing: Date.now(),
       alive: true,
+      verifiedUntil: 0,
     };
     this.clients.add(client);
     this.lastActivity = Date.now();
@@ -403,6 +495,7 @@ export class GameServer {
     const tokenText = r.remaining ? r.str() : "";
     // v2 clients append: device key, death effect, party code, comeback flag.
     let comeback = false;
+    let playTicket = "";
     if (r.remaining) {
       client.v2 = true;
       client.key = r
@@ -431,6 +524,7 @@ export class GameServer {
         (client.deathFx === 0 || unlocks & UNLOCK_DEATH[client.deathFx]!)
           ? client.deathFx
           : 0;
+      playTicket = r.remaining ? r.str() : "";
     }
     if (client.sid && this.world.snakes.some((s) => s.id === client.sid && s.alive)) {
       // Already playing: a repeated hello just updates the look next spawn,
@@ -440,7 +534,26 @@ export class GameServer {
       this.world.killSnake(client.sid);
       client.sid = null;
     }
-    const token = tokenText && !respawn ? this.redeemToken(tokenText) : null;
+    // Check the signed resume token before consuming it: a verified session
+    // must survive the platform moving a socket to another server instance.
+    const resume = tokenText && !respawn ? this.verifyToken(tokenText) : null;
+    if (resume?.humanExp && resume.humanExp > Date.now()) {
+      client.verifiedUntil = resume.humanExp;
+    }
+    if (this.playGate.enabled && client.verifiedUntil <= Date.now()) {
+      const verifiedUntil = this.playGate.redeem(playTicket, client.ip);
+      if (!verifiedUntil) {
+        client.ws.send(
+          new Writer()
+            .u8(S2C.GATE_REQUIRED)
+            .str("Complete human verification before joining the arena.")
+            .finish(),
+        );
+        return;
+      }
+      client.verifiedUntil = verifiedUntil;
+    }
+    const token = resume ? this.redeemToken(tokenText) : null;
     let snake: Snake | null = null;
     if (token) {
       const held = this.world.snakes.find((s) => s.id === token.sid && s.alive);
@@ -740,17 +853,18 @@ export class GameServer {
     return createHmac("sha256", this.secret).update(payload).digest("base64url");
   }
 
-  private makeToken(s: Snake): string {
-    const t: Token = {
-      sid: s.id,
-      mass: Math.round(s.mass * 10) / 10,
+  private makeToken(s: Snake, humanExp?: number): string {
+    const t: WireToken = {
+      s: s.id,
+      m: Math.round(s.mass * 10) / 10,
       x: Math.round(s.x),
       y: Math.round(s.y),
-      angle: Math.round(s.angle * 1000) / 1000,
-      skin: s.skin,
-      name: s.name,
-      kills: s.kills,
-      exp: Date.now() + TOKEN_TTL_MS,
+      a: Math.round(s.angle * 1000) / 1000,
+      k: s.skin,
+      n: s.name,
+      z: s.kills,
+      e: Date.now() + TOKEN_TTL_MS,
+      ...(humanExp && Number.isFinite(humanExp) ? { h: humanExp } : {}),
     };
     const payload = Buffer.from(JSON.stringify(t)).toString("base64url");
     return `${payload}.${this.sign(payload)}`;
@@ -776,7 +890,22 @@ export class GameServer {
     const expectBuf = Buffer.from(this.sign(payload));
     if (sigBuf.length !== expectBuf.length || !timingSafeEqual(sigBuf, expectBuf)) return null;
     try {
-      const t = JSON.parse(Buffer.from(payload, "base64url").toString()) as Token;
+      const raw = JSON.parse(Buffer.from(payload, "base64url").toString()) as Token | WireToken;
+      const t: Token =
+        "s" in raw
+          ? {
+              sid: raw.s,
+              mass: raw.m,
+              x: raw.x,
+              y: raw.y,
+              angle: raw.a,
+              skin: raw.k,
+              name: raw.n,
+              kills: raw.z,
+              exp: raw.e,
+              humanExp: raw.h,
+            }
+          : raw;
       if (typeof t.mass !== "number" || t.exp < Date.now()) return null;
       t.mass = Math.min(t.mass, 100_000);
       return t;
@@ -789,7 +918,9 @@ export class GameServer {
     if (!client.sid) return;
     const s = this.world.snakes.find((x) => x.id === client.sid && x.alive);
     if (!s) return;
-    client.ws.send(new Writer().u8(S2C.TOKEN).str(this.makeToken(s)).finish());
+    client.ws.send(
+      new Writer().u8(S2C.TOKEN).str(this.makeToken(s, client.verifiedUntil)).finish(),
+    );
   }
 
   // ── simulation and broadcast ───────────────────────────────────────────────

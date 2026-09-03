@@ -39,6 +39,8 @@ export const S2C = {
   NOTICE: 16,
   /** Leaderboard v2: board entries carry a bounty. Sent instead of STATS to v2 clients. */
   STATS2: 17,
+  /** The server refused a spawn because no valid human-verification session exists. */
+  GATE_REQUIRED: 18,
 } as const;
 
 const enc = new TextEncoder();
