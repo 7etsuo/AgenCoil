@@ -93,6 +93,7 @@ export interface NetHooks {
   onNear: (combo: number, bonus: number) => void;
   onEvent: (e: EventInfo) => void;
   onNotice: (kind: number, text: string) => void;
+  onGateRequired: (message: string) => void;
 }
 
 interface Snap {
@@ -135,6 +136,15 @@ export function serverHttpUrl(): string {
   return defaultServerUrl().replace(/^ws/, "http");
 }
 
+export function playTicketUrl(serverUrl: string): string {
+  const url = new URL(serverUrl);
+  url.protocol = url.protocol === "wss:" ? "https:" : "http:";
+  url.pathname = url.pathname.replace(/\/api\/ws\/?$/, "/api/play-ticket");
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
 export class NetSession {
   readonly world = new World(false);
   state: NetState = "connecting";
@@ -143,6 +153,7 @@ export class NetSession {
   rttMs = 0;
   private ws: WebSocket | null = null;
   private token = "";
+  private playTicket = "";
   private look: Look | null = null;
   private wantPlay = false;
   private closed = false;
@@ -273,6 +284,26 @@ export class NetSession {
     this.ws = null;
   }
 
+  /** Exchange a Turnstile response over HTTPS before asking the socket to spawn. */
+  async authorize(turnstileToken: string): Promise<void> {
+    const response = await fetch(playTicketUrl(this.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ turnstileToken }),
+      cache: "no-store",
+    });
+    let data: { ok?: boolean; ticket?: string; error?: string } = {};
+    try {
+      data = (await response.json()) as typeof data;
+    } catch {
+      /* a non-JSON response is handled by the generic error below */
+    }
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || "Human verification is temporarily unavailable.");
+    }
+    this.playTicket = data.ticket ?? "";
+  }
+
   private scheduleRetry(): void {
     if (this.closed) return;
     this.attempts++;
@@ -316,7 +347,8 @@ export class NetSession {
     w.str(this.deviceKey)
       .u8(this.look.deathFx ?? 0)
       .str(this.party)
-      .u8(respawn && this.comebackNext ? 1 : 0);
+      .u8(respawn && this.comebackNext ? 1 : 0)
+      .str(respawn ? "" : this.playTicket);
     this.comebackNext = false;
     this.ws.send(w.finish());
   }
@@ -387,6 +419,7 @@ export class NetSession {
         const angle = r.angle();
         const mass = r.f32();
         this.selfNid = nid;
+        this.playTicket = "";
         this.pendingEats.clear();
         this.history = [];
         this.offset = { x: 0, y: 0 };
@@ -565,6 +598,11 @@ export class NetSession {
         this.rttMs = Math.round(performance.now() - this.pingSent);
         break;
       }
+      case S2C.GATE_REQUIRED:
+        this.wantPlay = false;
+        this.playTicket = "";
+        this.hooks.onGateRequired(r.str());
+        break;
       default:
         break;
     }

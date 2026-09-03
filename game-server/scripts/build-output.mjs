@@ -55,6 +55,7 @@ writeFileSync(
       routes: [
         { src: "/(.*)", headers: { "Access-Control-Allow-Origin": "*" }, continue: true },
         { handle: "filesystem" },
+        { src: "/api/play-ticket", dest: "/api/ws" },
         { src: "/api/ws", dest: "/api/ws" },
       ],
     },

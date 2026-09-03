@@ -23,6 +23,7 @@ import {
   weeklySkinFor,
 } from "@/game/challenges";
 import { Link } from "@tanstack/react-router";
+import { Turnstile } from "@/components/turnstile";
 
 const NICK_KEY = "agencoil-nick";
 const SKIN_KEY = "agencoil-skin";
@@ -32,6 +33,7 @@ const CONTROLS_KEY = "agencoil-controls";
 const BEST_KEY = "agencoil-best";
 const TRAIL_KEY = "agencoil-trail";
 const DEATHFX_KEY = "agencoil-deathfx";
+const TURNSTILE_SITE_KEY = (import.meta.env.VITE_TURNSTILE_SITE_KEY as string | undefined)?.trim();
 
 function readInt(key: string, max: number): number {
   try {
@@ -151,6 +153,12 @@ export function CoilApp() {
   const [deathFx, setDeathFx] = useState(0);
   const [party, setParty] = useState("");
   const [invited, setInvited] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState("");
+  const [turnstileReset, setTurnstileReset] = useState(0);
+  const [verificationState, setVerificationState] = useState<
+    "loading" | "ready" | "verifying" | "error"
+  >(TURNSTILE_SITE_KEY ? "loading" : "ready");
+  const [verificationError, setVerificationError] = useState<string | null>(null);
 
   useEffect(() => {
     const n = readNick() || `coil${(Math.random() * 90 + 10) | 0}`;
@@ -215,6 +223,14 @@ export function CoilApp() {
   }, []);
 
   useEffect(() => {
+    if (!hud?.verificationError) return;
+    setTurnstileToken("");
+    setVerificationState(TURNSTILE_SITE_KEY ? "loading" : "error");
+    setVerificationError(hud.verificationError);
+    setTurnstileReset((value) => value + 1);
+  }, [hud?.verificationError]);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const engine = new CoilEngine(canvas);
@@ -254,7 +270,28 @@ export function CoilApp() {
     };
   };
 
-  const play = () => {
+  const play = async () => {
+    const engine = engineRef.current;
+    if (!engine || verificationState === "verifying") return;
+    // Keep audio unlock inside the user gesture even though verification is async.
+    engine.audio.unlock();
+    const needsVerification = Boolean(TURNSTILE_SITE_KEY) && hud?.mode !== "offline";
+    if (needsVerification) {
+      if (!turnstileToken) return;
+      setVerificationState("verifying");
+      setVerificationError(null);
+      try {
+        await engine.authorize(turnstileToken);
+      } catch (error) {
+        setTurnstileToken("");
+        setVerificationState("error");
+        setVerificationError(
+          error instanceof Error ? error.message : "Human verification failed. Please try again.",
+        );
+        setTurnstileReset((value) => value + 1);
+        return;
+      }
+    }
     const chosen = locked(skin) ? 0 : skin;
     persist(nick, chosen, custom);
     try {
@@ -264,8 +301,9 @@ export function CoilApp() {
       /* ignore */
     }
     setShared(false);
-    engineRef.current?.play(look());
-    engineRef.current?.audio.unlock();
+    engine.play(look());
+    setTurnstileToken("");
+    setVerificationState("ready");
   };
 
   const invite = async () => {
@@ -344,6 +382,11 @@ export function CoilApp() {
       : hud?.mode === "connecting"
         ? "connecting"
         : "offline · practice arena";
+  const needsVerification = Boolean(TURNSTILE_SITE_KEY) && hud?.mode !== "offline";
+  const playDisabled =
+    verificationState === "verifying" ||
+    (needsVerification && !turnstileToken) ||
+    (!TURNSTILE_SITE_KEY && Boolean(hud?.verificationError));
 
   return (
     <div
@@ -725,12 +768,48 @@ export function CoilApp() {
               </div>
             )}
 
+            {needsVerification && TURNSTILE_SITE_KEY ? (
+              <div className="mt-5">
+                <Turnstile
+                  key={turnstileReset}
+                  siteKey={TURNSTILE_SITE_KEY}
+                  onToken={(token) => {
+                    setTurnstileToken(token);
+                    setVerificationError(null);
+                    setVerificationState(token ? "ready" : "loading");
+                  }}
+                  onError={() => {
+                    setVerificationState("error");
+                    setVerificationError("Human verification could not load. Please try again.");
+                  }}
+                />
+              </div>
+            ) : null}
+
+            {verificationError ? (
+              <p className="mt-3 text-center text-xs text-danger">{verificationError}</p>
+            ) : null}
+            {needsVerification && verificationState === "error" ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setVerificationError(null);
+                  setVerificationState("loading");
+                  setTurnstileReset((value) => value + 1);
+                }}
+                className="mt-2 w-full text-center text-xs text-muted underline decoration-line underline-offset-4 hover:text-fg"
+              >
+                Retry verification
+              </button>
+            ) : null}
+
             <button
               type="button"
-              onClick={play}
-              className="mt-5 h-12 w-full rounded-lg bg-accent text-base font-medium text-accent-fg transition-transform active:scale-[0.98] sm:mt-6"
+              onClick={() => void play()}
+              disabled={playDisabled}
+              className="mt-4 h-12 w-full rounded-lg bg-accent text-base font-medium text-accent-fg transition-transform enabled:active:scale-[0.98] disabled:cursor-wait disabled:opacity-50 sm:mt-5"
             >
-              Play
+              {verificationState === "verifying" ? "Checking…" : "Play"}
             </button>
             <div className="mt-2 flex gap-2">
               <button

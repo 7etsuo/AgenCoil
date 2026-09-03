@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "npm run bundle && node dist/dev.mjs",
     "bundle": "esbuild dev.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/dev.mjs",
+    "test": "node --experimental-strip-types --test src/play-gate.test.ts",
     "typecheck": "tsc -p tsconfig.json",
     "build:vercel": "node scripts/build-output.mjs"
   },
