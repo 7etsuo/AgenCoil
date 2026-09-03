@@ -33,6 +33,28 @@
     cursor: pointer;
   }
 
+  /* Phones: no rubber-banding, pull-to-refresh, text selection or long-press
+     callouts under a steering finger. Inputs keep normal selection. */
+  html,
+  body {
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+
+  body {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+  }
+
+  input,
+  textarea {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
   * {
     -webkit-tap-highlight-color: transparent;
   }

@@ -79,6 +79,7 @@ export class Renderer {
     localId: string | null,
     phase: Phase,
     aim: Vec | null,
+    insets: { top: number; bottom: number } = { top: 0, bottom: 0 },
   ): void {
     const shake = cam.trauma * cam.trauma;
     const ox = (Math.random() * 2 - 1) * shake * 14;
@@ -121,7 +122,7 @@ export class Renderer {
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.drawNames(ctx, snakes, cam, w, h, dpr, z, ox, oy);
-    this.drawMinimap(ctx, snakes, localId, w, h, dpr, phase);
+    this.drawMinimap(ctx, snakes, localId, w, h, dpr, phase, insets);
   }
 
   private drawArena(
@@ -434,15 +435,19 @@ export class Renderer {
     h: number,
     dpr: number,
     phase: Phase,
+    insets: { top: number; bottom: number },
   ): void {
     if (phase === "menu") return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const cssW = w / dpr;
     const cssH = h / dpr;
-    const size = cssW < 640 ? 88 : 116;
+    const narrow = cssW < 640;
+    const size = narrow ? 84 : 116;
     const m = 16;
     const cx = cssW - m - size / 2;
-    const cy = cssH - m - size / 2;
+    // Phones: the boost button owns the bottom-right corner and the
+    // leaderboard is hidden, so the map goes top-right under the notch.
+    const cy = narrow ? insets.top + m + size / 2 : cssH - insets.bottom - m - size / 2;
     ctx.beginPath();
     ctx.arc(cx, cy, size / 2, 0, Math.PI * 2);
     ctx.fillStyle = "rgba(7,9,15,0.7)";

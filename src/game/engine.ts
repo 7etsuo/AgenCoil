@@ -121,6 +121,10 @@ export class CoilEngine {
   controls: Controls = "point";
   private stick: Stick | null = null;
   private stickId: number | null = null;
+  /** The finger that steers; any second finger boosts while it is down. */
+  private steerId: number | null = null;
+  private boostFingers = new Set<number>();
+  private insets = { top: 0, bottom: 0 };
   private watchNid: number | null = null;
   private spawnWait = 0;
   private feed: { text: string; t: number }[] = [];
@@ -134,6 +138,10 @@ export class CoilEngine {
     this.boosting = false;
     this.pointerDown = false;
     this.holdBoost = false;
+    this.boostFingers.clear();
+    this.steerId = null;
+    this.stick = null;
+    this.stickId = null;
   };
 
   constructor(canvas: HTMLCanvasElement, serverUrl: string | null = defaultServerUrl()) {
@@ -232,6 +240,7 @@ export class CoilEngine {
     window.removeEventListener("pointerup", this.onPointerUp);
     window.removeEventListener("pointercancel", this.onPointerUp);
     window.removeEventListener("wheel", this.onWheel);
+    document.removeEventListener("visibilitychange", this.onVisibility);
   }
 
   /** Hold-to-boost from an on-screen control (touch). */
@@ -244,6 +253,11 @@ export class CoilEngine {
   watch(nid: number | null): void {
     this.watchNid = nid;
     this.emitHud();
+  }
+
+  /** Safe-area insets in CSS pixels, so canvas HUD stays clear of notches. */
+  setInsets(top: number, bottom: number): void {
+    this.insets = { top, bottom };
   }
 
   setControls(mode: Controls): void {
@@ -374,7 +388,13 @@ export class CoilEngine {
     window.addEventListener("pointerup", this.onPointerUp);
     window.addEventListener("pointercancel", this.onPointerUp);
     window.addEventListener("wheel", this.onWheel, { passive: true });
+    document.addEventListener("visibilitychange", this.onVisibility);
   }
+
+  private onVisibility = (): void => {
+    if (document.visibilityState === "visible") this.audio.unlock();
+    else this.onBlur();
+  };
 
   private onKeyDown = (e: KeyboardEvent): void => {
     const el = e.target as HTMLElement | null;
@@ -398,6 +418,7 @@ export class CoilEngine {
   private pointerDown = false;
   private onPointerMove = (e: PointerEvent): void => {
     if (e.pointerType === "touch" && !this.pointerDown) return;
+    if (e.pointerType === "touch" && this.steerId !== null && e.pointerId !== this.steerId) return;
     if (e.pointerType === "touch" && this.controls === "stick") {
       if (this.stick && e.pointerId === this.stickId) {
         this.stick.x = e.clientX;
@@ -423,16 +444,26 @@ export class CoilEngine {
   }
   private onPointerDown = (e: PointerEvent): void => {
     if (e.button !== undefined && e.button !== 0) return;
-    const t = e.target as HTMLElement | null;
-    if (t && t.closest("[data-ui]")) return;
+    const t = e.target;
+    if (t instanceof Element && t.closest("[data-ui]")) return;
     if (this.phase === "dead") {
       this.respawn();
       return;
     }
     if (this.phase !== "play") return;
+    if (e.pointerType === "touch") {
+      // First finger steers; any further finger boosts while it is down.
+      if (this.steerId !== null && this.steerId !== e.pointerId) {
+        this.boostFingers.add(e.pointerId);
+        this.syncBoost();
+        return;
+      }
+      this.steerId = e.pointerId;
+    } else {
+      // A mouse click boosts.
+      this.holdBoost = true;
+    }
     this.pointerDown = true;
-    // A mouse click boosts; a finger only steers (the boost button boosts).
-    if (e.pointerType !== "touch") this.holdBoost = true;
     if (e.pointerType === "touch" && this.controls === "stick") {
       this.stick = { ox: e.clientX, oy: e.clientY, x: e.clientX, y: e.clientY };
       this.stickId = e.pointerId;
@@ -443,10 +474,15 @@ export class CoilEngine {
   };
   private onPointerUp = (e: PointerEvent): void => {
     if (e.pointerType !== "touch") this.holdBoost = false;
+    if (this.boostFingers.delete(e.pointerId)) {
+      this.syncBoost();
+      return;
+    }
     if (e.pointerId === this.stickId) {
       this.stick = null;
       this.stickId = null;
     }
+    if (e.pointerId === this.steerId) this.steerId = null;
     this.pointerDown = false;
     this.syncBoost();
   };
@@ -457,7 +493,7 @@ export class CoilEngine {
 
   private syncBoost(): void {
     const key = this.keys.has("Space") || this.keys.has("ArrowUp") || this.keys.has("ShiftLeft");
-    this.boosting = this.phase === "play" && (this.holdBoost || key);
+    this.boosting = this.phase === "play" && (this.holdBoost || key || this.boostFingers.size > 0);
   }
 
   /**
@@ -774,6 +810,7 @@ export class CoilEngine {
       this.world.playerId,
       this.phase,
       this.phase === "play" ? this.pointer : null,
+      this.insets,
     );
     if (this.stick && this.phase === "play") {
       const rect = this.canvas.getBoundingClientRect();
@@ -818,6 +855,8 @@ export class CoilEngine {
       instance: this.net?.instance ?? "",
       rtt: this.net?.rttMs ?? 0,
       eatMisses: this.net?.eatMisses ?? 0,
+      boosting: this.boosting,
+      controls: this.controls,
       diag: this.net?.diag ?? null,
       score: p ? Math.floor(p.mass) : 0,
       headX: p ? Math.round(p.x) : 0,

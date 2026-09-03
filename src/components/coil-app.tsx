@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Eye, Lock, Share2, Volume2, VolumeX, Zap } from "lucide-react";
+import { Eye, Lock, Maximize2, Minimize2, Share2, Volume2, VolumeX, Zap } from "lucide-react";
 import { CoilEngine, type Controls, type HudState } from "@/game/engine";
 import { MAX_CUSTOM_BANDS, SKINS } from "@/game/model";
 
@@ -102,6 +102,11 @@ export function CoilApp() {
   const [best, setBest] = useState(0);
   const [controls, setControls] = useState<Controls>("point");
   const [lockNote, setLockNote] = useState<string | null>(null);
+  const insetRef = useRef<HTMLDivElement>(null);
+  const [fullscreen, setFullscreen] = useState(false);
+  const lastPhase = useRef<string>("menu");
+  const lastNotice = useRef<string | null>(null);
+  const engineReady = hud !== null;
 
   useEffect(() => {
     const n = readNick() || `coil${(Math.random() * 90 + 10) | 0}`;
@@ -119,6 +124,43 @@ export function CoilApp() {
   useEffect(() => {
     if (hud && hud.best > best) setBest(hud.best);
   }, [hud, best]);
+
+  // Haptics on phones that support it (Android): a tap for a kill, a thud on death.
+  useEffect(() => {
+    if (!hud) return;
+    const vibrate = (ms: number) => {
+      try {
+        navigator.vibrate?.(ms);
+      } catch {
+        /* ignore */
+      }
+    };
+    if (hud.phase === "dead" && lastPhase.current !== "dead") vibrate(90);
+    if (hud.killNotice && hud.killNotice !== lastNotice.current) vibrate(25);
+    lastPhase.current = hud.phase;
+    lastNotice.current = hud.killNotice;
+  }, [hud]);
+
+  // Safe-area insets, measured from a probe element, so canvas-drawn HUD
+  // (the minimap) stays clear of notches and the home indicator.
+  useEffect(() => {
+    const el = insetRef.current;
+    const engine = engineRef.current;
+    if (!el || !engine) return;
+    const apply = () => {
+      const cs = getComputedStyle(el);
+      engine.setInsets(parseFloat(cs.paddingTop) || 0, parseFloat(cs.paddingBottom) || 0);
+    };
+    apply();
+    window.addEventListener("resize", apply);
+    return () => window.removeEventListener("resize", apply);
+  }, [engineReady]);
+
+  useEffect(() => {
+    const onChange = () => setFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -172,6 +214,17 @@ export function CoilApp() {
     }
   };
 
+  const toggleFullscreen = () => {
+    try {
+      if (document.fullscreenElement) void document.exitFullscreen();
+      else void document.documentElement.requestFullscreen?.();
+    } catch {
+      /* unsupported */
+    }
+  };
+  const canFullscreen =
+    typeof document !== "undefined" && Boolean(document.documentElement.requestFullscreen);
+
   const share = async () => {
     if (!hud) return;
     const text = `I reached length ${hud.score} with ${hud.kills} kill${hud.kills === 1 ? "" : "s"} in AgenCoil. Beat me.`;
@@ -196,7 +249,17 @@ export function CoilApp() {
         : "offline · practice arena";
 
   return (
-    <div className="relative h-dvh w-full overflow-hidden bg-bg text-fg">
+    <div
+      className="relative h-dvh w-full overflow-hidden bg-bg text-fg"
+      onContextMenu={(e) => {
+        if (phase === "play") e.preventDefault();
+      }}
+    >
+      <div
+        ref={insetRef}
+        aria-hidden
+        className="pointer-events-none absolute left-0 top-0 h-0 w-0 pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]"
+      />
       <canvas
         ref={canvasRef}
         className="absolute inset-0 h-full w-full touch-none"
@@ -297,15 +360,15 @@ export function CoilApp() {
       {phase === "menu" && (
         <div
           data-ui
-          className="absolute inset-0 flex items-end justify-center p-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] sm:items-center"
+          className="absolute inset-0 flex items-end justify-center overflow-y-auto p-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-[max(4.5rem,env(safe-area-inset-top))] sm:items-center sm:pt-4"
         >
-          <div className="w-full max-w-md rounded-xl border border-line bg-surface/92 p-6 shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+          <div className="mt-auto w-full max-w-md rounded-xl border border-line bg-surface/92 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.45)] sm:my-auto sm:p-6">
             <div className="flex items-baseline justify-between">
               <p className="text-xs tracking-[0.22em] text-muted uppercase">multiplayer arena</p>
               <p className="text-xs text-subtle">{hud ? modeLabel : ""}</p>
             </div>
             <h1
-              className="mt-2 text-5xl font-semibold tracking-tight text-fg"
+              className="mt-1 text-4xl font-semibold tracking-tight text-fg sm:mt-2 sm:text-5xl"
               style={{ letterSpacing: "-0.04em" }}
             >
               AgenCoil
@@ -320,7 +383,7 @@ export function CoilApp() {
               )}
             </p>
 
-            <label className="mt-6 block text-xs text-muted" htmlFor="nick">
+            <label className="mt-4 block text-xs text-muted sm:mt-6" htmlFor="nick">
               Nickname
             </label>
             <input
@@ -328,7 +391,7 @@ export function CoilApp() {
               value={nick}
               maxLength={16}
               onChange={(e) => setNick(e.target.value)}
-              className="mt-1 h-11 w-full rounded-md border border-line bg-elevated px-3 text-fg outline-none focus:border-accent"
+              className="mt-1 h-11 w-full rounded-md border border-line bg-elevated px-3 text-base text-fg outline-none focus:border-accent"
             />
 
             <div className="mt-4 text-xs text-muted">Skin</div>
@@ -436,14 +499,14 @@ export function CoilApp() {
             <button
               type="button"
               onClick={play}
-              className="mt-6 h-12 w-full rounded-lg bg-accent text-base font-medium text-accent-fg transition-transform active:scale-[0.98]"
+              className="mt-5 h-12 w-full rounded-lg bg-accent text-base font-medium text-accent-fg transition-transform active:scale-[0.98] sm:mt-6"
             >
               Play
             </button>
 
-            <p className="mt-5 text-xs leading-relaxed text-subtle">
+            <p className="mt-4 text-xs leading-relaxed text-subtle sm:mt-5">
               {touch
-                ? "Drag to steer. Hold the lightning button to boost. Boosting sheds length behind you."
+                ? "Drag to steer. Hold the lightning button, or a second finger anywhere, to boost. Boosting sheds length behind you."
                 : "Mouse or WASD to steer. Hold click, space or shift to boost. Scroll to zoom."}{" "}
               Your head touching any other body pops you. Coil around smaller snakes and eat what
               they leave behind.
@@ -511,15 +574,33 @@ export function CoilApp() {
         </div>
       )}
 
-      <button
+      <div
         data-ui
-        type="button"
-        onClick={toggleMute}
-        aria-label={muted ? "Unmute" : "Mute"}
-        className="absolute bottom-4 left-4 z-10 flex h-11 w-11 items-center justify-center rounded-full border border-line bg-bg/70 text-fg"
+        className={
+          phase === "menu"
+            ? "absolute right-4 top-[max(1rem,env(safe-area-inset-top))] z-10 flex gap-2"
+            : "absolute bottom-[max(1rem,env(safe-area-inset-bottom))] left-4 z-10 flex gap-2"
+        }
       >
-        {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
-      </button>
+        <button
+          type="button"
+          onClick={toggleMute}
+          aria-label={muted ? "Unmute" : "Mute"}
+          className="flex h-11 w-11 items-center justify-center rounded-full border border-line bg-bg/70 text-fg"
+        >
+          {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+        </button>
+        {touch && canFullscreen && (
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            aria-label={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+            className="flex h-11 w-11 items-center justify-center rounded-full border border-line bg-bg/70 text-fg"
+          >
+            {fullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
