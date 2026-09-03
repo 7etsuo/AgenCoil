@@ -76,8 +76,10 @@ test("a named mode runs for the first 15 minutes of every hour", () => {
   assert.equal(off.id, 0);
   assert.equal(off.secsToNext, 40 * 60);
   const ids = new Set();
-  for (let h = 0; h < 4; h++) ids.add(rules.modeNow(hour + h * 3_600_000 + 60_000).id);
-  assert.equal(ids.size, 4, "four different modes rotate across four hours");
+  for (let h = 0; h < rules.MODES.length; h++)
+    ids.add(rules.modeNow(hour + h * 3_600_000 + 60_000).id);
+  assert.equal(ids.size, rules.MODES.length, "every mode gets its own hour");
+  assert.ok(!rules.MODES.some((m) => m.id === 2), "the no-boost mode is gone");
 });
 
 test("seasons are six weeks long", () => {

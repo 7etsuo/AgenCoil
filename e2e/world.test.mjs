@@ -240,17 +240,13 @@ test("the tail that existed then still kills after a rewind", () => {
   );
 });
 
-test("arena modes: no-boost, hunger and double remains change the rules", () => {
+test("arena modes: hunger and double remains change the rules", () => {
   const world = new World(false);
   world.host = true;
   const s = place(world, "s", 0, 0, 0, 80);
   world.inputs.get("s").boost = true;
-  world.boostAllowed = false;
   world.step(1 / 40, 0, 0, false);
-  assert.equal(s.boosting, false, "boost is refused while the mode forbids it");
-  world.boostAllowed = true;
-  world.step(1 / 40, 0, 0, false);
-  assert.equal(s.boosting, true);
+  assert.equal(s.boosting, true, "boosting is always allowed");
   world.inputs.get("s").boost = false;
   const before = s.mass;
   world.hunger = 0.5;

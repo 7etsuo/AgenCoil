@@ -1059,7 +1059,6 @@ export class GameServer {
       this.world.desiredBots = Math.max(SERVER_BOTS_MIN, SERVER_BOTS - Math.floor(players * 0.6));
       const mode = modeNow().id;
       this.world.remainsMult = mode === 1 ? 2 : 1;
-      this.world.boostAllowed = mode !== 2;
       this.world.hunger = mode === 3 ? HUNGER_RATE : 0;
     }
     const heavy = this.stepMs > 6;

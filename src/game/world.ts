@@ -118,7 +118,6 @@ export class World {
   lags = new Map<string, number>();
   /** Arena mode modifiers (server), see challenges.ts MODES. */
   remainsMult = 1;
-  boostAllowed = true;
   hunger = 0;
   eats: EatEvent[] = [];
   deaths: DeathEvent[] = [];
@@ -384,7 +383,7 @@ export class World {
       const input = this.inputs.get(s.id);
       if (input) {
         this.steerHeading(s, input.angle, dt);
-        s.boosting = this.boostAllowed && input.boost && s.mass > BOOST_MIN_MASS;
+        s.boosting = input.boost && s.mass > BOOST_MIN_MASS;
         if (this.hunger > 0) s.mass = Math.max(MIN_MASS, s.mass - s.mass * this.hunger * dt);
         this.advance(s, dt);
       } else if (s.id === this.playerId) {
