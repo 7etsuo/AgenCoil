@@ -29,6 +29,19 @@ export const MAX_CUSTOM_BANDS = 6;
 /** Bots on the authoritative server, where CPU is cheaper than an empty arena. */
 export const SERVER_BOTS = 50;
 export const MAX_SCALE = 4.86;
+/** Near miss: head passes within this multiple of the summed radii, without touching. */
+export const NEAR_FACTOR = 1.9;
+export const NEAR_COOLDOWN = 1.5;
+export const NEAR_COMBO_WINDOW = 3.5;
+/** Bounties sit on the top three snakes once they are this long. */
+export const BOUNTY_MIN_MASS = 300;
+export const BOUNTY_RATE = 0.5;
+/** Golden swarm arena events. */
+export const SWARM_EVERY_S = 200;
+export const SWARM_ORBS = 70;
+export const SWARM_DURATION_S = 45;
+export const COMEBACK_KEEP = 0.25;
+export const COMEBACK_WINDOW_MS = 6000;
 export const BASE_WIDTH = 29;
 
 export type Phase = "menu" | "play" | "dead";
@@ -78,6 +91,11 @@ export interface Snake {
   temper: number;
   /** Kills this life. */
   kills: number;
+  /** Cosmetics: boost trail and death effect ids (see challenges.ts). */
+  trail?: number;
+  deathFx?: number;
+  /** Last near-miss time per other snake id (server side, not on the wire). */
+  nearMark?: Map<string, number>;
 }
 
 export interface Camera {
@@ -297,6 +315,18 @@ export function maxPointsOf(mass: number): number {
 /** Mass lost per second while boosting: constant, like slither.io. */
 export function boostDrainOf(_mass: number): number {
   return BOOST_DRAIN;
+}
+
+/**
+ * The wire's skin byte carries the skin index in the low nibble and the
+ * trail id in the high nibble, so older clients (which take skin % 16) keep
+ * working while newer ones read the cosmetic.
+ */
+export function packSkin(skin: number, trail: number): number {
+  return (skin & 15) | ((trail & 15) << 4);
+}
+export function unpackSkin(byte: number): { skin: number; trail: number } {
+  return { skin: byte & 15, trail: (byte >> 4) & 15 };
 }
 
 /** Resolve the colour bands a snake is drawn with. */

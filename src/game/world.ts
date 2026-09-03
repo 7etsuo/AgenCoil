@@ -9,6 +9,9 @@ import {
   FOOD_TARGET,
   MAGNET_SPEED,
   MIN_MASS,
+  NEAR_COOLDOWN,
+  NEAR_FACTOR,
+  SWARM_ORBS,
   SPAWN_INVULN,
   START_MASS,
   type Food,
@@ -48,6 +51,16 @@ export interface EatEvent {
   v: number;
   c: number;
   id: string;
+  /** Orb kind eaten (2 = remains), for challenge tracking. */
+  k: number;
+}
+
+/** A head skimmed past another snake without touching. */
+export interface NearEvent {
+  id: string;
+  otherId: string;
+  x: number;
+  y: number;
 }
 
 export interface DeathEvent {
@@ -94,6 +107,9 @@ export class World {
   inputs = new Map<string, PlayerInput>();
   eats: EatEvent[] = [];
   deaths: DeathEvent[] = [];
+  nears: NearEvent[] = [];
+  /** Snakes to check for near misses (players; bots do not earn them). */
+  nearIds = new Set<string>();
   foodById = new Map<number, Food>();
   /** Coarse cells (see `hotKey`) to avoid when spawning: recent death sites. */
   hot = new Set<number>();
@@ -343,6 +359,7 @@ export class World {
   step(dt: number, aimX: number, aimY: number, wantBoost: boolean): void {
     this.deaths = [];
     this.eats = [];
+    this.nears = [];
     this.maintainFood();
     this.maintainBots(dt);
 
@@ -367,7 +384,62 @@ export class World {
     this.moveChasers(dt);
     this.resolveEats();
     this.resolveKills();
+    this.resolveNearMisses();
     this.cullDead();
+  }
+
+  /**
+   * Close calls: a player's head passing inside NEAR_FACTOR of the summed
+   * radii of another snake's body without touching it, once per snake per
+   * cooldown. Bots are excluded so nobody farms a parked bot.
+   */
+  private resolveNearMisses(): void {
+    if (!this.nearIds.size) return;
+    const now = performance.now();
+    for (const s of this.snakes) {
+      if (!s.alive || s.invuln > 0 || !this.nearIds.has(s.id)) continue;
+      const hr = radiusOf(s.mass);
+      for (const o of this.snakes) {
+        if (o.id === s.id || !o.alive || o.invuln > 0 || o.mass < 30) continue;
+        const orad = radiusOf(o.mass);
+        const nearR = (hr + orad) * NEAR_FACTOR;
+        const reach = lengthOf(o.mass) + nearR + 24;
+        if (dist2(s.x, s.y, o.x, o.y) > reach * reach) continue;
+        const last = s.nearMark?.get(o.id);
+        if (last !== undefined && now - last < NEAR_COOLDOWN * 1000) continue;
+        const pts = o.points;
+        let best = Infinity;
+        for (let i = 1; i < pts.length; i++) {
+          const a = pts[i - 1]!;
+          const b = pts[i]!;
+          if (Math.abs(a.x - s.x) > nearR && Math.abs(b.x - s.x) > nearR) continue;
+          if (Math.abs(a.y - s.y) > nearR && Math.abs(b.y - s.y) > nearR) continue;
+          const d = pointSegDist2(s.x, s.y, a.x, a.y, b.x, b.y);
+          if (d < best) best = d;
+        }
+        if (best <= nearR * nearR) {
+          if (!s.nearMark) s.nearMark = new Map();
+          s.nearMark.set(o.id, now);
+          this.nears.push({ id: s.id, otherId: o.id, x: s.x, y: s.y });
+        }
+      }
+    }
+  }
+
+  /** Drop a cluster of golden orbs around a point: an arena event. */
+  spawnGoldSwarm(x: number, y: number, n = SWARM_ORBS): void {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const d = Math.sqrt(Math.random()) * 260;
+      this.addFood({
+        x: x + Math.cos(a) * d,
+        y: y + Math.sin(a) * d,
+        v: 4 + ((Math.random() * 4) | 0),
+        c: CHASE_COLOR,
+        r: 9 + Math.random() * 4,
+        k: 4,
+      });
+    }
   }
 
   private owned(s: Snake): boolean {
@@ -403,6 +475,11 @@ export class World {
       if (ok) return p;
     }
     return randomInDisk(ARENA_RADIUS * 0.5);
+  }
+
+  /** A random open point well inside the rim, for events. */
+  randomOpenPoint(): Vec {
+    return this.findSpawn();
   }
 
   /** A safe spawn point near a location, for players hopping instances. */
@@ -792,7 +869,7 @@ export class World {
         if (dist2(s.x, s.y, f.x, f.y) > (reach + f.r * 0.6) ** 2) continue;
         if (gains) {
           s.mass += f.v;
-          this.eats.push({ x: f.x, y: f.y, v: f.v, c: f.c, id: s.id });
+          this.eats.push({ x: f.x, y: f.y, v: f.v, c: f.c, id: s.id, k: f.k });
         }
         this.removeFood(f);
       }

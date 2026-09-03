@@ -80,7 +80,7 @@ export async function openPlayer(browser, name, opts = {}) {
   await page.goto(opts.url ?? WEB, { waitUntil: "load" });
   await page.waitForTimeout(500);
   await page.fill("#nick", name);
-  await page.getByRole("button", { name: "Play" }).click();
+  await page.getByRole("button", { name: "Play", exact: true }).click();
   await page.waitForTimeout(1200);
   return { page, ctx, errors, dbg: () => page.evaluate(() => window.__coil) };
 }

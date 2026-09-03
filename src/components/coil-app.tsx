@@ -1,7 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { Eye, Lock, Maximize2, Minimize2, Share2, Volume2, VolumeX, Zap } from "lucide-react";
+import {
+  Eye,
+  Lock,
+  Maximize2,
+  Minimize2,
+  Share2,
+  Users,
+  Volume2,
+  VolumeX,
+  Zap,
+} from "lucide-react";
 import { CoilEngine, type Controls, type HudState } from "@/game/engine";
 import { MAX_CUSTOM_BANDS, SKINS } from "@/game/model";
+import { DEATH_FX, TRAILS, UNLOCK_DEATH, UNLOCK_TRAIL } from "@/game/challenges";
 
 const NICK_KEY = "agencoil-nick";
 const SKIN_KEY = "agencoil-skin";
@@ -9,6 +20,24 @@ const MUTE_KEY = "agencoil-mute";
 const CUSTOM_KEY = "agencoil-custom";
 const CONTROLS_KEY = "agencoil-controls";
 const BEST_KEY = "agencoil-best";
+const TRAIL_KEY = "agencoil-trail";
+const DEATHFX_KEY = "agencoil-deathfx";
+
+function readInt(key: string, max: number): number {
+  try {
+    const n = Number(localStorage.getItem(key));
+    return Number.isFinite(n) && n >= 0 && n <= max ? Math.floor(n) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function partyCode(): string {
+  return Array.from(
+    { length: 5 },
+    () => "abcdefghjkmnpqrstuvwxyz23456789"[(Math.random() * 31) | 0],
+  ).join("");
+}
 
 /** Skins that unlock with your best length: index to required length. */
 const UNLOCKS: Record<number, number> = { 12: 120, 13: 300, 14: 600, 15: 1200 };
@@ -107,6 +136,10 @@ export function CoilApp() {
   const lastPhase = useRef<string>("menu");
   const lastNotice = useRef<string | null>(null);
   const engineReady = hud !== null;
+  const [trail, setTrail] = useState(0);
+  const [deathFx, setDeathFx] = useState(0);
+  const [party, setParty] = useState("");
+  const [invited, setInvited] = useState(false);
 
   useEffect(() => {
     const n = readNick() || `coil${(Math.random() * 90 + 10) | 0}`;
@@ -117,7 +150,15 @@ export function CoilApp() {
     setTouch(window.matchMedia("(pointer: coarse)").matches);
     setBest(readBest());
     setControls(readControls());
+    setTrail(readInt(TRAIL_KEY, TRAILS.length - 1));
+    setDeathFx(readInt(DEATHFX_KEY, DEATH_FX.length - 1));
+    const withCode = new URLSearchParams(window.location.search).get("with");
+    if (withCode && /^[a-z0-9]{3,12}$/i.test(withCode)) setParty(withCode.toLowerCase());
   }, []);
+
+  useEffect(() => {
+    engineRef.current?.setParty(party);
+  }, [party, engineReady]);
 
   // The engine keeps `best` current; mirror it whenever the HUD updates so
   // unlocks show up on the next visit to the menu.
@@ -181,17 +222,46 @@ export function CoilApp() {
   }, []);
 
   const locked = (i: number) => (UNLOCKS[i] ?? 0) > best;
+  const unlocks = hud?.profile?.unlocks ?? 0;
+  const trailOpen = (i: number) => i === 0 || (unlocks & (UNLOCK_TRAIL[i] ?? 0)) !== 0;
+  const deathOpen = (i: number) => i === 0 || (unlocks & (UNLOCK_DEATH[i] ?? 0)) !== 0;
+
+  const look = () => {
+    const chosen = locked(skin) ? 0 : skin;
+    return {
+      name: nick,
+      skin: chosen === CUSTOM ? 0 : chosen,
+      bands: chosen === CUSTOM ? custom : undefined,
+      trail: trailOpen(trail) ? trail : 0,
+      deathFx: deathOpen(deathFx) ? deathFx : 0,
+    };
+  };
 
   const play = () => {
     const chosen = locked(skin) ? 0 : skin;
     persist(nick, chosen, custom);
+    try {
+      localStorage.setItem(TRAIL_KEY, String(trail));
+      localStorage.setItem(DEATHFX_KEY, String(deathFx));
+    } catch {
+      /* ignore */
+    }
     setShared(false);
-    engineRef.current?.play({
-      name: nick,
-      skin: chosen === CUSTOM ? 0 : chosen,
-      bands: chosen === CUSTOM ? custom : undefined,
-    });
+    engineRef.current?.play(look());
     engineRef.current?.audio.unlock();
+  };
+
+  const invite = async () => {
+    const code = party || partyCode();
+    setParty(code);
+    const url = `${window.location.origin}${window.location.pathname}?with=${code}`;
+    try {
+      if (navigator.share) await navigator.share({ title: "AgenCoil", text: "Play with me", url });
+      else await navigator.clipboard?.writeText(url);
+      setInvited(true);
+    } catch {
+      /* dismissed */
+    }
   };
 
   const toggleMute = () => {
@@ -229,9 +299,19 @@ export function CoilApp() {
     if (!hud) return;
     const text = `I reached length ${hud.score} with ${hud.kills} kill${hud.kills === 1 ? "" : "s"} in AgenCoil. Beat me.`;
     const url = typeof window !== "undefined" ? window.location.origin : "";
+    const bands = skin === CUSTOM ? custom : SKINS[skin % SKINS.length]!.bands;
+    const blob = await renderShareCard(hud, nick, bands);
     try {
-      if (navigator.share) await navigator.share({ title: "AgenCoil", text, url });
-      else await navigator.clipboard?.writeText(`${text} ${url}`);
+      const file = blob ? new File([blob], "agencoil-run.png", { type: "image/png" }) : null;
+      if (file && navigator.canShare?.({ files: [file] })) {
+        await navigator.share({ title: "AgenCoil", text, files: [file] });
+      } else if (navigator.share) {
+        await navigator.share({ title: "AgenCoil", text, url });
+      } else if (blob) {
+        window.open(URL.createObjectURL(blob), "_blank");
+      } else {
+        await navigator.clipboard?.writeText(`${text} ${url}`);
+      }
       setShared(true);
     } catch {
       /* dismissed */
@@ -299,8 +379,18 @@ export function CoilApp() {
               </div>
               <ol className="space-y-0.5 text-sm">
                 {(boardTab === "arena"
-                  ? hud.board.map((r) => ({ name: r.name, n: r.mass, you: r.you }))
-                  : hud.daily.map((r) => ({ name: r.name, n: r.best, you: r.name === nick }))
+                  ? hud.board.map((r) => ({
+                      name: r.name,
+                      n: r.mass,
+                      you: r.you,
+                      bounty: r.bounty,
+                    }))
+                  : hud.daily.map((r) => ({
+                      name: r.name,
+                      n: r.best,
+                      you: r.name === nick,
+                      bounty: 0,
+                    }))
                 ).map((row, i) => (
                   <li
                     key={`${row.name}-${i}`}
@@ -308,6 +398,11 @@ export function CoilApp() {
                   >
                     <span className="inline-block w-5 text-subtle">{i + 1}</span>
                     <span className="font-medium">{row.name}</span>
+                    {row.bounty > 0 && (
+                      <span className="ml-1 text-xs text-[#f0c14a]" title="bounty">
+                        ★{row.bounty}
+                      </span>
+                    )}
                     <span className="float-right tabular-nums">{row.n}</span>
                   </li>
                 ))}
@@ -323,6 +418,24 @@ export function CoilApp() {
           {hud.killNotice && (
             <div className="absolute left-1/2 top-[calc(6.5rem+env(safe-area-inset-top))] -translate-x-1/2 rounded-full border border-line bg-bg/80 px-4 py-1.5 text-sm">
               {hud.killNotice}
+            </div>
+          )}
+          {hud.bountyOnYou > 0 && (
+            <div className="absolute right-4 top-[calc(6.5rem+env(safe-area-inset-top))] rounded-full border border-[#f0c14a]/60 bg-bg/80 px-3 py-1 text-xs text-[#f0c14a] sm:top-[calc(17rem+env(safe-area-inset-top))]">
+              ★ bounty on you: {hud.bountyOnYou}
+            </div>
+          )}
+          {hud.event && (
+            <div className="absolute left-1/2 top-[calc(1rem+env(safe-area-inset-top))] -translate-x-1/2 rounded-full border border-[#f0c14a]/60 bg-bg/80 px-3 py-1 text-xs text-[#f0c14a]">
+              golden swarm to the {hud.event.dir} · {hud.event.left}s
+            </div>
+          )}
+          {hud.nearCombo > 0 && (
+            <div className="absolute left-1/2 top-[45%] -translate-x-1/2 text-center">
+              <div className="text-2xl font-semibold text-[#f0c14a] drop-shadow">
+                close{hud.nearCombo > 1 ? ` x${hud.nearCombo}` : "!"}
+              </div>
+              <div className="text-xs text-[#f0c14a]/80">+{hud.nearBonus}</div>
             </div>
           )}
           {hud.feed.length > 0 && (
@@ -373,6 +486,13 @@ export function CoilApp() {
             >
               AgenCoil
             </h1>
+            {hud?.profile && (
+              <p className="mt-2 text-xs text-subtle">
+                all-time best {hud.profile.best} · kills {hud.profile.kills} · games{" "}
+                {hud.profile.games} · rank #{hud.profile.rank}
+                {!hud.profile.persistent && " (this server only)"}
+              </p>
+            )}
             <p className="mt-2 text-sm text-muted">
               eat · grow · survive
               {hud?.topToday && (
@@ -480,6 +600,60 @@ export function CoilApp() {
               </div>
             )}
 
+            <div className="mt-4 text-xs text-muted">Boost trail</div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {TRAILS.map((t, i) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => trailOpen(i) && setTrail(i)}
+                  className={`rounded-md border px-3 py-1.5 text-xs ${trail === i ? "border-accent text-fg" : "border-line text-muted hover:text-fg"} ${trailOpen(i) ? "" : "opacity-45"}`}
+                >
+                  {t}
+                  {!trailOpen(i) && <Lock size={10} className="ml-1 inline" />}
+                </button>
+              ))}
+              <span className="mx-1 self-center text-xs text-subtle">death</span>
+              {DEATH_FX.map((t, i) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => deathOpen(i) && setDeathFx(i)}
+                  className={`rounded-md border px-3 py-1.5 text-xs ${deathFx === i ? "border-accent text-fg" : "border-line text-muted hover:text-fg"} ${deathOpen(i) ? "" : "opacity-45"}`}
+                >
+                  {t}
+                  {!deathOpen(i) && <Lock size={10} className="ml-1 inline" />}
+                </button>
+              ))}
+            </div>
+            {hud?.challenges && hud.challenges.length > 0 && (
+              <div className="mt-4">
+                <div className="text-xs text-muted">
+                  Today&apos;s challenges · each unlocks a cosmetic
+                </div>
+                <ul className="mt-2 space-y-1.5">
+                  {hud.challenges.map((c) => (
+                    <li key={c.id} className="text-xs">
+                      <div className="flex justify-between">
+                        <span className={c.done ? "text-fg" : "text-muted"}>
+                          {c.done ? "✓ " : ""}
+                          {c.text}
+                        </span>
+                        <span className="tabular-nums text-subtle">
+                          {Math.min(c.progress, c.target)}/{c.target}
+                        </span>
+                      </div>
+                      <div className="mt-1 h-1 w-full rounded bg-elevated">
+                        <div
+                          className={`h-1 rounded ${c.done ? "bg-[#f0c14a]" : "bg-accent"}`}
+                          style={{ width: `${Math.min(100, (c.progress / c.target) * 100)}%` }}
+                        />
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {touch && (
               <div className="mt-4 flex items-center gap-2 text-xs text-muted">
                 <span>Steering</span>
@@ -503,6 +677,18 @@ export function CoilApp() {
             >
               Play
             </button>
+            <button
+              type="button"
+              onClick={() => void invite()}
+              className="mt-2 flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-line text-sm text-muted hover:text-fg"
+            >
+              <Users size={16} />
+              {invited
+                ? "invite link copied"
+                : party
+                  ? `playing with friends · ${party}`
+                  : "play with friends"}
+            </button>
 
             <p className="mt-4 text-xs leading-relaxed text-subtle sm:mt-5">
               {touch
@@ -515,7 +701,7 @@ export function CoilApp() {
         </div>
       )}
 
-      {phase === "dead" && hud && (
+      {phase === "dead" && hud && !hud.deathBeat && (
         <div data-ui className="absolute inset-0 flex items-center justify-center p-4">
           <div className="w-full max-w-sm rounded-xl border border-line bg-surface/92 p-6 text-center">
             <p className="text-xs tracking-[0.2em] text-muted uppercase">down</p>
@@ -540,13 +726,37 @@ export function CoilApp() {
                 <div className="text-xl font-semibold">{hud.best}</div>
               </div>
             </div>
+            {hud.comebackLeft > 0 && (
+              <button
+                type="button"
+                onClick={() => engineRef.current?.respawn(true)}
+                className="mt-5 h-12 w-full rounded-lg border border-[#f0c14a] bg-[#f0c14a]/15 font-medium text-[#f0c14a] active:scale-[0.98]"
+              >
+                Rise again with a quarter of your length · {hud.comebackLeft}s
+              </button>
+            )}
             <button
               type="button"
               onClick={() => engineRef.current?.respawn()}
-              className="mt-6 h-12 w-full rounded-lg bg-accent font-medium text-accent-fg active:scale-[0.98]"
+              className={`${hud.comebackLeft > 0 ? "mt-2" : "mt-6"} h-12 w-full rounded-lg bg-accent font-medium text-accent-fg active:scale-[0.98]`}
             >
               Play again
             </button>
+            {hud.challenges.length > 0 && (
+              <ul className="mt-3 space-y-0.5 text-left text-xs text-muted">
+                {hud.challenges.map((c) => (
+                  <li key={c.id} className="flex justify-between">
+                    <span className={c.done ? "text-fg" : ""}>
+                      {c.done ? "✓ " : ""}
+                      {c.text}
+                    </span>
+                    <span className="tabular-nums text-subtle">
+                      {Math.min(c.progress, c.target)}/{c.target}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
             {hud.watchable.length > 0 && (
               <div className="mt-3 flex flex-wrap items-center justify-center gap-2 text-xs text-muted">
                 <Eye size={14} />
@@ -603,4 +813,53 @@ export function CoilApp() {
       </div>
     </div>
   );
+}
+
+/** A 1200x630 PNG of the run for sharing. */
+async function renderShareCard(hud: HudState, nick: string, bands: string[]): Promise<Blob | null> {
+  try {
+    const c = document.createElement("canvas");
+    c.width = 1200;
+    c.height = 630;
+    const ctx = c.getContext("2d");
+    if (!ctx) return null;
+    ctx.fillStyle = "#07090f";
+    ctx.fillRect(0, 0, 1200, 630);
+    for (let i = 0; i < 120; i++) {
+      ctx.fillStyle = `hsla(${(i * 47) % 360} 80% 65% / 0.55)`;
+      ctx.beginPath();
+      ctx.arc((i * 733) % 1200, (i * 389) % 630, 2 + (i % 4), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Snake stripe in the player's skin.
+    const n = bands.length;
+    for (let i = 0; i < 18; i++) {
+      ctx.fillStyle = bands[Math.floor(i / 2) % n]!;
+      ctx.beginPath();
+      ctx.arc(140 + i * 42, 470 + Math.sin(i * 0.6) * 28, 34, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = "#e8eaee";
+    ctx.font = "600 64px Outfit, system-ui, sans-serif";
+    ctx.fillText("AgenCoil", 80, 130);
+    ctx.font = "500 34px Outfit, system-ui, sans-serif";
+    ctx.fillStyle = "#8b93a1";
+    ctx.fillText(nick, 80, 190);
+    ctx.fillStyle = "#e8eaee";
+    ctx.font = "600 96px Outfit, system-ui, sans-serif";
+    ctx.fillText(String(hud.score), 80, 320);
+    ctx.font = "500 30px Outfit, system-ui, sans-serif";
+    ctx.fillStyle = "#8b93a1";
+    ctx.fillText(
+      `length · ${hud.kills} kill${hud.kills === 1 ? "" : "s"} · #${hud.deathRank || hud.rank} of ${hud.deathCount || hud.count}`,
+      80,
+      370,
+    );
+    ctx.fillStyle = "#5c6573";
+    ctx.font = "500 26px Outfit, system-ui, sans-serif";
+    ctx.fillText(window.location.host, 80, 590);
+    return await new Promise((resolve) => c.toBlob((b) => resolve(b), "image/png"));
+  } catch {
+    return null;
+  }
 }

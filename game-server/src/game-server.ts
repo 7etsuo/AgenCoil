@@ -11,7 +11,16 @@ import type { IncomingMessage, Server } from "node:http";
 import { WebSocketServer, type WebSocket, type RawData } from "ws";
 import {
   ARENA_RADIUS,
+  BOUNTY_MIN_MASS,
+  BOUNTY_RATE,
+  COMEBACK_KEEP,
+  COMEBACK_WINDOW_MS,
   DISCONNECT_GRACE_MS,
+  NEAR_COMBO_WINDOW,
+  SWARM_DURATION_S,
+  SWARM_EVERY_S,
+  packSkin,
+  unpackSkin,
   FOOD_SYNC_HZ,
   SERVER_BOTS,
   MAX_CUSTOM_BANDS,
@@ -36,6 +45,8 @@ import {
   writeSnakeEntry,
 } from "../../src/game/protocol";
 import { DailyBoard } from "./daily";
+import { ProfileStore, type Profile } from "./profiles";
+import { UNLOCK_DEATH, UNLOCK_TRAIL, type LifeStats } from "../../src/game/challenges";
 
 interface View {
   cx: number;
@@ -58,8 +69,31 @@ interface Client {
   sentFood: Set<number>;
   /** Sequence number of the last input applied, echoed in snapshots. */
   seq: number;
+  /** Newer protocol: device key present, gets STATS2/PROFILE/NEAR/EVENT. */
+  v2: boolean;
+  key: string;
+  party: string;
+  trail: number;
+  deathFx: number;
+  profile: Profile | null;
+  life: Life | null;
+  combo: { n: number; last: number };
+  comebackUsed: boolean;
+  deathAt: number;
+  deathMass: number;
+  bountied: boolean;
   lastPing: number;
   alive: boolean;
+}
+
+/** What the current life has done so far, for challenges and the profile. */
+interface Life {
+  startAt: number;
+  near: number;
+  remains: number;
+  boosted: boolean;
+  noboostLength: number;
+  bounty: number;
 }
 
 interface Token {
@@ -113,6 +147,10 @@ export class GameServer {
   private readonly nids = new Map<string, number>();
   private readonly grace = new Map<string, NodeJS.Timeout>();
   private readonly daily = new DailyBoard();
+  private readonly profiles = new ProfileStore();
+  private readonly parties = new Map<string, Set<string>>();
+  private bountyOf = new Map<string, number>();
+  private event: { x: number; y: number; until: number } | null = null;
   private readonly connsByIp = new Map<string, number>();
   private readonly connectLog = new Map<string, number[]>();
   /** Death sites by coarse cell with timestamps, for spawn placement. */
@@ -261,6 +299,18 @@ export class GameServer {
       known: new Set(),
       sentFood: new Set(),
       seq: 0,
+      v2: false,
+      key: "",
+      party: "",
+      trail: 0,
+      deathFx: 0,
+      profile: null,
+      life: null,
+      combo: { n: 0, last: 0 },
+      comebackUsed: false,
+      deathAt: 0,
+      deathMass: 0,
+      bountied: false,
       lastPing: Date.now(),
       alive: true,
     };
@@ -286,6 +336,7 @@ export class GameServer {
     this.lastActivity = Date.now();
     const sid = client.sid;
     client.sid = null;
+    if (client.party) this.parties.get(client.party)?.delete(sid ?? "");
     if (!sid) return;
     // Hold the snake for a moment so a reconnect (forced by the platform's
     // connection cap, or a flaky network) can pick it back up.
@@ -319,19 +370,55 @@ export class GameServer {
     const r = new Reader(buf);
     try {
       const type = r.u8();
-      if (type === C2S.HELLO || type === C2S.SPAWN) this.onHello(client, r, type === C2S.SPAWN);
+      if (type === C2S.HELLO || type === C2S.SPAWN)
+        void this.onHello(client, r, type === C2S.SPAWN).catch((err) => {
+          console.error("[hello] failed:", (err as Error)?.message ?? err);
+        });
       else if (type === C2S.INPUT) this.onInput(client, r);
+      else if (type === C2S.IDENT) void this.onIdent(client, r);
       else if (type === C2S.PING) client.ws.send(new Writer().u8(S2C.PONG).u32(r.u32()).finish());
     } catch {
       client.ws.close(1003, "bad message");
     }
   }
 
-  private onHello(client: Client, r: Reader, respawn: boolean): void {
+  private async onHello(client: Client, r: Reader, respawn: boolean): Promise<void> {
     client.name = sanitizeName(r.str());
-    client.skin = r.u8() % 16;
+    const look = unpackSkin(r.u8());
+    client.skin = look.skin;
     client.bands = sanitizeBands(readBands(r));
     const tokenText = r.remaining ? r.str() : "";
+    // v2 clients append: device key, death effect, party code, comeback flag.
+    let comeback = false;
+    if (r.remaining) {
+      client.v2 = true;
+      client.key = r
+        .str()
+        .replace(/[^A-Za-z0-9_-]/g, "")
+        .slice(0, 64);
+      client.deathFx = r.remaining ? r.u8() : 0;
+      client.party = r.remaining
+        ? r
+            .str()
+            .replace(/[^A-Za-z0-9]/g, "")
+            .slice(0, 12)
+        : "";
+      comeback = r.remaining ? r.u8() === 1 : false;
+      if (client.key && !client.profile)
+        client.profile = await this.profiles.load(client.key, client.name);
+      if (!client.alive) return;
+      const unlocks = client.profile?.unlocks ?? 0;
+      client.trail =
+        look.trail < UNLOCK_TRAIL.length &&
+        (look.trail === 0 || unlocks & UNLOCK_TRAIL[look.trail]!)
+          ? look.trail
+          : 0;
+      client.deathFx =
+        client.deathFx < UNLOCK_DEATH.length &&
+        (client.deathFx === 0 || unlocks & UNLOCK_DEATH[client.deathFx]!)
+          ? client.deathFx
+          : 0;
+    }
     if (client.sid && this.world.snakes.some((s) => s.id === client.sid && s.alive)) {
       // Already playing: a repeated hello just updates the look next spawn,
       // and a respawn request ends the current life first so no snake is
@@ -379,11 +466,60 @@ export class GameServer {
         snake.kills = token.kills;
       }
     } else {
-      snake = this.world.spawnSnake(this.newSid(), client.name, client.skin, false, client.bands);
+      // A comeback keeps a quarter of the lost length, once per connection,
+      // if asked for within a few seconds of dying.
+      const now = Date.now();
+      let mass: number | undefined;
+      if (
+        respawn &&
+        comeback &&
+        !client.comebackUsed &&
+        client.deathAt &&
+        now - client.deathAt < COMEBACK_WINDOW_MS
+      ) {
+        mass = Math.max(START_MASS + 1, Math.floor(client.deathMass * COMEBACK_KEEP));
+        client.comebackUsed = true;
+      }
+      snake = this.world.spawnSnake(
+        this.newSid(),
+        client.name,
+        client.skin,
+        false,
+        client.bands,
+        mass,
+      );
+      // Friends spawn together: near any live member of the same party.
+      const mate = client.party ? this.partyMember(client.party, snake.id) : null;
+      if (mate) {
+        const at = this.world.safeSpawnNear({ x: mate.x, y: mate.y });
+        snake.x = at.x;
+        snake.y = at.y;
+        snake.angle = mate.angle;
+        snake.points = [];
+        this.world.ensureTrail(snake);
+      }
     }
+    snake.trail = client.trail;
+    snake.deathFx = client.deathFx;
     client.sid = snake.id;
     client.known.clear();
+    client.life = {
+      startAt: Date.now(),
+      near: 0,
+      remains: 0,
+      boosted: false,
+      noboostLength: snake.mass,
+      bounty: 0,
+    };
+    client.combo = { n: 0, last: 0 };
+    client.bountied = false;
+    if (client.party) {
+      let set = this.parties.get(client.party);
+      if (!set) this.parties.set(client.party, (set = new Set()));
+      set.add(snake.id);
+    }
     this.world.inputs.set(snake.id, { angle: snake.angle, boost: false });
+    this.world.nearIds.add(snake.id);
     const nid = this.nidOf(snake.id);
     client.ws.send(
       new Writer()
@@ -396,6 +532,78 @@ export class GameServer {
         .finish(),
     );
     this.sendToken(client);
+    if (client.v2) {
+      void this.sendProfile(client);
+      if (this.event && this.event.until > Date.now()) this.sendEvent(client);
+    }
+  }
+
+  /** A v2 client introducing itself before playing: load and send its profile. */
+  private async onIdent(client: Client, r: Reader): Promise<void> {
+    const key = r
+      .str()
+      .replace(/[^A-Za-z0-9_-]/g, "")
+      .slice(0, 64);
+    const name = sanitizeName(r.remaining ? r.str() : "anon");
+    if (!key) return;
+    client.v2 = true;
+    client.key = key;
+    if (!client.profile) client.profile = await this.profiles.load(key, name);
+    if (!client.alive) return;
+    void this.sendProfile(client);
+    if (this.event && this.event.until > Date.now()) this.sendEvent(client);
+  }
+
+  private partyMember(code: string, exceptSid: string): Snake | null {
+    const set = this.parties.get(code);
+    if (!set) return null;
+    for (const sid of set) {
+      if (sid === exceptSid) continue;
+      const s = this.world.snakes.find((x) => x.id === sid && x.alive);
+      if (s) return s;
+    }
+    return null;
+  }
+
+  private async sendProfile(client: Client): Promise<void> {
+    const p = client.profile;
+    if (!p || !client.alive) return;
+    const rank = await this.profiles.rank(p);
+    if (!client.alive) return;
+    client.ws.send(
+      new Writer()
+        .u8(S2C.PROFILE)
+        .u32(p.best)
+        .u32(p.kills)
+        .u32(p.games)
+        .u32(p.survive)
+        .u32(rank)
+        .u32(p.unlocks)
+        .u8(this.profiles.persistent ? 1 : 0)
+        .finish(),
+    );
+    const list = this.profiles.challenges(p);
+    const w = new Writer().u8(S2C.CHALLENGES).u8(list.length);
+    for (const c of list)
+      w.u8(c.challenge.id)
+        .str(c.challenge.text)
+        .u32(c.challenge.target)
+        .u32(c.progress)
+        .u8(c.done ? 1 : 0);
+    client.ws.send(w.finish());
+  }
+
+  private notice(client: Client, kind: number, text: string): void {
+    if (!client.v2 || !client.alive) return;
+    client.ws.send(new Writer().u8(S2C.NOTICE).u8(kind).str(text).finish());
+  }
+
+  private sendEvent(client: Client): void {
+    if (!this.event || !client.v2) return;
+    const left = Math.max(0, Math.round((this.event.until - Date.now()) / 1000));
+    client.ws.send(
+      new Writer().u8(S2C.EVENT).f32(this.event.x).f32(this.event.y).u16(left).finish(),
+    );
   }
 
   private newSid(): string {
@@ -491,6 +699,9 @@ export class GameServer {
 
     if (this.world.deaths.length) this.onDeaths();
     if (this.world.eats.length) this.onEats();
+    if (this.world.nears.length) this.onNears();
+    this.trackLives();
+    if (this.tick % (SERVER_TICK_HZ * SWARM_EVERY_S) === 0 && this.clients.size) this.startSwarm();
 
     const snapEvery = Math.max(1, Math.round(SERVER_TICK_HZ / SNAPSHOT_HZ));
     const foodEvery = Math.max(1, Math.round(SERVER_TICK_HZ / FOOD_SYNC_HZ));
@@ -499,6 +710,59 @@ export class GameServer {
     if (this.tick % Math.round(SERVER_TICK_HZ / 2) === 0) this.sendStatsAll();
     if (this.tick % SERVER_TICK_HZ === 0) for (const c of this.clients) this.sendToken(c);
     if (this.tick % (SERVER_TICK_HZ * 30) === 0) this.decayHeat();
+  }
+
+  private trackLives(): void {
+    for (const c of this.clients) {
+      if (!c.sid || !c.life) continue;
+      const s = this.world.snakes.find((x) => x.id === c.sid);
+      if (!s) continue;
+      if (s.boosting) c.life.boosted = true;
+      if (!c.life.boosted && s.mass > c.life.noboostLength) c.life.noboostLength = s.mass;
+    }
+  }
+
+  private onNears(): void {
+    const now = Date.now();
+    for (const n of this.world.nears) {
+      const c = [...this.clients].find((x) => x.sid === n.id);
+      if (!c || !c.life) continue;
+      c.combo = { n: now - c.combo.last < NEAR_COMBO_WINDOW * 1000 ? c.combo.n + 1 : 1, last: now };
+      c.life.near++;
+      const s = this.world.snakes.find((x) => x.id === n.id);
+      const bonus = 1 + Math.min(c.combo.n, 6) * 0.5;
+      if (s) s.mass += bonus;
+      if (c.v2)
+        c.ws.send(
+          new Writer()
+            .u8(S2C.NEAR)
+            .u8(Math.min(255, c.combo.n))
+            .u16(Math.round(bonus * 10))
+            .finish(),
+        );
+    }
+  }
+
+  private startSwarm(): void {
+    const at = this.world.randomOpenPoint();
+    this.world.spawnGoldSwarm(at.x, at.y);
+    this.event = { x: at.x, y: at.y, until: Date.now() + SWARM_DURATION_S * 1000 };
+    for (const c of this.clients) this.sendEvent(c);
+  }
+
+  /** Refresh which snakes carry a bounty; tell newly marked players. */
+  private refreshBounties(alive: Snake[]): void {
+    const next = new Map<string, number>();
+    for (const s of alive.slice(0, 3)) {
+      if (s.mass >= BOUNTY_MIN_MASS) next.set(s.id, Math.floor(s.mass * BOUNTY_RATE));
+    }
+    this.bountyOf = next;
+    for (const c of this.clients) {
+      if (!c.sid) continue;
+      const has = next.has(c.sid);
+      if (has && !c.bountied) this.notice(c, 1, `a bounty of ${next.get(c.sid)} is on your head`);
+      c.bountied = has;
+    }
   }
 
   private onDeaths(): void {
@@ -516,11 +780,20 @@ export class GameServer {
         .u32(Math.floor(s.mass))
         .u16(s.kills)
         .finish();
+      const bounty = this.bountyOf.get(s.id) ?? 0;
+      const killerClient = d.killerId ? [...this.clients].find((c) => c.sid === d.killerId) : null;
       for (const c of this.clients) {
         if (c.known.has(s.id) || c.sid === s.id || (d.killerId && c.sid === d.killerId))
           c.ws.send(msg);
         c.known.delete(s.id);
-        if (c.sid === s.id) c.sid = null;
+        if (c.sid === s.id) this.endLife(c, s);
+      }
+      if (bounty && d.killerId) {
+        const killer = this.world.snakes.find((x) => x.id === d.killerId && x.alive);
+        if (killer) killer.mass += Math.min(600, Math.floor(bounty * 0.3));
+        if (killerClient?.life) killerClient.life.bounty++;
+        const line = `${d.killerName ?? "someone"} claimed the ${bounty} bounty on ${s.name}`;
+        for (const c of this.clients) this.notice(c, 1, line);
       }
       if (!s.isBot) this.daily.record(s.name, Math.floor(s.mass));
       this.nids.delete(s.id);
@@ -534,10 +807,40 @@ export class GameServer {
     }
   }
 
+  /** Close out a player's life: profile, challenges, comeback window. */
+  private endLife(c: Client, s: Snake): void {
+    c.sid = null;
+    this.world.nearIds.delete(s.id);
+    if (c.party) this.parties.get(c.party)?.delete(s.id);
+    c.deathAt = Date.now();
+    c.deathMass = s.mass;
+    const life = c.life;
+    c.life = null;
+    if (!life) return;
+    if (c.v2 && !c.comebackUsed) this.notice(c, 3, "comeback");
+    if (!c.profile) return;
+    const stats: LifeStats = {
+      length: Math.floor(s.mass),
+      kills: s.kills,
+      survive: (Date.now() - life.startAt) / 1000,
+      near: life.near,
+      remains: Math.floor(life.remains),
+      noboostLength: Math.floor(life.noboostLength),
+      bounty: life.bounty,
+    };
+    const completed = this.profiles.recordLife(c.profile, stats);
+    for (const ch of completed) this.notice(c, 2, `challenge complete: ${ch.text}`);
+    void this.sendProfile(c);
+  }
+
   private onEats(): void {
     const bySid = new Map<string, Writer>();
     const counts = new Map<string, number>();
     for (const e of this.world.eats) {
+      if (e.k === 2) {
+        const c = [...this.clients].find((x) => x.sid === e.id);
+        if (c?.life) c.life.remains += e.v;
+      }
       let w = bySid.get(e.id);
       if (!w) {
         w = new Writer().u8(S2C.EAT).u16(0);
@@ -593,7 +896,8 @@ export class GameServer {
     const seen = new Set<string>();
     for (const s of visible) {
       const full = !c.known.has(s.id);
-      writeSnakeEntry(w, this.nidOf(s.id), s, full, MAX_NET_POINTS);
+      const packed = s.trail ? { ...s, skin: packSkin(s.skin, s.trail) } : s;
+      writeSnakeEntry(w, this.nidOf(s.id), packed, full, MAX_NET_POINTS);
       c.known.add(s.id);
       seen.add(s.id);
     }
@@ -658,21 +962,29 @@ export class GameServer {
   private sendStatsAll(): void {
     if (!this.clients.size) return;
     const alive = this.world.snakes.filter((s) => s.alive).sort((a, b) => b.mass - a.mass);
+    this.refreshBounties(alive);
     const rankOf = new Map<string, number>();
     alive.forEach((s, i) => rankOf.set(s.id, i + 1));
-    const board = new Writer();
     const top = alive.slice(0, 10);
-    board.u8(top.length);
-    for (const s of top)
-      board.u16(this.nidOf(s.id)).str(s.name).u32(Math.floor(s.mass)).f32(s.x).f32(s.y);
     const daily = this.daily.top(10);
-    board.u8(daily.length);
-    for (const e of daily) board.str(e.name).u32(e.best);
-    const tail = board.finish();
+    const encodeBoard = (v2: boolean) => {
+      const board = new Writer();
+      board.u8(top.length);
+      for (const s of top) {
+        board.u16(this.nidOf(s.id)).str(s.name).u32(Math.floor(s.mass)).f32(s.x).f32(s.y);
+        if (v2) board.u32(this.bountyOf.get(s.id) ?? 0);
+      }
+      board.u8(daily.length);
+      for (const e of daily) board.str(e.name).u32(e.best);
+      return board.finish();
+    };
+    const tail1 = encodeBoard(false);
+    const tail2 = encodeBoard(true);
     for (const c of this.clients) {
       const me = c.sid ? alive.find((s) => s.id === c.sid) : undefined;
+      const tail = c.v2 ? tail2 : tail1;
       const w = new Writer()
-        .u8(S2C.STATS)
+        .u8(c.v2 ? S2C.STATS2 : S2C.STATS)
         .f32(me?.mass ?? 0)
         .u16(me ? (rankOf.get(me.id) ?? 0) : 0)
         .u16(alive.length)

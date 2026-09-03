@@ -135,3 +135,30 @@ test("slither.io tuning: turning circle stays within two widths at every size", 
   }
   assert.ok(Math.abs(model.speedOf(10, true) / model.speedOf(10, false) - 2.49) < 0.05);
 });
+
+test("a close pass along a body counts as a near miss, once per cooldown", () => {
+  const world = new World(false);
+  world.host = true;
+  // The wall snake drives along +y; its body trails behind its head. The
+  // runner starts beside that body, just outside touching distance, and
+  // moves the same way so it stays alongside for about a second.
+  const wall = place(world, "wall", 0, 300, Math.PI / 2, 400);
+  const r = model.radiusOf(40) + model.radiusOf(400);
+  const runner = place(world, "runner", r * 1.35, 100, Math.PI / 2, 40);
+  world.nearIds.add("runner");
+  let nears = 0;
+  let died = false;
+  let steps = 0;
+  stepUntil(
+    world,
+    () => {
+      nears += world.nears.filter((n) => n.id === "runner").length;
+      died = world.deaths.length > 0;
+      return died || ++steps >= 48;
+    },
+    60,
+  );
+  assert.equal(died, false, "the runner must not touch the body");
+  assert.equal(nears, 1, `expected one near miss in the cooldown window, got ${nears}`);
+  assert.ok(wall.alive && runner.alive);
+});

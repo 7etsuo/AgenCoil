@@ -86,6 +86,20 @@ Phones: `src/styles.css` pins the body and disables overscroll, selection and lo
 
 `src/components/coil-app.tsx` is the whole UI: menu with skin picker (skins 12 to 15 unlock at best length 120, 300, 600 and 1200, checked client-side only), a custom band builder, a steering toggle on touch devices, HUD (length, rank, kills, arena and daily leaderboard tabs, connection badge), the touch boost button, and the death card with a share button. Nickname, skin, custom bands and mute persist in `localStorage` under `agencoil-*` keys.
 
+### Retention systems (v2 protocol)
+
+Clients that append a device key to HELLO are "v2" and get extra messages; the older client still deployed on grok.me is served the original ones (`STATS` instead of `STATS2`, no `ACK`/`PROFILE`/`NEAR`/`EVENT`/`NOTICE`).
+
+- Profiles: `game-server/src/profiles.ts` keeps best length, kills, games, longest life and an unlock bitmask per device key (`localStorage` `agencoil-device`), in memory and in the `agencoil_profiles` table when `DATABASE_URL` is set. Sent as `PROFILE` on spawn and after each death; all-time rank is a count query.
+- Challenges: `src/game/challenges.ts` picks three per UTC day from a pool (seeded, deterministic), each unlocking a cosmetic bit; progress is folded in at the end of a life (`LifeStats`) and sent as `CHALLENGES`.
+- Cosmetics: boost trails (`TRAILS`) and death effects (`DEATH_FX`). The trail rides in the high nibble of the wire's skin byte (`packSkin`/`unpackSkin`) so old clients keep working; the death effect only affects the local particle burst. The server validates both against the profile's unlocks.
+- Near misses: `World.resolveNearMisses` fires once per other snake per `NEAR_COOLDOWN` when a player's head passes inside `NEAR_FACTOR` of the summed radii without touching; the server pays a small bonus that grows with the combo and sends `NEAR`.
+- Bounties: the top three snakes over `BOUNTY_MIN_MASS` carry `mass * BOUNTY_RATE`; the killer gets 30% of it directly (capped) and everyone gets a `NOTICE`.
+- Comeback: after death the server offers (`NOTICE` kind 3) one respawn per connection within `COMEBACK_WINDOW_MS` that keeps `COMEBACK_KEEP` of the lost length; the client requests it with the last byte of a v2 `SPAWN`.
+- Parties: `?with=CODE` (or the invite button) sets a party code sent in HELLO; new members spawn near a live member.
+- Arena events: every `SWARM_EVERY_S` the server drops `SWARM_ORBS` golden orbs (`Food.k` 4) at an open point and broadcasts `EVENT`; the client shows a banner and a minimap marker.
+- Kill cam: the engine holds a 700 ms beat after death (particles at 0.35x, zoom in 1.25x) before the death card appears.
+
 ### Server (`game-server/`)
 
 - `src/game-server.ts`: `GameServer` wraps one `World`, ticks at `SERVER_TICK_HZ` (40), snapshots at `SNAPSHOT_HZ` (30) and syncs food at `FOOD_SYNC_HZ` (10). Per client it tracks the view rect from the last input, the set of snakes it has been sent (`known`, so the first sighting is `full`), and the set of food ids it holds (`sentFood`, diffed against the cells covering the view). Deaths broadcast to clients that knew the snake; eats go only to the eater. Snake-on-snake deaths feed a coarse heat map (`hotKey`, 400-unit cells); cells with three or more deaths in ten minutes go into `World.hot`, which `findSpawn` avoids. A disconnect holds the snake for `DISCONNECT_GRACE_MS` before killing it. A resume token is single-use per instance (`usedTokens`); presenting one while another socket still owns the snake transfers ownership rather than building a second copy; a `SPAWN` from a client whose snake is alive ends that life first. The loop pauses when no client has been connected for 30 s.

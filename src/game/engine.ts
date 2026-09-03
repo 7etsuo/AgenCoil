@@ -15,7 +15,17 @@ import {
 import { World } from "./world";
 import { Renderer, desiredZoom } from "./render";
 import { GameAudio } from "./audio";
-import { NetSession, defaultServerUrl, type DeathInfo, type NetState, type StatsInfo } from "./net";
+import {
+  NetSession,
+  defaultServerUrl,
+  type ChallengeInfo,
+  type DeathInfo,
+  type EventInfo,
+  type NetState,
+  type ProfileInfo,
+  type StatsInfo,
+} from "./net";
+import { COMEBACK_WINDOW_MS, dist2, radiusOf } from "./model";
 
 export interface HudState {
   phase: Phase;
@@ -24,8 +34,20 @@ export interface HudState {
   rank: number;
   count: number;
   kills: number;
-  board: { name: string; mass: number; you: boolean }[];
+  board: { name: string; mass: number; you: boolean; bounty: number }[];
   daily: { name: string; best: number }[];
+  profile: ProfileInfo | null;
+  challenges: ChallengeInfo[];
+  /** Golden swarm in progress: direction label and seconds left. */
+  event: { dir: string; left: number } | null;
+  /** Close-call combo popup (0 when none). */
+  nearCombo: number;
+  nearBonus: number;
+  /** Seconds left to take the comeback respawn, 0 when unavailable. */
+  comebackLeft: number;
+  /** A beat after death where the card should wait. */
+  deathBeat: boolean;
+  bountyOnYou: number;
   killNotice: string | null;
   /** Recent notable deaths, newest last. */
   feed: string[];
@@ -57,6 +79,8 @@ export interface Look {
   name: string;
   skin: number;
   bands?: string[];
+  trail?: number;
+  deathFx?: number;
 }
 
 const ZOOM_MIN = 0.55;
@@ -128,6 +152,14 @@ export class CoilEngine {
   private watchNid: number | null = null;
   private spawnWait = 0;
   private feed: { text: string; t: number }[] = [];
+  private profile: ProfileInfo | null = null;
+  private challenges: ChallengeInfo[] = [];
+  private event: EventInfo | null = null;
+  private near = { combo: 0, bonus: 0, t: 0 };
+  private comebackOffer = 0;
+  private deathBeatUntil = 0;
+  private lastEatAt = 0;
+  private eatCombo = 0;
   private deathRank = 0;
   private deathCount = 0;
   private dbgWall = 0;
@@ -160,6 +192,27 @@ export class CoilEngine {
         },
         onStats: (s) => {
           this.stats = s;
+        },
+        onProfile: (p) => {
+          this.profile = p;
+          this.emitHud();
+        },
+        onChallenges: (c) => {
+          this.challenges = c;
+          this.emitHud();
+        },
+        onNear: (combo, bonus) => this.onNear(combo, bonus),
+        onEvent: (e) => {
+          this.event = e;
+          this.pushFeed("golden swarm spotted, check the map");
+        },
+        onNotice: (kind, text) => {
+          if (kind === 3) {
+            this.comebackOffer = performance.now() + COMEBACK_WINDOW_MS;
+            return;
+          }
+          this.pushFeed(text);
+          if (kind === 2) this.audio.kill();
         },
       });
       this.net.connect();
@@ -230,6 +283,8 @@ export class CoilEngine {
     this.running = false;
     cancelAnimationFrame(this.raf);
     this.audio.stopMusic();
+    this.audio.setDanger(0);
+    this.audio.setHeartbeat(false);
     this.net?.close();
     window.removeEventListener("resize", this.onResize);
     window.removeEventListener("keydown", this.onKeyDown);
@@ -266,10 +321,18 @@ export class CoilEngine {
     this.stickId = null;
   }
 
-  play(look: Look): void {
+  play(look: Look, comeback = false): void {
     this.audio.unlock();
     this.audio.startMusic();
-    this.look = { name: look.name.slice(0, 16) || "anon", skin: look.skin % 16, bands: look.bands };
+    this.look = {
+      name: look.name.slice(0, 16) || "anon",
+      skin: look.skin % 16,
+      bands: look.bands,
+      trail: look.trail ?? 0,
+      deathFx: look.deathFx ?? 0,
+    };
+    this.comebackOffer = 0;
+    this.near = { combo: 0, bonus: 0, t: 0 };
     this.kills = 0;
     this.streak = 0;
     this.killNotice = null;
@@ -284,7 +347,7 @@ export class CoilEngine {
       // Online, or still connecting: ask the server and wait for SPAWNED.
       // If nothing arrives within SPAWN_TIMEOUT_MS the tick starts a local game.
       this.spawnWait = performance.now();
-      this.net.play(this.look);
+      this.net.play(this.look, comeback);
       return;
     }
     this.spawnLocal();
@@ -293,6 +356,8 @@ export class CoilEngine {
   private spawnLocal(): void {
     const w = this.localWorld();
     const s = w.spawnPlayer("local", this.look.name, this.look.skin, this.look.bands);
+    s.trail = this.look.trail;
+    s.deathFx = this.look.deathFx;
     this.phase = "play";
     this.snapCamTo(s);
     this.emitHud();
@@ -313,9 +378,18 @@ export class CoilEngine {
     this.pointer.y = s.y + Math.sin(s.angle) * AIM_REACH;
   }
 
-  respawn(): void {
+  respawn(comeback = false): void {
     if (this.phase !== "dead") return;
-    this.play(this.look);
+    if (performance.now() < this.deathBeatUntil) return;
+    this.play(this.look, comeback && this.comebackOffer > performance.now());
+  }
+
+  /** Current session party code (friends spawn together). */
+  get party(): string {
+    return this.net?.party ?? "";
+  }
+  setParty(code: string): void {
+    if (this.net) this.net.party = code;
   }
 
   subscribe(fn: (h: HudState) => void): () => void {
@@ -337,10 +411,22 @@ export class CoilEngine {
     const rank = st ? st.rank : p ? alive.findIndex((s) => s.id === p.id) + 1 : 0;
     const count = st ? st.count : alive.length;
     const board = st
-      ? st.board.map((b) => ({ name: b.name, mass: b.mass, you: b.nid === this.net!.selfNid }))
-      : alive
-          .slice(0, 10)
-          .map((s) => ({ name: s.name, mass: Math.floor(s.mass), you: s.id === world.playerId }));
+      ? st.board.map((b) => ({
+          name: b.name,
+          mass: b.mass,
+          you: b.nid === this.net!.selfNid,
+          bounty: b.bounty,
+        }))
+      : alive.slice(0, 10).map((s) => ({
+          name: s.name,
+          mass: Math.floor(s.mass),
+          you: s.id === world.playerId,
+          bounty: 0,
+        }));
+    const now = performance.now();
+    const ev = this.event;
+    const evLeft = ev ? Math.max(0, ev.left - (now - ev.at) / 1000) : 0;
+    const me = st ? st.board.find((b) => b.nid === this.net!.selfNid) : undefined;
     return {
       phase: this.phase,
       score,
@@ -350,6 +436,17 @@ export class CoilEngine {
       kills: this.kills,
       board,
       daily: st?.daily ?? [],
+      profile: this.profile,
+      challenges: this.challenges,
+      event: ev && evLeft > 0 ? { dir: this.compass(ev.x, ev.y), left: Math.round(evLeft) } : null,
+      nearCombo: now - this.near.t < 1500 ? this.near.combo : 0,
+      nearBonus: this.near.bonus,
+      comebackLeft:
+        this.phase === "dead" && this.comebackOffer > now
+          ? Math.ceil((this.comebackOffer - now) / 1000)
+          : 0,
+      deathBeat: this.phase === "dead" && now < this.deathBeatUntil,
+      bountyOnYou: me?.bounty ?? 0,
       killNotice: this.killNotice,
       feed: this.feed.map((f) => f.text),
       deathRank: this.deathRank,
@@ -572,9 +669,13 @@ export class CoilEngine {
       // Keep the server mirror current so the switch back is seamless.
       if (this.online) this.net!.update(dt, this.pointer, false);
     }
+    this.trailFx();
     this.stepDeathFx(dt);
     this.updateCam(dt);
-    this.renderer.stepFx(dt, this.particles, this.floaters, this.cam);
+    // The moment of death plays out in slow motion for a beat.
+    const fxDt = this.phase === "dead" && performance.now() < this.deathBeatUntil ? dt * 0.35 : dt;
+    this.renderer.stepFx(fxDt, this.particles, this.floaters, this.cam);
+    this.audioCues();
     if (this.killTimer > 0) {
       this.killTimer -= dt;
       if (this.killTimer <= 0) this.killNotice = null;
@@ -606,7 +707,10 @@ export class CoilEngine {
   }
 
   private eatFx(x: number, y: number, v: number, c: number): void {
-    this.audio.eat(v);
+    const now = performance.now();
+    this.eatCombo = now - this.lastEatAt < 900 ? this.eatCombo + 1 : 0;
+    this.lastEatAt = now;
+    this.audio.eat(v, this.eatCombo);
     this.burst(x, y, FOOD_COLORS[c % FOOD_COLORS.length]!, v >= 3 ? 10 : 4, 40);
     if (v >= 2)
       this.floaters.push({ x, y, text: `+${Math.round(v)}`, life: 0.7, color: "#e8eaee" });
@@ -666,6 +770,77 @@ export class CoilEngine {
     }
   }
 
+  /** Rough direction from the player (or camera) to a point. */
+  private compass(x: number, y: number): string {
+    const p = this.world.player ?? { x: this.cam.x, y: this.cam.y };
+    const dx = x - p.x;
+    const dy = y - p.y;
+    const ns = Math.abs(dy) > Math.abs(dx) * 0.4 ? (dy < 0 ? "north" : "south") : "";
+    const ew = Math.abs(dx) > Math.abs(dy) * 0.4 ? (dx < 0 ? "west" : "east") : "";
+    return ns && ew ? `${ns}-${ew}` : ns || ew || "here";
+  }
+
+  private onNear(combo: number, bonus: number): void {
+    this.near = { combo, bonus, t: performance.now() };
+    this.audio.near(combo);
+    const p = this.world.player;
+    if (p) {
+      this.floaters.push({
+        x: p.x,
+        y: p.y - radiusOf(p.mass) * 2,
+        text: combo > 1 ? `close x${combo}` : "close!",
+        life: 0.9,
+        color: "#f0c14a",
+      });
+    }
+  }
+
+  /** Boost trails per cosmetic id, spawned behind the tail each tick. */
+  private trailFx(): void {
+    for (const s of this.world.snakes) {
+      if (!s.boosting || !s.trail || !s.points.length) continue;
+      const tail = s.points[0]!;
+      const r = radiusOf(s.mass);
+      if (Math.random() > 0.6) continue;
+      const color =
+        s.trail === 3
+          ? `hsl(${(performance.now() / 4) % 360} 90% 60%)`
+          : s.trail === 2
+            ? "#ff8a3d"
+            : "#ffffff";
+      const a = Math.random() * Math.PI * 2;
+      const sp = s.trail === 1 ? 90 : 30;
+      this.particles.push({
+        x: tail.x + Math.cos(a) * r * 0.5,
+        y: tail.y + Math.sin(a) * r * 0.5,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp,
+        life: 0.4 + Math.random() * 0.4,
+        color,
+        r: s.trail === 2 ? 3 + Math.random() * 3 : 1.5 + Math.random() * 2,
+      });
+    }
+  }
+
+  /** Rumble when a much bigger snake is near; heartbeat when boosting short. */
+  private audioCues(): void {
+    const p = this.world.player;
+    if (!p || this.phase !== "play") {
+      this.audio.setDanger(0);
+      this.audio.setHeartbeat(false);
+      return;
+    }
+    let danger = 0;
+    for (const o of this.world.snakes) {
+      if (o.id === p.id || o.mass < p.mass * 2) continue;
+      const d = Math.sqrt(dist2(p.x, p.y, o.x, o.y));
+      const range = 420 + radiusOf(o.mass) * 6;
+      if (d < range) danger = Math.max(danger, 1 - d / range);
+    }
+    this.audio.setDanger(danger);
+    this.audio.setHeartbeat(p.boosting && p.mass < 30);
+  }
+
   private pushFeed(text: string): void {
     this.feed.push({ text, t: performance.now() });
     if (this.feed.length > 4) this.feed.shift();
@@ -692,6 +867,37 @@ export class CoilEngine {
   private deathBurst(s: Snake): void {
     const color = fillOf(s);
     this.cam.trauma = Math.min(1, this.cam.trauma + (s.id === this.world.playerId ? 0.7 : 0.28));
+    const r = radiusOf(s.mass);
+    if (s.deathFx === 1) {
+      // Ring: a fast expanding circle of sparks from the head.
+      for (let i = 0; i < 40; i++) {
+        const a = (i / 40) * Math.PI * 2;
+        this.particles.push({
+          x: s.x,
+          y: s.y,
+          vx: Math.cos(a) * (220 + r * 3),
+          vy: Math.sin(a) * (220 + r * 3),
+          life: 0.7,
+          color: "#ffffff",
+          r: 2.5,
+        });
+      }
+    } else if (s.deathFx === 2) {
+      // Shatter: heavy shards in the skin colour.
+      for (let i = 0; i < 26; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const sp = 80 + Math.random() * 260;
+        this.particles.push({
+          x: s.x,
+          y: s.y,
+          vx: Math.cos(a) * sp,
+          vy: Math.sin(a) * sp,
+          life: 0.9 + Math.random() * 0.5,
+          color,
+          r: 3 + Math.random() * 5,
+        });
+      }
+    }
     const pts = s.points.length ? s.points.slice().reverse() : [{ x: s.x, y: s.y }];
     const fx: DeathFx = {
       pts,
@@ -740,6 +946,7 @@ export class CoilEngine {
     this.boosting = false;
     this.holdBoost = false;
     this.spawnWait = 0;
+    this.deathBeatUntil = performance.now() + 700;
     this.net?.idle();
     this.deathReason =
       why ??
@@ -789,6 +996,7 @@ export class CoilEngine {
     }
     const mass = world.player?.mass ?? this.deathMass;
     let z = desiredZoom(mass, this.phase);
+    if (this.phase === "dead" && performance.now() < this.deathBeatUntil) z *= 1.25;
     if (this.phase === "play") {
       z *= this.zoomMul;
       if (world.player?.boosting) z *= 0.965;
@@ -811,6 +1019,9 @@ export class CoilEngine {
       this.phase,
       this.phase === "play" ? this.pointer : null,
       this.insets,
+      this.event && this.event.left - (performance.now() - this.event.at) / 1000 > 0
+        ? { x: this.event.x, y: this.event.y }
+        : null,
     );
     if (this.stick && this.phase === "play") {
       const rect = this.canvas.getBoundingClientRect();

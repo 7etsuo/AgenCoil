@@ -6,6 +6,8 @@
  */
 import {
   BOOST_MIN_MASS,
+  packSkin,
+  unpackSkin,
   dist2,
   radiusOf,
   speedOf,
@@ -36,8 +38,34 @@ export interface StatsInfo {
   count: number;
   kills: number;
   clients: number;
-  board: { nid: number; name: string; mass: number; x: number; y: number }[];
+  board: { nid: number; name: string; mass: number; x: number; y: number; bounty: number }[];
   daily: { name: string; best: number }[];
+}
+
+export interface ProfileInfo {
+  best: number;
+  kills: number;
+  games: number;
+  survive: number;
+  rank: number;
+  unlocks: number;
+  persistent: boolean;
+}
+
+export interface ChallengeInfo {
+  id: number;
+  text: string;
+  target: number;
+  progress: number;
+  done: boolean;
+}
+
+export interface EventInfo {
+  x: number;
+  y: number;
+  /** Seconds left when received. */
+  left: number;
+  at: number;
 }
 
 export interface EatInfo {
@@ -53,6 +81,11 @@ export interface NetHooks {
   onDeath: (d: DeathInfo) => void;
   onEats: (eats: EatInfo[]) => void;
   onStats: (s: StatsInfo) => void;
+  onProfile: (p: ProfileInfo) => void;
+  onChallenges: (c: ChallengeInfo[]) => void;
+  onNear: (combo: number, bonus: number) => void;
+  onEvent: (e: EventInfo) => void;
+  onNotice: (kind: number, text: string) => void;
 }
 
 interface Snap {
@@ -69,6 +102,8 @@ interface Look {
   name: string;
   skin: number;
   bands?: string[];
+  trail?: number;
+  deathFx?: number;
 }
 
 const INPUT_HZ = 30;
@@ -145,10 +180,17 @@ export class NetSession {
   };
   private lastSnapAt = 0;
 
+  /** Stable per-device key for the persistent profile. */
+  deviceKey = "";
+  /** Party code so friends spawn together. */
+  party = "";
+  private comebackNext = false;
+
   constructor(
     private readonly url: string,
     private readonly hooks: NetHooks,
   ) {
+    this.deviceKey = deviceKey();
     try {
       this.token = sessionStorage.getItem(TOKEN_KEY) ?? "";
     } catch {
@@ -179,6 +221,15 @@ export class NetSession {
     ws.onopen = () => {
       this.attempts = 0;
       this.setState("online");
+      if (this.deviceKey) {
+        ws.send(
+          new Writer()
+            .u8(C2S.IDENT)
+            .str(this.deviceKey)
+            .str(this.look?.name ?? "anon")
+            .finish(),
+        );
+      }
       if (this.wantPlay && this.look) this.sendHello(false);
       this.pingTimer = setInterval(() => this.ping(), 2000);
     };
@@ -226,9 +277,10 @@ export class NetSession {
   // ── outgoing ───────────────────────────────────────────────────────────────
 
   /** Join the arena (or respawn after death) with this look. */
-  play(look: Look): void {
+  play(look: Look, comeback = false): void {
     this.look = look;
     this.wantPlay = true;
+    this.comebackNext = comeback;
     if (this.ws?.readyState === WebSocket.OPEN) this.sendHello(this.selfNid > 0 && !this.playing);
   }
 
@@ -242,9 +294,15 @@ export class NetSession {
     const w = new Writer()
       .u8(respawn ? C2S.SPAWN : C2S.HELLO)
       .str(this.look.name)
-      .u8(this.look.skin);
+      .u8(packSkin(this.look.skin, this.look.trail ?? 0));
     writeBands(w, this.look.bands);
     w.str(respawn ? "" : this.token);
+    // v2 tail: device key, death effect, party, comeback request.
+    w.str(this.deviceKey)
+      .u8(this.look.deathFx ?? 0)
+      .str(this.party)
+      .u8(respawn && this.comebackNext ? 1 : 0);
+    this.comebackNext = false;
     this.ws.send(w.finish());
   }
 
@@ -322,6 +380,8 @@ export class NetSession {
         s.angle = angle;
         s.mass = mass;
         s.bands = this.look?.bands;
+        s.trail = this.look?.trail ?? 0;
+        s.deathFx = this.look?.deathFx ?? 0;
         s.points = [];
         this.world.ensureTrail(s);
         this.world.snakes.push(s);
@@ -353,7 +413,9 @@ export class NetSession {
         }
         break;
       }
-      case S2C.STATS: {
+      case S2C.STATS:
+      case S2C.STATS2: {
+        const v2 = type === S2C.STATS2;
         const s: StatsInfo = {
           mass: r.f32(),
           rank: r.u16(),
@@ -365,7 +427,14 @@ export class NetSession {
         };
         const nb = r.u8();
         for (let i = 0; i < nb; i++)
-          s.board.push({ nid: r.u16(), name: r.str(), mass: r.u32(), x: r.f32(), y: r.f32() });
+          s.board.push({
+            nid: r.u16(),
+            name: r.str(),
+            mass: r.u32(),
+            x: r.f32(),
+            y: r.f32(),
+            bounty: v2 ? r.u32() : 0,
+          });
         const nd = r.u8();
         for (let i = 0; i < nd; i++) s.daily.push({ name: r.str(), best: r.u32() });
         this.hooks.onStats(s);
@@ -420,6 +489,45 @@ export class NetSession {
       case S2C.ACK:
         this.lastAck = r.u16();
         break;
+      case S2C.PROFILE:
+        this.hooks.onProfile({
+          best: r.u32(),
+          kills: r.u32(),
+          games: r.u32(),
+          survive: r.u32(),
+          rank: r.u32(),
+          unlocks: r.u32(),
+          persistent: r.u8() === 1,
+        });
+        break;
+      case S2C.CHALLENGES: {
+        const n = r.u8();
+        const list: ChallengeInfo[] = [];
+        for (let i = 0; i < n; i++)
+          list.push({
+            id: r.u8(),
+            text: r.str(),
+            target: r.u32(),
+            progress: r.u32(),
+            done: r.u8() === 1,
+          });
+        this.hooks.onChallenges(list);
+        break;
+      }
+      case S2C.NEAR: {
+        const combo = r.u8();
+        const bonus = r.u16() / 10;
+        this.hooks.onNear(combo, bonus);
+        break;
+      }
+      case S2C.EVENT:
+        this.hooks.onEvent({ x: r.f32(), y: r.f32(), left: r.u16(), at: performance.now() });
+        break;
+      case S2C.NOTICE: {
+        const kind = r.u8();
+        this.hooks.onNotice(kind, r.str());
+        break;
+      }
       case S2C.PONG: {
         r.u32();
         this.rttMs = Math.round(performance.now() - this.pingSent);
@@ -478,10 +586,12 @@ export class NetSession {
       let s = this.world.snakes.find((x) => x.id === id);
       if (e.full || !s) {
         if (!e.full) continue; // never seen it whole; the next snapshot will be full
+        const look = unpackSkin(e.skin ?? 0);
         s = {
           id,
           name: e.name ?? "",
-          skin: e.skin ?? 0,
+          skin: look.skin,
+          trail: look.trail,
           bands: e.bands,
           x: e.x,
           y: e.y,
@@ -648,6 +758,23 @@ export class NetSession {
   /** Foods the mirror knows about, for the debug overlay. */
   get foodCount(): number {
     return this.world.foods.length;
+  }
+}
+
+const KEY_STORAGE = "agencoil-device";
+
+/** A random, stable key for this browser; the profile hangs off it. */
+function deviceKey(): string {
+  try {
+    const have = localStorage.getItem(KEY_STORAGE);
+    if (have && /^[A-Za-z0-9_-]{16,64}$/.test(have)) return have;
+    const bytes = new Uint8Array(24);
+    crypto.getRandomValues(bytes);
+    const key = Array.from(bytes, (b) => "abcdefghijklmnopqrstuvwxyz0123456789"[b % 36]).join("");
+    localStorage.setItem(KEY_STORAGE, key);
+    return key;
+  } catch {
+    return "";
   }
 }
 

@@ -10,6 +10,8 @@ export const C2S = {
   INPUT: 2,
   SPAWN: 3,
   PING: 4,
+  /** Device key and name, sent on connect so the menu can show the profile. */
+  IDENT: 5,
 } as const;
 
 export const S2C = {
@@ -25,6 +27,18 @@ export const S2C = {
   SPAWNED: 10,
   /** Sequence of the last input applied; only sent to clients that number inputs. */
   ACK: 11,
+  /** Persistent profile: best, kills, games, longest survival, rank, unlocks. */
+  PROFILE: 12,
+  /** Today's three challenges with progress. */
+  CHALLENGES: 13,
+  /** A near miss by this client's snake, with the current combo. */
+  NEAR: 14,
+  /** Arena event: a golden swarm at a position, for a duration. */
+  EVENT: 15,
+  /** A short notice line (bounty claimed, challenge done, bounty on you). */
+  NOTICE: 16,
+  /** Leaderboard v2: board entries carry a bounty. Sent instead of STATS to v2 clients. */
+  STATS2: 17,
 } as const;
 
 const enc = new TextEncoder();

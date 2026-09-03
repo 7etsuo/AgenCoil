@@ -26,13 +26,73 @@ export class GameAudio {
 
   toggleMute(): boolean {
     this.muted = !this.muted;
-    if (this.muted) this.stopMusic();
-    else if (this.ctx) this.startMusic();
+    if (this.muted) {
+      this.stopMusic();
+      this.setDanger(0);
+      this.setHeartbeat(false);
+    } else if (this.ctx) this.startMusic();
     return this.muted;
   }
 
-  eat(v: number): void {
-    this.blip(520 + v * 40, 0.05, 0.08, "triangle");
+  /** Eating pitch climbs with a combo of quick eats or close calls. */
+  eat(v: number, combo = 0): void {
+    this.blip(520 + v * 40 + Math.min(combo, 8) * 45, 0.05, 0.08, "triangle");
+  }
+
+  near(combo: number): void {
+    this.blip(900 + Math.min(combo, 8) * 60, 0.07, 0.07, "sine");
+  }
+
+  private danger: { osc: OscillatorNode; gain: GainNode } | null = null;
+  private heart: ReturnType<typeof setInterval> | null = null;
+
+  /** Low rumble while a much bigger snake is close; level 0..1. */
+  setDanger(level: number): void {
+    if (!this.ctx) return;
+    if (this.muted || level <= 0) {
+      if (this.danger) {
+        this.danger.gain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.2);
+        const d = this.danger;
+        this.danger = null;
+        setTimeout(() => {
+          d.osc.stop();
+          d.osc.disconnect();
+          d.gain.disconnect();
+        }, 600);
+      }
+      return;
+    }
+    if (!this.danger) {
+      const osc = this.ctx.createOscillator();
+      osc.type = "sawtooth";
+      osc.frequency.value = 38;
+      const gain = this.ctx.createGain();
+      gain.gain.value = 0;
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.frequency.value = 120;
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start();
+      this.danger = { osc, gain };
+    }
+    this.danger.gain.gain.setTargetAtTime(0.06 * level, this.ctx.currentTime, 0.15);
+  }
+
+  /** A slow heartbeat while boosting on a short snake. */
+  setHeartbeat(on: boolean): void {
+    if (on && !this.heart && !this.muted && this.ctx) {
+      const beat = () => {
+        this.blip(70, 0.09, 0.14, "sine");
+        setTimeout(() => this.blip(58, 0.09, 0.1, "sine"), 170);
+      };
+      beat();
+      this.heart = setInterval(beat, 900);
+    } else if (!on && this.heart) {
+      clearInterval(this.heart);
+      this.heart = null;
+    }
   }
 
   boost(): void {

@@ -80,6 +80,7 @@ export class Renderer {
     phase: Phase,
     aim: Vec | null,
     insets: { top: number; bottom: number } = { top: 0, bottom: 0 },
+    event: Vec | null = null,
   ): void {
     const shake = cam.trauma * cam.trauma;
     const ox = (Math.random() * 2 - 1) * shake * 14;
@@ -122,7 +123,7 @@ export class Renderer {
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.drawNames(ctx, snakes, cam, w, h, dpr, z, ox, oy);
-    this.drawMinimap(ctx, snakes, localId, w, h, dpr, phase, insets);
+    this.drawMinimap(ctx, snakes, localId, w, h, dpr, phase, insets, event);
   }
 
   private drawArena(
@@ -185,11 +186,11 @@ export class Renderer {
     world.forEachFoodIn(x0, y0, x1, y1, (f) => {
       const spr = sprites[f.c % sprites.length];
       if (!spr) return;
-      const wob = f.k === 3 ? 0.18 : f.k === 2 ? 0.14 : 0.09;
-      const pulse = 1 - wob + Math.sin(t * (f.k === 3 ? 6 : 2.6) + f.x * 0.07 + f.y * 0.05) * wob;
+      const wob = f.k === 3 || f.k === 4 ? 0.18 : f.k === 2 ? 0.14 : 0.09;
+      const pulse = 1 - wob + Math.sin(t * (f.k >= 3 ? 6 : 2.6) + f.x * 0.07 + f.y * 0.05) * wob;
       const dest = spr.size * (f.r / 15) * pulse;
       if (dest < minDest) return;
-      if (f.k === 3) {
+      if (f.k === 3 || f.k === 4) {
         ctx.globalAlpha = 0.22 + Math.sin(t * 5 + f.x) * 0.08;
         ctx.drawImage(spr.canvas, f.x - dest, f.y - dest, dest * 2, dest * 2);
         ctx.globalAlpha = 1;
@@ -436,6 +437,7 @@ export class Renderer {
     dpr: number,
     phase: Phase,
     insets: { top: number; bottom: number },
+    event: Vec | null,
   ): void {
     if (phase === "menu") return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -466,6 +468,18 @@ export class Renderer {
       ctx.fill();
     }
     ctx.globalAlpha = 1;
+    if (event) {
+      const pulse = 4 + Math.sin(this.time * 6) * 1.5;
+      ctx.beginPath();
+      ctx.arc(cx + event.x * k, cy + event.y * k, pulse, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(240,193,74,0.9)";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(cx + event.x * k, cy + event.y * k, pulse + 4, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(240,193,74,0.5)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
     const me = snakes.find((s) => s.id === localId);
     if (me) {
       ctx.beginPath();

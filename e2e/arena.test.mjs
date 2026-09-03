@@ -43,7 +43,7 @@ test("a reload resumes the same snake with its length", async () => {
   await p.page.reload({ waitUntil: "load" });
   await p.page.waitForTimeout(400);
   await p.page.fill("#nick", "resume");
-  await p.page.getByRole("button", { name: "Play" }).click();
+  await p.page.getByRole("button", { name: "Play", exact: true }).click();
   await p.page.waitForTimeout(1500);
   const after = await p.dbg();
   assert.equal(after.mode, "online");
@@ -94,7 +94,7 @@ test("without a server the game falls back to the offline arena", async () => {
   await page.goto(`http://127.0.0.1:8198/`, { waitUntil: "load" });
   await page.waitForTimeout(500);
   await page.fill("#nick", "offline");
-  await page.getByRole("button", { name: "Play" }).click();
+  await page.getByRole("button", { name: "Play", exact: true }).click();
   let d = null;
   for (let t = 0; t < 14; t++) {
     await page.waitForTimeout(1000);
