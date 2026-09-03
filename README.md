@@ -27,7 +27,7 @@ npm run dev            # ws://localhost:8090/api/ws
 
 Point the client at it with `VITE_GAME_SERVER=ws://localhost:8090/api/ws npm run dev`. Without that variable the client uses the production server.
 
-The production server is a Vercel project (`agencoil-server`, root directory `game-server`) served from `/api/ws`. Both it and the frontend project (`agencoil`) are connected to this GitHub repo, so a push to `main` deploys them. `GAME_SECRET` signs resume tokens so a reconnect keeps your snake and length even when it lands on a different instance. `DATABASE_URL` (a Neon database from the Vercel Marketplace) persists the daily leaderboard.
+The production server is a Vercel project (`agencoil-server`, root directory `game-server`) served from `/api/ws`; its build writes a Build Output API bundle (`npm run build:vercel`). Both it and the frontend project (`agencoil`) are connected to this GitHub repo, so a push to `main` deploys them. `GAME_SECRET` signs resume tokens so a reconnect keeps your snake and length even when it lands on a different instance. `DATABASE_URL` (a Neon database from the Vercel Marketplace) persists the daily leaderboard.
 
 The server also runs anywhere Node runs. `game-server/Dockerfile` and `fly.toml` are ready for Fly.io, which gives one always-on world with no connection cap:
 
