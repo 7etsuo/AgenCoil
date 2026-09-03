@@ -17,6 +17,9 @@ Rules: orbs near your head get pulled in. Boosting is twice as fast but sheds le
 
 ## Server
 
+The world runs as one process inside a Vercel Sandbox so every player shares it. The Vercel function `agencoil-server` is the coordinator: `GET /api/arena` answers with the arena's socket address, creates the Sandbox when none is live, keeps a second one only when the first is full, and a cron rolls a fresh Sandbox before the 24 hour session limit while the old one hands its players over. Clients ask the coordinator before every connect and fall back to the function itself when it is absent (local dev).
+
+
 The arena runs in `game-server/`: a Node process that owns the world, runs the bots, judges every collision and streams each player only what is near their camera over a binary WebSocket protocol.
 
 ```bash
