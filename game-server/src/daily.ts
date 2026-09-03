@@ -4,6 +4,7 @@
  * recycling and is shared across instances.
  */
 import pg from "pg";
+import { retryDb } from "./db-retry";
 
 export interface DailyEntry {
   name: string;
@@ -15,6 +16,7 @@ export class DailyBoard {
   private best = new Map<string, number>();
   private pool: pg.Pool | null = null;
   private ready: Promise<void> | null = null;
+  private initialized = false;
   private dirty = new Set<string>();
   private flushing = false;
 
@@ -27,12 +29,26 @@ export class DailyBoard {
         // Be explicit about verification; pg warns about implicit sslmode.
         ssl: /sslmode=(require|verify)/.test(url) ? { rejectUnauthorized: true } : undefined,
       });
-      this.ready = this.load().catch((err) => {
+      void this.ensureReady().catch((err) => {
         console.error("[daily] load failed:", err?.message ?? err);
-        this.pool = null;
       });
       setInterval(() => void this.flush(), 5000).unref();
     }
+  }
+
+  private ensureReady(): Promise<void> {
+    if (!this.pool || this.initialized) return Promise.resolve();
+    if (!this.ready) {
+      this.ready = retryDb(() => this.load())
+        .then(() => {
+          this.initialized = true;
+        })
+        .catch((error) => {
+          this.ready = null;
+          throw error;
+        });
+    }
+    return this.ready;
   }
 
   private async load(): Promise<void> {
@@ -46,7 +62,9 @@ export class DailyBoard {
       `SELECT name, best FROM agencoil_daily WHERE day = $1 ORDER BY best DESC LIMIT 200`,
       [this.day],
     );
-    for (const r of rows.rows) this.best.set(r.name, Number(r.best));
+    for (const r of rows.rows) {
+      this.best.set(r.name, Math.max(this.best.get(r.name) ?? 0, Number(r.best)));
+    }
   }
 
   private roll(): void {
@@ -69,6 +87,11 @@ export class DailyBoard {
 
   top(n: number): DailyEntry[] {
     this.roll();
+    if (!this.initialized) {
+      void this.ensureReady().catch((err) => {
+        console.error("[daily] load failed:", err?.message ?? err);
+      });
+    }
     return [...this.best.entries()]
       .map(([name, best]) => ({ name, best }))
       .sort((a, b) => b.best - a.best)
@@ -79,16 +102,19 @@ export class DailyBoard {
     if (!this.pool || this.flushing || !this.dirty.size) return;
     this.flushing = true;
     try {
-      await this.ready;
+      await this.ensureReady();
       if (!this.pool) return;
       const names = [...this.dirty];
-      this.dirty.clear();
       for (const name of names) {
-        await this.pool.query(
-          `INSERT INTO agencoil_daily (day, name, best) VALUES ($1, $2, $3)
-           ON CONFLICT (day, name) DO UPDATE SET best = GREATEST(agencoil_daily.best, EXCLUDED.best)`,
-          [this.day, name, this.best.get(name) ?? 0],
+        const best = this.best.get(name) ?? 0;
+        await retryDb(() =>
+          this.pool!.query(
+            `INSERT INTO agencoil_daily (day, name, best) VALUES ($1, $2, $3)
+             ON CONFLICT (day, name) DO UPDATE SET best = GREATEST(agencoil_daily.best, EXCLUDED.best)`,
+            [this.day, name, best],
+          ),
         );
+        if ((this.best.get(name) ?? 0) === best) this.dirty.delete(name);
       }
     } catch (err) {
       console.error("[daily] flush failed:", (err as Error)?.message ?? err);

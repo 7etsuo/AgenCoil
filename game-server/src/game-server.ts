@@ -480,7 +480,10 @@ export class GameServer {
           console.error("[hello] failed:", (err as Error)?.message ?? err);
         });
       else if (type === C2S.INPUT) this.onInput(client, r);
-      else if (type === C2S.IDENT) void this.onIdent(client, r);
+      else if (type === C2S.IDENT)
+        void this.onIdent(client, r).catch((err) => {
+          console.error("[ident] failed:", (err as Error)?.message ?? err);
+        });
       else if (type === C2S.PING) client.ws.send(new Writer().u8(S2C.PONG).u32(r.u32()).finish());
     } catch {
       client.ws.close(1003, "bad message");
