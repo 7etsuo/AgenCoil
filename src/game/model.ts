@@ -73,6 +73,13 @@ export const BOSS_DURATION_S = 300;
 export const BOSS_HIT_MASS = 4;
 export const BOSS_NAME = "the leviathan";
 
+/**
+ * The most length one death can drop as remains. Without a ceiling, two big
+ * snakes trading deaths recycle each other's mass, and any multiplier above
+ * one compounds it into millions.
+ */
+export const REMAINS_CAP = 6000;
+
 export interface Vec {
   x: number;
   y: number;

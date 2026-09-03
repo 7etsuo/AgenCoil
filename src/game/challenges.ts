@@ -72,7 +72,7 @@ export function titleOf(p: {
 
 /** Hourly arena modes: active for the first 15 minutes of every hour. */
 export const MODES = [
-  { id: 1, name: "double remains", text: "Remains are worth twice as much" },
+  { id: 1, name: "double remains", text: "Bots drop twice the remains" },
   { id: 3, name: "hunger", text: "Length drains slowly, keep eating" },
   { id: 4, name: "tiny", text: "No comebacks, everyone starts fresh" },
 ] as const;

@@ -17,6 +17,7 @@ import {
   BOSS_MASS,
   BOSS_NAME,
   LANDMARKS,
+  REMAINS_CAP,
   SPAWN_INVULN,
   START_MASS,
   type Food,
@@ -353,7 +354,10 @@ export class World {
   pelletsFrom(s: Snake): Food[] {
     const out: Food[] = [];
     const n = Math.round(clamp(8 + s.mass * 0.3, 8, 150));
-    const each = Math.max(1, (s.mass * 0.85 * this.remainsMult) / n);
+    // Only bots take the event multiplier: their mass is capped, so doubling
+    // it cannot run away, while player remains fed back into players did.
+    const mult = s.isBot ? this.remainsMult : 1;
+    const each = Math.max(1, Math.min(REMAINS_CAP, s.mass * 0.85 * mult) / n);
     const pts = s.points.length ? s.points : [{ x: s.x, y: s.y }];
     for (let i = 0; i < n; i++) {
       const p = pts[((i / n) * (pts.length - 1)) | 0]!;

@@ -255,10 +255,27 @@ test("arena modes: hunger and double remains change the rules", () => {
   world.hunger = 0;
   const plain = world.pelletsFrom(s).reduce((a, p) => a + p.v, 0);
   world.remainsMult = 2;
-  const doubled = world.pelletsFrom(s).reduce((a, p) => a + p.v, 0);
+  const stillPlain = world.pelletsFrom(s).reduce((a, p) => a + p.v, 0);
   assert.ok(
-    doubled > plain * 1.8 && doubled < plain * 2.2,
-    `remains doubled (${plain} -> ${doubled})`,
+    stillPlain > plain * 0.8 && stillPlain < plain * 1.2,
+    `a player's remains never take the multiplier (${plain} -> ${stillPlain})`,
+  );
+  const bot = world.spawnBot(new Set());
+  bot.mass = 80;
+  world.remainsMult = 1;
+  const botPlain = world.pelletsFrom(bot).reduce((a, p) => a + p.v, 0);
+  world.remainsMult = 2;
+  const botDoubled = world.pelletsFrom(bot).reduce((a, p) => a + p.v, 0);
+  assert.ok(
+    botDoubled > botPlain * 1.8 && botDoubled < botPlain * 2.2,
+    `a bot's remains double (${botPlain} -> ${botDoubled})`,
+  );
+  // A giant's death drops at most the cap, whatever its mass.
+  s.mass = 200000;
+  const capped = world.pelletsFrom(s).reduce((a, p) => a + p.v, 0);
+  assert.ok(
+    capped <= model.REMAINS_CAP * 1.35 && capped > model.REMAINS_CAP * 0.65,
+    `remains capped (${capped})`,
   );
 });
 
