@@ -261,3 +261,32 @@ test("arena modes: hunger and double remains change the rules", () => {
     `remains doubled (${plain} -> ${doubled})`,
   );
 });
+
+test("the boss takes a hit point when a player's head touches its body, and only its head kills", () => {
+  const world = new World(false);
+  world.host = true;
+  const boss = world.spawnBoss({ x: 0, y: 0 });
+  boss.points = [];
+  for (let x = -600; x <= 0; x += 20) boss.points.push({ x, y: 0 });
+  boss.x = 0;
+  boss.y = 0;
+  boss.angle = 0;
+  const s = place(world, "s", -300, 60, -Math.PI / 2, 60);
+  const hpBefore = boss.hp;
+  const massBefore = s.mass;
+  const steps = stepUntil(world, () => boss.hp < hpBefore, 60);
+  assert.ok(steps >= 0, "a cut lands");
+  assert.equal(s.alive, true, "the body did not kill the attacker");
+  assert.ok(s.mass > massBefore, "the attacker is fed by the cut");
+  assert.equal(world.bossHits.length >= 1, true);
+  // Head on head still kills the player.
+  const world2 = new World(false);
+  world2.host = true;
+  const b2 = world2.spawnBoss({ x: 0, y: 0 });
+  b2.angle = Math.PI;
+  const p = place(world2, "p", 120, 0, Math.PI, 60);
+  b2.x = 0;
+  b2.y = 0;
+  const died = stepUntil(world2, () => !p.alive, 120);
+  assert.ok(died >= 0, "the boss head kills");
+});

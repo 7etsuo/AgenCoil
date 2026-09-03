@@ -16,7 +16,7 @@ interface Row {
   bands: string[];
 }
 
-type Kind = "alltime" | "weekly" | "season";
+type Kind = "alltime" | "weekly" | "season" | "crew";
 
 function stripe(bands: string[]): string {
   const n = bands.length;
@@ -57,7 +57,7 @@ function TopPage() {
             <ArrowLeft size={16} /> back to the arena
           </Link>
           <div className="flex gap-2 text-xs">
-            {(["alltime", "weekly", "season"] as const).map((k) => (
+            {(["alltime", "weekly", "season", "crew"] as const).map((k) => (
               <button
                 key={k}
                 type="button"
@@ -68,16 +68,18 @@ function TopPage() {
                   ? "all time"
                   : k === "weekly"
                     ? `this week${week ? ` · ${week}` : ""}`
-                    : `season${season ? ` ${season}` : ""}`}
+                    : k === "season"
+                      ? `season${season ? ` ${season}` : ""}`
+                      : "crews"}
               </button>
             ))}
           </div>
         </div>
         <h1 className="mt-6 text-3xl font-semibold tracking-tight">Top players</h1>
         <p className="mt-1 text-sm text-muted">
-          Longest single run,{" "}
-          {kind === "alltime" ? "ever" : kind === "weekly" ? "this week" : "this season"}. Kills and
-          games are all time.
+          {kind === "crew"
+            ? "Crews ranked by their members' best runs this week."
+            : `Longest single run, ${kind === "alltime" ? "ever" : kind === "weekly" ? "this week" : "this season"}. Kills and games are all time.`}
           {kind === "weekly" && " Leagues promote and relegate every Monday."}
         </p>
         {error && <p className="mt-6 text-sm text-danger">Could not reach the arena server.</p>}
@@ -107,7 +109,9 @@ function TopPage() {
                   {r.kills >= 50 && <span className="ml-2 text-xs text-[#f0c14a]">Hunter</span>}
                 </span>
                 <span className="hidden text-xs text-subtle sm:inline">
-                  {r.kills} kills · {r.games} games
+                  {kind === "crew"
+                    ? `${r.games} member${r.games === 1 ? "" : "s"}`
+                    : `${r.kills} kills · ${r.games} games`}
                 </span>
                 <span className="w-16 text-right tabular-nums font-semibold">{r.best}</span>
               </li>

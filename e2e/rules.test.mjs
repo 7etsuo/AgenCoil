@@ -136,3 +136,35 @@ test("lifetime totals feed levels and season bests", async () => {
   assert.equal(p.seasonBest, 610);
   assert.equal(p.season, rules.seasonOf());
 });
+
+test("quests are a chain: only the active step progresses, and the chain opens a chest", async () => {
+  const store = new ProfileStore();
+  const p = await store.load("dev-3", "tester");
+  assert.equal(p.shards, 1, "a new profile starts with one shard");
+  const chain = rules.dailyChallenges(p.day);
+  const bigLife = {
+    length: 5000,
+    kills: 50,
+    survive: 5000,
+    near: 500,
+    remains: 5000,
+    noboostLength: 5000,
+    bounty: 5,
+  };
+  const r1 = store.recordLife(p, bigLife);
+  assert.equal(r1.completed.length, 1, "one step per life at most");
+  assert.equal(p.done[0], true);
+  assert.ok(!p.done[1], "step two did not take the same life");
+  assert.equal(r1.chest, false);
+  store.recordLife(p, bigLife);
+  const r3 = store.recordLife(p, bigLife);
+  assert.equal(p.done[2], true);
+  assert.equal(r3.chest, true, `finishing step ${chain.length} opens a chest`);
+  const before = p.unlocks;
+  const msg1 = store.openChest(p);
+  assert.match(msg1, /shard 2\/3/);
+  const msg2 = store.openChest(p);
+  assert.match(msg2, /unlocked/);
+  assert.equal(p.shards, 0);
+  assert.ok(p.unlocks !== before, "three shards unlocked a cosmetic");
+});

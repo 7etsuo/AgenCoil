@@ -14,6 +14,7 @@ export const C2S = {
   IDENT: 5,
   /** A quick reaction (0..3) shown above the snake. */
   EMOTE: 6,
+  CREW: 7,
 } as const;
 
 export const S2C = {
@@ -45,6 +46,7 @@ export const S2C = {
   FULL: 19,
   /** Someone emoted: nid, emote id. */
   EMOTE: 20,
+  WISP: 21,
   /** The server refused a spawn because no valid human-verification session exists. */
   GATE_REQUIRED: 18,
 } as const;
@@ -256,6 +258,8 @@ export const SNAKE_FULL = 1;
 export const SNAKE_BOOST = 2;
 export const SNAKE_BOT = 4;
 export const SNAKE_INVULN = 8;
+export const SNAKE_CROWN = 16;
+export const SNAKE_BOSS = 32;
 
 /** One snake entry inside a snapshot. `full` includes identity and body. */
 export function writeSnakeEntry(
@@ -270,6 +274,8 @@ export function writeSnakeEntry(
   if (s.boosting) flags |= SNAKE_BOOST;
   if (s.isBot) flags |= SNAKE_BOT;
   if (s.invuln > 0) flags |= SNAKE_INVULN;
+  if (s.crown) flags |= SNAKE_CROWN;
+  if (s.boss) flags |= SNAKE_BOSS;
   w.u16(nid).u8(flags).f32(s.x).f32(s.y).angle(s.angle).f32(s.mass);
   if (full) {
     w.u8(s.skin).str(s.name);
@@ -284,6 +290,8 @@ export interface SnakeEntry {
   boosting: boolean;
   isBot: boolean;
   invuln: boolean;
+  crown: boolean;
+  boss: boolean;
   x: number;
   y: number;
   angle: number;
@@ -303,6 +311,8 @@ export function readSnakeEntry(r: Reader): SnakeEntry {
     boosting: (flags & SNAKE_BOOST) !== 0,
     isBot: (flags & SNAKE_BOT) !== 0,
     invuln: (flags & SNAKE_INVULN) !== 0,
+    crown: (flags & SNAKE_CROWN) !== 0,
+    boss: (flags & SNAKE_BOSS) !== 0,
     x: r.f32(),
     y: r.f32(),
     angle: r.angle(),

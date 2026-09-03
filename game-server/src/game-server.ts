@@ -11,9 +11,17 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket, type RawData } from "ws";
 import {
   ARENA_RADIUS,
+  BOSS_DURATION_S,
+  BOSS_MINUTE,
+  BOSS_NAME,
   BOUNTY_MIN_MASS,
   HUNGER_RATE,
   LANDMARKS,
+  WISP_BANK_MAX,
+  WISP_BOOST,
+  WISP_REACH,
+  WISP_SECS,
+  WISP_SPEED,
   BOUNTY_RATE,
   COMEBACK_KEEP,
   COMEBACK_WINDOW_MS,
@@ -103,6 +111,13 @@ interface Client {
   deathMass: number;
   bountied: boolean;
   lastEmote: number;
+  /** Afterlife between lives: a wisp that banks starting length. */
+  wisp: { x: number; y: number; angle: number; boost: boolean; until: number; bank: number } | null;
+  wispBank: number;
+  /** Consecutive lives that ended inside 20 s; two in a row means a rough start. */
+  rough: number;
+  /** Boss hits landed this Boss Hour, for the participation chest. */
+  bossHits: number;
   /** Input fingerprint for automated-play detection. */
   fp: { lastAt: number; lastAngle: number; n: number; sumDt: number; sumDt2: number; same: number };
   lastPing: number;
@@ -251,10 +266,11 @@ export class GameServer {
     const url = new URL(req.url ?? "/", "http://arena.local");
     const path = url.pathname;
     const top = url.searchParams.get("top");
-    if (top === "alltime" || top === "weekly" || top === "season") {
+    if (top === "alltime" || top === "weekly" || top === "season" || top === "crew") {
       res.setHeader("cache-control", "public, max-age=30");
       try {
-        const rows = await this.profiles.top(top, 100);
+        const rows =
+          top === "crew" ? await this.profiles.topCrews(50) : await this.profiles.top(top, 100);
         res.end(JSON.stringify({ kind: top, week: isoWeek(), season: seasonOf(), rows }));
       } catch {
         res.end(JSON.stringify({ kind: top, rows: [] }));
@@ -461,6 +477,10 @@ export class GameServer {
       deathMass: 0,
       bountied: false,
       lastEmote: 0,
+      wisp: null,
+      wispBank: 0,
+      rough: 0,
+      bossHits: 0,
       fp: { lastAt: 0, lastAngle: 0, n: 0, sumDt: 0, sumDt2: 0, same: 0 },
       lastPing: Date.now(),
       alive: true,
@@ -534,6 +554,7 @@ export class GameServer {
         });
       else if (type === C2S.INPUT) this.onInput(client, r);
       else if (type === C2S.EMOTE) this.onEmote(client, r.u8());
+      else if (type === C2S.CREW) this.onCrew(client, r.str());
       else if (type === C2S.IDENT)
         void this.onIdent(client, r).catch((err) => {
           console.error("[ident] failed:", (err as Error)?.message ?? err);
@@ -657,6 +678,7 @@ export class GameServer {
       // A comeback keeps a quarter of the lost length, once per connection,
       // if asked for within a few seconds of dying.
       const now = Date.now();
+      if (client.wisp) this.endWisp(client);
       let mass: number | undefined;
       if (
         respawn &&
@@ -678,6 +700,16 @@ export class GameServer {
         mass,
       );
       if (client.profile) this.profiles.setLook(client.profile, client.skin, client.bands);
+      if (mass === undefined && client.wispBank > 0) {
+        snake.mass = START_MASS + client.wispBank;
+        snake.points = [];
+        this.world.ensureTrail(snake);
+      }
+      client.wispBank = 0;
+      // Rookies (best under 100) and anyone on a rough start get gentler bots.
+      snake.rookie = (client.profile?.best ?? 0) < 100 || client.rough >= 2;
+      if (client.profile?.crew) snake.name = `[${client.profile.crew}] ${client.name}`;
+      if (client.profile && client.profile.crownUntil > now) snake.crown = true;
       // Skill-based placement: veterans start out where the big snakes roam,
       // newcomers in the quietest corner the arena has. A party overrides it.
       const best = client.profile?.best ?? 0;
@@ -686,7 +718,11 @@ export class GameServer {
         ? this.world.snakes.find((s) => s.alive && s.id !== selfId && this.nidOf(s.id) === nearNid)
         : undefined;
       if (rival) this.spawnNearSnake(snake, rival);
-      else if (best >= 500) this.spawnNearTop(snake);
+      else if (client.rough >= 2) {
+        // Two quick deaths in a row: the quiet corner and a helper again.
+        this.spawnQuiet(snake);
+        this.spawnHelperBot(snake);
+      } else if (best >= 500) this.spawnNearTop(snake);
       else if (best < 100) this.spawnQuiet(snake);
       // A first life gets a small, timid bot placed just ahead: the easiest
       // possible first kill, which is what turns a visitor into a player.
@@ -740,6 +776,18 @@ export class GameServer {
       void this.sendProfile(client);
       if (this.event && this.event.until > Date.now()) this.sendEvent(client);
     }
+  }
+
+  /** Set (or clear) the crew tag shown before the name. */
+  private onCrew(client: Client, raw: string): void {
+    if (!client.profile) return;
+    const tag = raw
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "")
+      .slice(0, 4);
+    if (tag && (tag.length < 2 || !cleanName(tag))) return;
+    this.profiles.setCrew(client.profile, tag);
+    void this.sendProfile(client);
   }
 
   /** Broadcast a reaction above a live snake to everyone who can see it. */
@@ -872,6 +920,9 @@ export class GameServer {
         .u16(Math.min(65535, p.bountyTotal))
         .u32(p.seasonBest)
         .u16(p.season)
+        .u8(Math.min(255, p.shards))
+        .str(p.crew)
+        .u16(Math.max(0, Math.min(65535, Math.ceil((p.crownUntil - Date.now()) / 1000))))
         .finish(),
     );
     const list = this.profiles.challenges(p);
@@ -883,6 +934,111 @@ export class GameServer {
         .u32(c.progress)
         .u8(c.done ? 1 : 0);
     client.ws.send(w.finish());
+  }
+
+  private sendWisp(c: Client, secsLeft: number): void {
+    const w = c.wisp;
+    if (!w) return;
+    c.ws.send(
+      new Writer()
+        .u8(S2C.WISP)
+        .f32(w.x)
+        .f32(w.y)
+        .u16(Math.round(w.bank))
+        .u8(Math.max(0, Math.min(255, Math.ceil(secsLeft))))
+        .finish(),
+    );
+  }
+
+  private endWisp(c: Client): void {
+    const w = c.wisp;
+    if (!w) return;
+    c.wispBank = Math.min(WISP_BANK_MAX, Math.round(w.bank));
+    this.sendWisp(c, 0);
+    c.wisp = null;
+  }
+
+  /** Move every wisp, let it eat, and end the ones that have run out. */
+  private stepWisps(dt: number): void {
+    const now = Date.now();
+    for (const c of this.clients) {
+      const w = c.wisp;
+      if (!w) continue;
+      if (now >= w.until) {
+        this.endWisp(c);
+        continue;
+      }
+      const sp = w.boost ? WISP_BOOST : WISP_SPEED;
+      w.x += Math.cos(w.angle) * sp * dt;
+      w.y += Math.sin(w.angle) * sp * dt;
+      const d = Math.hypot(w.x, w.y);
+      if (d > ARENA_RADIUS - 40) {
+        w.x *= (ARENA_RADIUS - 40) / d;
+        w.y *= (ARENA_RADIUS - 40) / d;
+      }
+      if (w.bank >= WISP_BANK_MAX) continue;
+      for (const f of this.world.queryFood(w.x, w.y, WISP_REACH + 12)) {
+        if (f.k > 2 || f.id === undefined) continue;
+        if (Math.hypot(f.x - w.x, f.y - w.y) > WISP_REACH + f.r * 0.5) continue;
+        w.bank = Math.min(WISP_BANK_MAX, w.bank + f.v);
+        this.world.removeFood(f);
+        if (w.bank >= WISP_BANK_MAX) break;
+      }
+    }
+  }
+
+  private boss: Snake | null = null;
+  private bossHour = -1;
+  private bossUntil = 0;
+
+  /** The Boss Hour: at :30 every hour a boss surfaces at a landmark for five minutes. */
+  private stepBoss(): void {
+    const now = new Date();
+    const hour = now.getUTCHours();
+    if (this.boss && (!this.boss.alive || Date.now() > this.bossUntil)) {
+      if (this.boss.alive) this.world.killSnake(this.boss.id);
+      this.boss = null;
+      for (const c of this.clients) c.bossHits = 0;
+    }
+    if (
+      !this.boss &&
+      now.getUTCMinutes() === BOSS_MINUTE &&
+      this.bossHour !== hour &&
+      this.clients.size
+    ) {
+      this.bossHour = hour;
+      const lm = LANDMARKS[(hour + 1) % LANDMARKS.length]!;
+      const at = this.world.safeSpawnNear({ x: lm.x, y: lm.y });
+      const boss = this.world.spawnBoss(at);
+      this.boss = boss;
+      this.nidOf(boss.id);
+      this.bossUntil = Date.now() + BOSS_DURATION_S * 1000;
+      for (const c of this.clients)
+        this.notice(c, 0, `${BOSS_NAME} has surfaced at ${lm.name}: cut it together`);
+    }
+    if (!this.world.bossHits.length) return;
+    for (const h of this.world.bossHits) {
+      const c = [...this.clients].find((x) => x.sid === h.attacker);
+      if (!c) continue;
+      c.bossHits++;
+      if (!h.killed) continue;
+      // The final cut wears the crown until the next boss; everyone who hit it gets a chest.
+      if (c.profile) {
+        this.profiles.setCrown(c.profile, Date.now() + 3600_000);
+        void this.sendProfile(c);
+      }
+      const me = this.world.snakes.find((s) => s.id === c.sid);
+      if (me) me.crown = true;
+      for (const o of this.clients) {
+        this.notice(o, 0, `${c.name} landed the final cut on ${BOSS_NAME} and wears the crown`);
+        if (o.bossHits > 0 && o.profile) {
+          this.notice(o, 2, this.profiles.openChest(o.profile));
+          void this.sendProfile(o);
+        }
+        o.bossHits = 0;
+      }
+    }
+    this.world.bossHits.length = 0;
   }
 
   private notice(client: Client, kind: number, text: string): void {
@@ -916,7 +1072,13 @@ export class GameServer {
     };
     const lag = r.remaining >= 1 ? (r.u8() * 4) / 1000 : 0;
     this.fingerprint(client, angle);
-    if (!client.sid) return;
+    if (!client.sid) {
+      if (client.wisp) {
+        client.wisp.angle = angle;
+        client.wisp.boost = boost;
+      }
+      return;
+    }
     const input = this.world.inputs.get(client.sid);
     if (input) {
       input.angle = angle;
@@ -1047,6 +1209,8 @@ export class GameServer {
     for (const s of this.world.snakes) if (!this.nids.has(s.id)) this.nidOf(s.id);
 
     if (this.world.deaths.length) this.onDeaths();
+    this.stepWisps(1 / SERVER_TICK_HZ);
+    if (this.tick % SERVER_TICK_HZ === 0) this.stepBoss();
     if (this.world.eats.length) this.onEats();
     if (this.world.nears.length) this.onNears();
     this.trackLives();
@@ -1182,6 +1346,19 @@ export class GameServer {
     const life = c.life;
     c.life = null;
     if (!life) return;
+    c.rough = Date.now() - life.startAt < 20_000 ? c.rough + 1 : 0;
+    // Afterlife: a wisp for a while, banking starting length for the next life.
+    if (c.proto >= 2) {
+      c.wisp = {
+        x: s.x,
+        y: s.y,
+        angle: s.angle,
+        boost: false,
+        until: Date.now() + WISP_SECS * 1000,
+        bank: 0,
+      };
+      this.sendWisp(c, WISP_SECS);
+    }
     if (c.v2 && !c.comebackUsed) this.notice(c, 3, "comeback");
     if (!c.profile) return;
     const stats: LifeStats = {
@@ -1193,11 +1370,13 @@ export class GameServer {
       noboostLength: Math.floor(life.noboostLength),
       bounty: life.bounty,
     };
-    const { completed, milestones, freezeEarned } = this.profiles.recordLife(c.profile, stats, {
-      x: s.x,
-      y: s.y,
-    });
-    for (const ch of completed) this.notice(c, 2, `challenge complete: ${ch.text}`);
+    const { completed, milestones, freezeEarned, chest } = this.profiles.recordLife(
+      c.profile,
+      stats,
+      { x: s.x, y: s.y },
+    );
+    for (const ch of completed) this.notice(c, 2, `quest step done: ${ch.text}`);
+    if (chest) this.notice(c, 2, this.profiles.openChest(c.profile));
     for (const m of milestones) this.notice(c, 2, `streak milestone: ${m} unlocked`);
     if (freezeEarned)
       this.notice(c, 0, "streak freeze banked: one missed day will not break your streak");
@@ -1256,6 +1435,7 @@ export class GameServer {
   }
 
   private sendSnapshot(c: Client): void {
+    if (c.wisp) this.sendWisp(c, (c.wisp.until - Date.now()) / 1000);
     if (c.seq) c.ws.send(new Writer().u8(S2C.ACK).u16(c.seq).finish());
     const w = new Writer()
       .u8(S2C.SNAP)
@@ -1387,6 +1567,10 @@ export class GameServer {
         for (const m of mates.slice(0, 8)) w.str(m.name).u32(Math.floor(m.mass));
         const mode = modeNow();
         w.u8(mode.id).u16(Math.min(65535, mode.secsLeft)).u16(Math.min(65535, mode.secsToNext));
+        const b = this.boss && this.boss.alive ? this.boss : null;
+        w.u8(b ? Math.round((100 * (b.hp ?? 0)) / (b.hpMax ?? 1)) : 255)
+          .f32(b?.x ?? 0)
+          .f32(b?.y ?? 0);
       }
       c.ws.send(w.finish());
     }

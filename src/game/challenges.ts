@@ -197,3 +197,14 @@ export function weeklySkinFor(week: string): { name: string; bands: string[] } {
   for (const ch of week) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return WEEKLY_SKINS[h % WEEKLY_SKINS.length]!;
 }
+
+/** Chests: three shards make the next cosmetic you do not own, in this order. */
+export const CHEST_SHARDS = 3;
+export const COSMETIC_ORDER = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+export function cosmeticName(bit: number): string {
+  const t = (UNLOCK_TRAIL as readonly number[]).indexOf(bit);
+  if (t > 0) return `${TRAILS[t]} trail`;
+  const d = (UNLOCK_DEATH as readonly number[]).indexOf(bit);
+  if (d > 0) return `${DEATH_FX[d]} death effect`;
+  return "a cosmetic";
+}

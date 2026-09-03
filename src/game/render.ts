@@ -89,6 +89,7 @@ export class Renderer {
     event: Vec | null = null,
     ghost: { x: number; y: number; best: number } | null = null,
     emotes: Map<string, { id: number; until: number }> | null = null,
+    wisp: { x: number; y: number; angle: number; trail: Vec[] } | null = null,
   ): void {
     const shake = cam.trauma * cam.trauma;
     const ox = (Math.random() * 2 - 1) * shake * 14;
@@ -135,11 +136,12 @@ export class Renderer {
     this.drawFloaters(ctx, floaters, z);
 
     if (emotes && emotes.size) this.drawEmotes(ctx, snakes, emotes, z);
+    if (wisp) this.drawWisp(ctx, wisp, z);
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.drawVignette(ctx, w, h, localId ? snakes.find((s) => s.id === localId) : undefined);
     this.drawNames(ctx, snakes, cam, w, h, dpr, z, ox, oy);
-    this.drawMinimap(ctx, snakes, localId, w, h, dpr, phase, insets, event, ghost);
+    this.drawMinimap(ctx, snakes, localId, w, h, dpr, phase, insets, event, ghost, wisp);
   }
 
   /**
@@ -233,6 +235,77 @@ export class Renderer {
       ctx.fillText(glyphs[e.id] ?? "👋", s.x, s.y - r * 1.6 - rise);
       ctx.globalAlpha = 1;
     }
+  }
+
+  /** The afterlife wisp: a bright mote with a fading trail. */
+  private drawWisp(
+    ctx: CanvasRenderingContext2D,
+    w: { x: number; y: number; angle: number; trail: Vec[] },
+    z: number,
+  ): void {
+    ctx.globalCompositeOperation = "lighter";
+    const n = w.trail.length;
+    for (let i = 0; i < n; i++) {
+      const p = w.trail[i]!;
+      const a = (i / n) * 0.35;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 4 + (i / n) * 6, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(191,233,255,${a})`;
+      ctx.fill();
+    }
+    const g = ctx.createRadialGradient(w.x, w.y, 0, w.x, w.y, 46);
+    g.addColorStop(0, "rgba(255,255,255,0.9)");
+    g.addColorStop(0.25, "rgba(191,233,255,0.5)");
+    g.addColorStop(1, "rgba(191,233,255,0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(w.x - 46, w.y - 46, 92, 92);
+    ctx.globalCompositeOperation = "source-over";
+    ctx.beginPath();
+    ctx.arc(w.x, w.y, 7, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    ctx.font = `500 ${Math.max(11, 12 / z)}px Outfit, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.fillStyle = "rgba(232,234,238,0.6)";
+    ctx.fillText("wisp", w.x, w.y - 14);
+  }
+
+  /** A gold crown floating above a crowned head. */
+  private drawCrown(ctx: CanvasRenderingContext2D, s: Snake, r: number): void {
+    const cx = s.x;
+    const cy = s.y - r * 1.5 - 6;
+    const w = Math.max(10, r * 0.9);
+    const h = w * 0.7;
+    ctx.beginPath();
+    ctx.moveTo(cx - w / 2, cy + h / 2);
+    ctx.lineTo(cx - w / 2, cy - h / 4);
+    ctx.lineTo(cx - w / 4, cy + h / 8);
+    ctx.lineTo(cx, cy - h / 2);
+    ctx.lineTo(cx + w / 4, cy + h / 8);
+    ctx.lineTo(cx + w / 2, cy - h / 4);
+    ctx.lineTo(cx + w / 2, cy + h / 2);
+    ctx.closePath();
+    ctx.fillStyle = "#f0c14a";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(120,80,0,0.6)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  /** The boss: a red glow along the body and a hit-point bar over the head. */
+  private drawBossMarks(ctx: CanvasRenderingContext2D, s: Snake, r: number): void {
+    const frac = Math.max(0, Math.min(1, (s.hp ?? 0) / (s.hpMax ?? 1)));
+    const bw = r * 6;
+    const bx = s.x - bw / 2;
+    const by = s.y - r * 1.9 - 10;
+    ctx.fillStyle = "rgba(7,9,15,0.7)";
+    ctx.fillRect(bx - 2, by - 2, bw + 4, 12);
+    ctx.fillStyle = "rgba(255,90,110,0.95)";
+    ctx.fillRect(bx, by, bw * frac, 8);
+    ctx.strokeStyle = "rgba(255,255,255,0.35)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx, by, bw, 8);
   }
 
   /** A faint ring where your all-time best run ended. */
@@ -489,6 +562,16 @@ export class Renderer {
       ctx.lineTo(s.x + dx, s.y + dy);
     };
 
+    if (s.boss) {
+      tracePath(0, 0);
+      ctx.globalCompositeOperation = "lighter";
+      ctx.globalAlpha = 0.18 + Math.sin(this.time * 3) * 0.06;
+      ctx.strokeStyle = "#ff5a6e";
+      ctx.lineWidth = r * 3.6;
+      ctx.stroke();
+      ctx.globalCompositeOperation = "source-over";
+      ctx.globalAlpha = 1;
+    }
     if (s.boosting) {
       // Neon: the body's own colour, drawn additively in two widths.
       const pulse = 0.22 + Math.sin(this.time * 18) * 0.08;
@@ -581,6 +664,8 @@ export class Renderer {
         ctx.drawImage(sprites[0]!.canvas, s.x - hs / 2, s.y - hs / 2, hs, hs);
       }
       if ((s.level ?? 0) >= 20) this.drawShimmer(ctx, s, r);
+      if (s.crown) this.drawCrown(ctx, s, r);
+      if (s.boss) this.drawBossMarks(ctx, s, r);
       this.drawEvolution(ctx, s, r);
       this.drawEyes(ctx, s, r, aim);
     }
@@ -746,7 +831,9 @@ export class Renderer {
       const sy = (s.y - cam.y - oy) * z + cssH / 2;
       if (sx < -40 || sy < -40 || sx > cssW + 40 || sy > cssH + 40) continue;
       const r = radiusOf(s.mass) * z;
-      const label = `${s.level ? `Lv${s.level} ` : ""}${s.name} · ${Math.floor(s.mass)}`;
+      const label = s.boss
+        ? `BOSS · ${s.name}`
+        : `${s.crown ? "👑 " : ""}${s.level ? `Lv${s.level} ` : ""}${s.name} · ${Math.floor(s.mass)}`;
       const tw = ctx.measureText(label).width;
       const pad = 6;
       const y = sy - r - 10;
@@ -769,6 +856,7 @@ export class Renderer {
     insets: { top: number; bottom: number },
     event: Vec | null,
     ghost: Vec | null,
+    wisp: Vec | null = null,
   ): void {
     if (phase === "menu") return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -825,7 +913,16 @@ export class Renderer {
       ctx.lineWidth = 1;
       ctx.stroke();
     }
-    const me = snakes.find((s) => s.id === localId);
+    const bossS = snakes.find((s) => s.boss && s.alive);
+    if (bossS) {
+      const pulse = 4 + Math.sin(this.time * 4) * 1.2;
+      ctx.beginPath();
+      ctx.arc(cx + bossS.x * k, cy + bossS.y * k, pulse, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255,90,110,0.9)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+    const me = snakes.find((s) => s.id === localId) ?? wisp;
     if (me) {
       ctx.beginPath();
       ctx.arc(cx + me.x * k, cy + me.y * k, 3.6, 0, Math.PI * 2);

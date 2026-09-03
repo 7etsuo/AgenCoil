@@ -45,6 +45,8 @@ export interface StatsInfo {
   daily: { name: string; best: number }[];
   party: { name: string; mass: number }[];
   mode: { id: number; secsLeft: number; secsToNext: number };
+  /** The Boss Hour snake: hit points in percent and where it is. */
+  boss: { hp: number; x: number; y: number } | null;
 }
 
 export interface ProfileInfo {
@@ -70,6 +72,9 @@ export interface ProfileInfo {
   bountyTotal: number;
   seasonBest: number;
   season: number;
+  shards: number;
+  crew: string;
+  crownSecs: number;
 }
 
 export interface ChallengeInfo {
@@ -108,6 +113,8 @@ export interface NetHooks {
   onNotice: (kind: number, text: string) => void;
   onGateRequired: (message: string) => void;
   onEmote: (nid: number, id: number) => void;
+  /** Afterlife position and bank; secsLeft 0 ends the wisp. */
+  onWisp: (x: number, y: number, bank: number, secsLeft: number) => void;
 }
 
 interface Snap {
@@ -421,6 +428,11 @@ export class NetSession {
     );
   }
 
+  setCrew(tag: string): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(new Writer().u8(C2S.CREW).str(tag.slice(0, 4)).finish());
+  }
+
   emote(id: number): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(
@@ -526,6 +538,7 @@ export class NetSession {
           daily: [],
           party: [],
           mode: { id: 0, secsLeft: 0, secsToNext: 0 },
+          boss: null,
         };
         const nb = r.u8();
         for (let i = 0; i < nb; i++)
@@ -543,6 +556,12 @@ export class NetSession {
           const np = r.u8();
           for (let i = 0; i < np; i++) s.party.push({ name: r.str(), mass: r.u32() });
           if (r.remaining >= 5) s.mode = { id: r.u8(), secsLeft: r.u16(), secsToNext: r.u16() };
+          if (r.remaining >= 9) {
+            const hp = r.u8();
+            const bx = r.f32();
+            const by = r.f32();
+            s.boss = hp === 255 ? null : { hp, x: bx, y: by };
+          }
         }
         this.hooks.onStats(s);
         break;
@@ -637,6 +656,9 @@ export class NetSession {
           bountyTotal: 0,
           seasonBest: 0,
           season: 0,
+          shards: 0,
+          crew: "",
+          crownSecs: 0,
         };
         if (r.remaining >= 14) {
           p.bestX = r.f32();
@@ -654,6 +676,11 @@ export class NetSession {
           p.bountyTotal = r.u16();
           p.seasonBest = r.u32();
           p.season = r.u16();
+        }
+        if (r.remaining >= 4) {
+          p.shards = r.u8();
+          p.crew = r.str();
+          p.crownSecs = r.u16();
         }
         this.hooks.onProfile(p);
         break;
@@ -684,6 +711,13 @@ export class NetSession {
       case S2C.EMOTE: {
         const nid = r.u16();
         this.hooks.onEmote(nid, r.u8());
+        break;
+      }
+      case S2C.WISP: {
+        const x = r.f32();
+        const y = r.f32();
+        const bank = r.u16();
+        this.hooks.onWisp(x, y, bank, r.u8());
         break;
       }
       case S2C.NOTICE: {
@@ -780,11 +814,15 @@ export class NetSession {
           dropped: 0,
           temper: 0.5,
           kills: 0,
+          crown: e.crown,
+          boss: e.boss,
         };
         if (!s.points.length) this.world.ensureTrail(s);
         this.world.upsertRemote(s);
         this.buffers.set(id, []);
       }
+      s.crown = e.crown;
+      s.boss = e.boss;
       const buf = this.buffers.get(id) ?? [];
       buf.push({
         t: now,

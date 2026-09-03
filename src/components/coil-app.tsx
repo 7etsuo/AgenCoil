@@ -32,6 +32,7 @@ import { Link } from "@tanstack/react-router";
 import { Turnstile } from "@/components/turnstile";
 import { SkinPreview } from "@/components/skin-preview";
 import { ReplayView } from "@/components/replay-view";
+import { replayToGif } from "@/lib/replay";
 
 const NICK_KEY = "agencoil-nick";
 const SKIN_KEY = "agencoil-skin";
@@ -171,6 +172,10 @@ export function CoilApp() {
   const [party, setParty] = useState("");
   const [invited, setInvited] = useState(false);
   const [tab, setTab] = useState<"look" | "goals" | "controls">("look");
+  const [crew, setCrew] = useState("");
+  const [crewSaved, setCrewSaved] = useState(false);
+  const [gifState, setGifState] = useState<"idle" | "busy" | "done">("idle");
+  const [beatCopied, setBeatCopied] = useState(false);
   const [turnstileToken, setTurnstileToken] = useState("");
   const [turnstileReset, setTurnstileReset] = useState(0);
   const [verificationState, setVerificationState] = useState<
@@ -368,10 +373,68 @@ export function CoilApp() {
   const canFullscreen =
     typeof document !== "undefined" && Boolean(document.documentElement.requestFullscreen);
 
+  useEffect(() => {
+    if (hud?.profile && !crewSaved) setCrew(hud.profile.crew);
+  }, [hud?.profile, crewSaved]);
+
+  const saveCrew = () => {
+    const tag = crew
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "")
+      .slice(0, 4);
+    setCrew(tag);
+    engineRef.current?.setCrew(tag);
+    setCrewSaved(true);
+    setTimeout(() => setCrewSaved(false), 1500);
+  };
+
+  const beatUrl = () =>
+    `${window.location.origin}${window.location.pathname}?beat=${hud?.score ?? 0}&by=${encodeURIComponent(nick)}`;
+
+  const copyBeatLink = async () => {
+    try {
+      const url = beatUrl();
+      if (navigator.share && /Mobi|Android/i.test(navigator.userAgent)) {
+        await navigator.share({ title: "snek", text: `Beat my ${hud?.score ?? 0} in snek`, url });
+      } else await navigator.clipboard?.writeText(url);
+      setBeatCopied(true);
+    } catch {
+      /* dismissed */
+    }
+  };
+
+  const shareGif = async () => {
+    if (!hud?.replay || hud.replay.length < 2 || gifState === "busy") return;
+    setGifState("busy");
+    try {
+      const blob = await replayToGif(hud.replay, hud.deathAt);
+      const file = new File([blob], `snek-${Date.now()}.gif`, { type: "image/gif" });
+      if (navigator.canShare?.({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: "snek",
+          text: `My last seconds in snek. ${beatUrl()}`,
+        });
+      } else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = file.name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      }
+      setGifState("done");
+    } catch {
+      setGifState("idle");
+    }
+  };
+
   const share = async () => {
     if (!hud) return;
     const text = `I reached length ${hud.score} with ${hud.kills} kill${hud.kills === 1 ? "" : "s"} in snek. Beat me.`;
-    const url = typeof window !== "undefined" ? window.location.origin : "";
+    const url = typeof window !== "undefined" ? beatUrl() : "";
     const bands = skin === CUSTOM ? custom : SKINS[skin % SKINS.length]!.bands;
     const blob = await renderShareCard(hud, nick, bands);
     try {
@@ -440,6 +503,17 @@ export function CoilApp() {
                 rank {hud.rank} of {hud.count} · kills {hud.kills}
               </div>
               <div className="text-xs text-subtle">best {hud.best}</div>
+              {hud.goal && (
+                <div className="mt-1.5 w-40">
+                  <div className="truncate text-[10px] text-subtle">{hud.goal.text}</div>
+                  <div className="mt-0.5 h-1 w-full rounded bg-elevated">
+                    <div
+                      className="h-1 rounded bg-accent"
+                      style={{ width: `${Math.min(100, hud.goal.frac * 100)}%` }}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
             <div
               data-ui
@@ -502,6 +576,19 @@ export function CoilApp() {
           {hud.killNotice && (
             <div className="absolute left-1/2 top-[calc(6.5rem+env(safe-area-inset-top))] -translate-x-1/2 rounded-full border border-line bg-bg/80 px-4 py-1.5 text-sm">
               {hud.killNotice}
+            </div>
+          )}
+          {hud.boss && (
+            <div className="absolute left-1/2 top-[calc(1rem+env(safe-area-inset-top))] w-56 -translate-x-1/2 rounded-lg border border-[#ff5a6e]/60 bg-bg/80 px-3 py-1.5 text-center text-xs text-[#ffb3c1]">
+              boss · {hud.boss.dir} · {hud.boss.hp}%
+              <div className="mt-1 h-1 w-full rounded bg-elevated">
+                <div className="h-1 rounded bg-[#ff5a6e]" style={{ width: `${hud.boss.hp}%` }} />
+              </div>
+            </div>
+          )}
+          {hud.beat && !hud.beat.done && (
+            <div className="absolute left-4 top-[calc(10.5rem+env(safe-area-inset-top))] rounded-full border border-[#f0c14a]/60 bg-bg/80 px-3 py-1 text-xs text-[#f0c14a]">
+              beat {hud.beat.by} · {hud.score}/{hud.beat.target}
             </div>
           )}
           {hud.hint && (
@@ -636,6 +723,10 @@ export function CoilApp() {
                   🔥 {hud.profile.streak > 0 ? `${hud.profile.streak}d` : "start a streak"}
                 </Chip>
                 <Chip tone="violet">{LEAGUES[leagueOf(hud.profile.weekBest)]!.name}</Chip>
+                {hud.profile.crew && <Chip>[{hud.profile.crew}]</Chip>}
+                {hud.profile.crownSecs > 0 && (
+                  <Chip tone="gold">👑 crown · {Math.ceil(hud.profile.crownSecs / 60)}m</Chip>
+                )}
                 {hud.arenaMode.id > 0 && (
                   <Chip tone="violet">
                     {MODES.find((m) => m.id === hud.arenaMode.id)?.name} ·{" "}
@@ -872,6 +963,25 @@ export function CoilApp() {
                     </button>
                   ))}
                 </div>
+                <div className="mt-4 text-xs text-muted">
+                  Crew tag · 2 to 4 letters shown before your name
+                </div>
+                <div className="mt-2 flex gap-2">
+                  <input
+                    value={crew}
+                    onChange={(e) => setCrew(e.target.value.toUpperCase().slice(0, 4))}
+                    placeholder="e.g. ACE"
+                    maxLength={4}
+                    className="h-10 w-28 rounded-lg border border-line bg-bg/60 px-3 text-sm uppercase tracking-widest text-fg outline-none focus:border-accent"
+                  />
+                  <button
+                    type="button"
+                    onClick={saveCrew}
+                    className="h-10 rounded-lg border border-line px-4 text-xs text-muted hover:text-fg"
+                  >
+                    {crewSaved ? "saved" : crew ? "join crew" : "leave crew"}
+                  </button>
+                </div>
               </>
             )}
             {tab === "goals" && (
@@ -914,28 +1024,41 @@ export function CoilApp() {
                 {hud?.challenges && hud.challenges.length > 0 && (
                   <div className="mt-4">
                     <div className="text-xs text-muted">
-                      Today&apos;s challenges · each unlocks a cosmetic
+                      Today&apos;s quest chain · finish all three to open a chest
+                      {hud.profile && (
+                        <span className="text-subtle"> · shards {hud.profile.shards}/3</span>
+                      )}
                     </div>
                     <ul className="mt-2 space-y-1.5">
-                      {hud.challenges.map((c) => (
-                        <li key={c.id} className="text-xs">
-                          <div className="flex justify-between">
-                            <span className={c.done ? "text-fg" : "text-muted"}>
-                              {c.done ? "✓ " : ""}
-                              {c.text}
-                            </span>
-                            <span className="tabular-nums text-subtle">
-                              {Math.min(c.progress, c.target)}/{c.target}
-                            </span>
-                          </div>
-                          <div className="mt-1 h-1 w-full rounded bg-elevated">
-                            <div
-                              className={`h-1 rounded ${c.done ? "bg-[#f0c14a]" : "bg-accent"}`}
-                              style={{ width: `${Math.min(100, (c.progress / c.target) * 100)}%` }}
-                            />
-                          </div>
-                        </li>
-                      ))}
+                      {hud.challenges.map((c, i) => {
+                        const activeIdx = hud.challenges.findIndex((x) => !x.done);
+                        const locked = !c.done && i !== activeIdx;
+                        return (
+                          <li key={c.id} className={`text-xs ${locked ? "opacity-45" : ""}`}>
+                            <div className="flex justify-between">
+                              <span
+                                className={
+                                  c.done ? "text-fg" : i === activeIdx ? "text-fg" : "text-muted"
+                                }
+                              >
+                                {c.done ? "✓ " : locked ? "🔒 " : "▶ "}
+                                step {i + 1}: {c.text}
+                              </span>
+                              <span className="tabular-nums text-subtle">
+                                {Math.min(c.progress, c.target)}/{c.target}
+                              </span>
+                            </div>
+                            <div className="mt-1 h-1 w-full rounded bg-elevated">
+                              <div
+                                className={`h-1 rounded ${c.done ? "bg-[#f0c14a]" : "bg-accent"}`}
+                                style={{
+                                  width: `${Math.min(100, (c.progress / c.target) * 100)}%`,
+                                }}
+                              />
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ul>
                   </div>
                 )}
@@ -996,12 +1119,40 @@ export function CoilApp() {
         </div>
       )}
 
+      {phase === "wisp" && hud?.wisp && (
+        <div
+          data-ui
+          className="absolute left-1/2 top-[calc(1rem+env(safe-area-inset-top))] flex -translate-x-1/2 flex-col items-center gap-2"
+        >
+          <div className="rounded-full border border-[#bfe9ff]/50 bg-bg/85 px-4 py-1.5 text-center text-sm text-fg">
+            you are a wisp · glide over orbs to bank starting length · +{hud.wisp.bank} banked ·{" "}
+            {hud.wisp.secsLeft}s
+          </div>
+          <button
+            type="button"
+            onClick={() => engineRef.current?.respawn()}
+            className="rounded-full border border-line bg-bg/80 px-4 py-1.5 text-xs text-muted hover:text-fg"
+          >
+            spawn now with +{hud.wisp.bank}
+          </button>
+        </div>
+      )}
       {phase === "dead" && hud && !hud.deathBeat && (
         <div data-ui className="absolute inset-0 flex items-center justify-center p-4">
           <div className="w-full max-w-sm rounded-xl border border-line bg-surface/92 p-6 text-center">
             <p className="text-xs tracking-[0.2em] text-muted uppercase">down</p>
-            <h2 className="mt-2 text-3xl font-semibold tracking-tight">you popped</h2>
-            <p className="mt-2 text-sm text-muted">{hud.deathReason}</p>
+            <h2 className="mt-2 text-3xl font-semibold tracking-tight">
+              {hud.nearWin ? "so close" : "you popped"}
+            </h2>
+            <p className="mt-2 text-sm text-muted">
+              {hud.nearWin ? `${hud.nearWin} · ` : ""}
+              {hud.deathReason}
+            </p>
+            {hud.banked > 0 && (
+              <p className="mt-1 text-xs text-[#bfe9ff]">
+                your wisp banked +{hud.banked} starting length for this life
+              </p>
+            )}
             {hud.replay && hud.replay.length > 1 && (
               <div className="mt-4 overflow-hidden rounded-lg border border-line">
                 <ReplayView frames={hud.replay} at={hud.deathAt} />
@@ -1050,9 +1201,9 @@ export function CoilApp() {
             <button
               type="button"
               onClick={() => engineRef.current?.respawn()}
-              className={`${hud.comebackLeft > 0 || hud.rematch ? "mt-2" : "mt-6"} h-12 w-full rounded-lg bg-accent font-medium text-accent-fg active:scale-[0.98]`}
+              className={`${hud.comebackLeft > 0 || hud.rematch ? "mt-2" : "mt-6"} h-12 w-full rounded-lg bg-accent font-medium text-accent-fg active:scale-[0.98] ${hud.nearWin ? "h-14 text-lg shadow-[0_0_28px_rgba(215,221,232,0.35)]" : ""}`}
             >
-              Play again
+              {hud.nearWin ? "Run it back" : "Play again"}
             </button>
             {hud.challenges.length > 0 && (
               <ul className="mt-3 space-y-0.5 text-left text-xs text-muted">
@@ -1091,6 +1242,28 @@ export function CoilApp() {
             >
               <Share2 size={16} /> {shared ? "copied" : "share your run"}
             </button>
+            <div className="mt-2 flex gap-2">
+              {hud.replay && hud.replay.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => void shareGif()}
+                  className="flex h-10 flex-1 items-center justify-center rounded-lg border border-line text-xs text-muted hover:text-fg"
+                >
+                  {gifState === "busy"
+                    ? "making gif…"
+                    : gifState === "done"
+                      ? "gif saved"
+                      : "share replay as gif"}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => void copyBeatLink()}
+                className="flex h-10 flex-1 items-center justify-center rounded-lg border border-line text-xs text-muted hover:text-fg"
+              >
+                {beatCopied ? "link copied" : "beat my run link"}
+              </button>
+            </div>
             <p className="mt-3 text-xs text-subtle">tap anywhere or press space</p>
           </div>
         </div>

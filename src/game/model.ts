@@ -52,10 +52,25 @@ export const SWARM_DURATION_S = 45;
 export const COMEBACK_KEEP = 0.25;
 /** Hunger mode: fraction of length lost per second. */
 export const HUNGER_RATE = 0.004;
-export const COMEBACK_WINDOW_MS = 6000;
+export const COMEBACK_WINDOW_MS = 30_000;
 export const BASE_WIDTH = 29;
 
-export type Phase = "menu" | "play" | "dead";
+export type Phase = "menu" | "play" | "dead" | "wisp";
+
+/** Afterlife: a wisp between lives that banks starting length for the next one. */
+export const WISP_SECS = 20;
+export const WISP_SPEED = 300;
+export const WISP_BOOST = 480;
+export const WISP_BANK_MAX = 60;
+export const WISP_REACH = 26;
+
+/** The Boss Hour: a server snake with hit points that everyone cuts together. */
+export const BOSS_MASS = 2500;
+export const BOSS_HP = 60;
+export const BOSS_MINUTE = 30;
+export const BOSS_DURATION_S = 300;
+export const BOSS_HIT_MASS = 4;
+export const BOSS_NAME = "the leviathan";
 
 export interface Vec {
   x: number;
@@ -113,6 +128,16 @@ export interface Snake {
   tailHist?: Vec[];
   /** Evolution level (v2 clients receive it in full entries). */
   level?: number;
+  /** New or struggling player: bots leave openings and do not hunt them. */
+  rookie?: boolean;
+  /** The Boss Hour snake: its body is cut for hit points instead of killing. */
+  boss?: boolean;
+  hp?: number;
+  hpMax?: number;
+  /** Wears the crown from the last boss kill. */
+  crown?: boolean;
+  /** Server side: last tick each attacker landed a boss hit. */
+  bossHitAt?: Map<string, number>;
 }
 
 export interface Camera {

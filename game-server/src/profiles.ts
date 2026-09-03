@@ -7,6 +7,9 @@
 import pg from "pg";
 import { retryDb } from "./db-retry";
 import {
+  CHEST_SHARDS,
+  COSMETIC_ORDER,
+  cosmeticName,
   FREEZE_EVERY_GAMES,
   STREAK_MILESTONES,
   WEEKLY_GOAL,
@@ -58,6 +61,11 @@ export interface Profile {
   prevTier: number;
   season: number;
   seasonBest: number;
+  /** Chest shards (three make a cosmetic), chests opened, crew tag, crown expiry. */
+  shards: number;
+  chests: number;
+  crew: string;
+  crownUntil: number;
 }
 
 export interface TopEntry {
@@ -130,7 +138,11 @@ export class ProfileStore {
              ADD COLUMN IF NOT EXISTS bounty_total INTEGER NOT NULL DEFAULT 0,
              ADD COLUMN IF NOT EXISTS prev_tier INTEGER NOT NULL DEFAULT 0,
              ADD COLUMN IF NOT EXISTS season INTEGER NOT NULL DEFAULT 0,
-             ADD COLUMN IF NOT EXISTS season_best INTEGER NOT NULL DEFAULT 0`,
+             ADD COLUMN IF NOT EXISTS season_best INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS shards INTEGER NOT NULL DEFAULT 1,
+             ADD COLUMN IF NOT EXISTS chests INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS crew TEXT NOT NULL DEFAULT '',
+             ADD COLUMN IF NOT EXISTS crown_until BIGINT NOT NULL DEFAULT 0`,
         );
       })
         .then(() => {
@@ -183,6 +195,11 @@ export class ProfileStore {
       prevTier: 0,
       season: seasonOf(),
       seasonBest: 0,
+      // Endowed progress: a new profile already holds one shard of three.
+      shards: 1,
+      chests: 0,
+      crew: "",
+      crownUntil: 0,
     };
   }
 
@@ -225,10 +242,15 @@ export class ProfileStore {
             prev_tier: number;
             season: number;
             season_best: number;
+            shards: number;
+            chests: number;
+            crew: string;
+            crown_until: string | number;
           }>(
             `SELECT name, best, kills, games, survive, unlocks, day, progress, skin, bands, best_x, best_y,
                   week, week_best, week_done, earned, flagged, streak, streak_last, freezes, eaten,
-                  near_total, bounty_total, prev_tier, season, season_best
+                  near_total, bounty_total, prev_tier, season, season_best, shards, chests, crew,
+                  crown_until
            FROM agencoil_profiles WHERE key = $1`,
             [key],
           ),
@@ -269,6 +291,10 @@ export class ProfileStore {
             prevTier: Number(r.prev_tier) || 0,
             season: Number(r.season) || seasonOf(),
             seasonBest: Number(r.season_best) || 0,
+            shards: Number(r.shards) || 0,
+            chests: Number(r.chests) || 0,
+            crew: r.crew || "",
+            crownUntil: Number(r.crown_until) || 0,
           };
         }
       } catch (err) {
@@ -365,7 +391,7 @@ export class ProfileStore {
     p: Profile,
     life: LifeStats,
     at?: { x: number; y: number },
-  ): { completed: Challenge[]; milestones: string[]; freezeEarned: boolean } {
+  ): { completed: Challenge[]; milestones: string[]; freezeEarned: boolean; chest: boolean } {
     this.rollDay(p);
     const milestones = this.touchStreak(p);
     p.games++;
@@ -389,22 +415,94 @@ export class ProfileStore {
     if (life.length > p.weekBest) p.weekBest = life.length;
     if (life.survive > p.survive) p.survive = Math.floor(life.survive);
     const completed: Challenge[] = [];
-    dailyChallenges(p.day).forEach((c, i) => {
+    // Quests are a chain: only the first unfinished step takes this life's
+    // numbers, so each step is a goal you play toward on purpose.
+    const chain = dailyChallenges(p.day);
+    const active = chain.findIndex((_, i) => !p.done[i]);
+    let chest = false;
+    if (active >= 0) {
+      const c = chain[active]!;
       const v = Math.min(c.target, Math.floor(lifeValue(c, life)));
-      if (v > (p.progress[i] ?? 0)) p.progress[i] = v;
-      if (!p.done[i] && v >= c.target) {
-        p.done[i] = true;
+      if (v > (p.progress[active] ?? 0)) p.progress[active] = v;
+      if (v >= c.target) {
+        p.done[active] = true;
         p.unlocks |= c.unlock;
         p.weekDone++;
         completed.push(c);
+        if (active === chain.length - 1) chest = true;
       }
-    });
+    }
     if (p.weekDone >= WEEKLY_GOAL && !p.earned.includes(p.week)) p.earned.push(p.week);
     this.markDirty(p.key);
-    return { completed, milestones, freezeEarned };
+    return { completed, milestones, freezeEarned, chest };
+  }
+
+  /**
+   * Open a chest: one shard; every third shard unlocks the next cosmetic
+   * the profile does not own. Returns what to tell the player.
+   */
+  openChest(p: Profile): string {
+    p.chests++;
+    p.shards++;
+    this.markDirty(p.key);
+    if (p.shards < CHEST_SHARDS) return `chest opened: shard ${p.shards}/${CHEST_SHARDS}`;
+    p.shards -= CHEST_SHARDS;
+    const next = COSMETIC_ORDER.find((bit) => !(p.unlocks & bit));
+    if (next === undefined) return "chest opened: every cosmetic is already yours";
+    p.unlocks |= next;
+    return `chest opened: ${cosmeticName(next)} unlocked`;
+  }
+
+  setCrew(p: Profile, tag: string): void {
+    p.crew = tag;
+    this.markDirty(p.key);
+  }
+
+  setCrown(p: Profile, until: number): void {
+    p.crownUntil = until;
+    this.markDirty(p.key);
   }
 
   /** Leaderboard rows, all-time or this week, flagged accounts excluded. */
+  /** Crew board: members' week bests summed, this ISO week. */
+  async topCrews(n: number): Promise<TopEntry[]> {
+    const week = isoWeek();
+    if (this.pool) {
+      try {
+        await this.ready;
+        const res = await this.pool.query<{ crew: string; best: number; members: number }>(
+          `SELECT crew, sum(week_best)::int AS best, count(*)::int AS members
+           FROM agencoil_profiles
+           WHERE crew <> '' AND week = $2 AND flagged = false
+           GROUP BY crew ORDER BY best DESC LIMIT $1`,
+          [n, week],
+        );
+        return res.rows.map((r) => ({
+          name: r.crew,
+          best: Number(r.best) || 0,
+          kills: 0,
+          games: Number(r.members) || 0,
+          skin: 0,
+          bands: [],
+        }));
+      } catch {
+        /* fall through to memory */
+      }
+    }
+    const sums = new Map<string, { best: number; members: number }>();
+    for (const p of this.cache.values()) {
+      if (!p.crew || p.flagged || p.week !== week) continue;
+      const e = sums.get(p.crew) ?? { best: 0, members: 0 };
+      e.best += p.weekBest;
+      e.members++;
+      sums.set(p.crew, e);
+    }
+    return [...sums.entries()]
+      .map(([name, e]) => ({ name, best: e.best, kills: 0, games: e.members, skin: 0, bands: [] }))
+      .sort((a, b) => b.best - a.best)
+      .slice(0, n);
+  }
+
   async top(kind: "alltime" | "weekly" | "season", n: number): Promise<TopEntry[]> {
     const week = isoWeek();
     const season = seasonOf();
@@ -511,9 +609,10 @@ export class ProfileStore {
           this.pool!.query(
             `INSERT INTO agencoil_profiles (key, name, best, kills, games, survive, unlocks, day, progress,
              skin, bands, best_x, best_y, week, week_best, week_done, earned, flagged,
-             streak, streak_last, freezes, eaten, near_total, bounty_total, prev_tier, season, season_best, updated)
+             streak, streak_last, freezes, eaten, near_total, bounty_total, prev_tier, season, season_best,
+             shards, chests, crew, crown_until, updated)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-             $19, $20, $21, $22, $23, $24, $25, $26, $27, now())
+             $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, now())
            ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, best = GREATEST(agencoil_profiles.best, EXCLUDED.best),
              kills = GREATEST(agencoil_profiles.kills, EXCLUDED.kills),
              games = GREATEST(agencoil_profiles.games, EXCLUDED.games),
@@ -525,7 +624,8 @@ export class ProfileStore {
              streak = EXCLUDED.streak, streak_last = EXCLUDED.streak_last, freezes = EXCLUDED.freezes,
              eaten = EXCLUDED.eaten, near_total = EXCLUDED.near_total, bounty_total = EXCLUDED.bounty_total,
              prev_tier = EXCLUDED.prev_tier, season = EXCLUDED.season, season_best = EXCLUDED.season_best,
-             updated = now()`,
+             shards = EXCLUDED.shards, chests = EXCLUDED.chests, crew = EXCLUDED.crew,
+             crown_until = EXCLUDED.crown_until, updated = now()`,
             [
               p.key,
               p.name,
@@ -554,6 +654,10 @@ export class ProfileStore {
               p.prevTier,
               p.season,
               p.seasonBest,
+              p.shards,
+              p.chests,
+              p.crew,
+              p.crownUntil,
             ],
           ),
         );

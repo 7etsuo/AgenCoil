@@ -4,6 +4,8 @@ import {
   START_MASS,
   fillOf,
   lengthOf,
+  WISP_BOOST,
+  WISP_SPEED,
   lerp,
   type Camera,
   type Floater,
@@ -60,6 +62,18 @@ export interface HudState {
   deathAt: Vec | null;
   /** Your killer, if still alive, for a one-tap rematch spawn. */
   rematch: { nid: number; name: string } | null;
+  /** Afterlife: bank so far and seconds left; null outside the wisp phase. */
+  wisp: { bank: number; secsLeft: number } | null;
+  /** Starting length banked by the last wisp, shown on the death card. */
+  banked: number;
+  /** The Boss Hour snake while it lives. */
+  boss: { hp: number; dir: string } | null;
+  /** The nearest goal, for the always-on progress bar. */
+  goal: { text: string; frac: number } | null;
+  /** "40 short of your best" style line for a near miss of a record or the top. */
+  nearWin: string | null;
+  /** A "beat my run" target from the link that opened the game. */
+  beat: { by: string; target: number; done: boolean } | null;
   /** Tutorial hint for a first life, if any. */
   hint: string | null;
   firstLife: boolean;
@@ -181,6 +195,14 @@ export class CoilEngine {
   private firstKillDone = false;
   private emotes = new Map<string, { id: number; until: number }>();
   private hitStopUntil = 0;
+  private wisp: { x: number; y: number; angle: number; trail: Vec[] } | null = null;
+  private wispSrv: { x: number; y: number } | null = null;
+  private wispBank = 0;
+  private wispSecs = 0;
+  private wispWanted = false;
+  private banked = 0;
+  private nearWin: string | null = null;
+  private beat: { by: string; target: number; done: boolean } | null = null;
   private replayBuf: ReplayFrame[] = [];
   private replayFrozen: ReplayFrame[] | null = null;
   private replayAcc = 0;
@@ -210,6 +232,14 @@ export class CoilEngine {
     if (!ctx) throw new Error("canvas unsupported");
     this.ctx = ctx;
     this.best = readBest();
+    try {
+      const q = new URLSearchParams(window.location.search);
+      const target = Number(q.get("beat"));
+      const by = (q.get("by") ?? "").slice(0, 16);
+      if (target > 0 && by) this.beat = { by, target, done: false };
+    } catch {
+      /* ignore */
+    }
     if (serverUrl) {
       this.net = new NetSession(serverUrl, {
         onState: (s) => this.onNetState(s),
@@ -220,6 +250,28 @@ export class CoilEngine {
         },
         onStats: (s) => {
           this.stats = s;
+          const b = this.world.snakes.find((x) => x.boss);
+          if (b && s.boss) {
+            b.hp = s.boss.hp;
+            b.hpMax = 100;
+          }
+        },
+        onWisp: (x, y, bank, secsLeft) => {
+          this.wispSrv = { x, y };
+          if (bank > this.wispBank) {
+            const at = this.wisp ?? { x, y };
+            this.floaters.push({
+              x: at.x,
+              y: at.y - 20,
+              text: `+${bank - this.wispBank}`,
+              life: 0.8,
+              color: "#bfe9ff",
+            });
+            this.audio.eat(bank - this.wispBank, 2);
+          }
+          this.wispBank = bank;
+          this.wispSecs = secsLeft;
+          if (secsLeft === 0 && this.phase === "wisp") this.endWisp();
         },
         onProfile: (p) => {
           this.profile = p;
@@ -335,6 +387,22 @@ export class CoilEngine {
     this.syncBoost();
   }
 
+  /** Leave the wisp: the death card takes over with whatever was banked. */
+  endWisp(): void {
+    if (this.phase !== "wisp") return;
+    this.banked = this.wispBank;
+    this.wisp = null;
+    this.wispWanted = false;
+    this.phase = "dead";
+    this.boosting = false;
+    this.holdBoost = false;
+    this.emitHud();
+  }
+
+  setCrew(tag: string): void {
+    this.net?.setCrew(tag);
+  }
+
   /** Send a quick reaction; also shown locally at once. */
   emote(id: number): void {
     if (this.phase !== "play") return;
@@ -410,6 +478,12 @@ export class CoilEngine {
     this.spawnedAt = performance.now();
     this.replayBuf = [];
     this.replayFrozen = null;
+    this.wisp = null;
+    this.wispSrv = null;
+    this.wispWanted = false;
+    this.wispBank = 0;
+    this.banked = 0;
+    this.nearWin = null;
     this.snapCamTo(s);
     this.emitHud();
   }
@@ -424,6 +498,7 @@ export class CoilEngine {
 
   respawn(comeback = false, rematch = false): void {
     const near = rematch && this.killerId ? Number(this.killerId) || 0 : 0;
+    if (this.phase === "wisp") this.endWisp();
     if (this.phase !== "dead") return;
     if (performance.now() < this.deathBeatUntil) return;
     this.play(this.look, comeback && this.comebackOffer > performance.now(), near);
@@ -504,6 +579,12 @@ export class CoilEngine {
       replay: this.phase === "dead" ? this.replayFrozen : null,
       deathAt: this.phase === "dead" ? this.corpse : null,
       rematch: this.rematchTarget(),
+      wisp: this.phase === "wisp" ? { bank: this.wispBank, secsLeft: this.wispSecs } : null,
+      banked: this.banked,
+      boss: st?.boss ? { hp: st.boss.hp, dir: this.compass(st.boss.x, st.boss.y) } : null,
+      goal: this.goalNow(),
+      nearWin: this.phase === "dead" ? this.nearWin : null,
+      beat: this.beat,
       hint: this.hint(),
       firstLife: this.isFirstLife(),
       party: this.stats?.party ?? [],
@@ -567,6 +648,11 @@ export class CoilEngine {
     const el = e.target as HTMLElement | null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
     if (e.repeat) return;
+    if (this.phase === "wisp" && e.code === "Enter") {
+      e.preventDefault();
+      this.endWisp();
+      return;
+    }
     if (this.phase === "dead" && (e.code === "Space" || e.code === "Enter")) {
       e.preventDefault();
       this.respawn();
@@ -618,7 +704,7 @@ export class CoilEngine {
       this.respawn();
       return;
     }
-    if (this.phase !== "play") return;
+    if (this.phase !== "play" && this.phase !== "wisp") return;
     if (e.pointerType === "touch") {
       // First finger steers; any further finger boosts while it is down.
       if (this.steerId !== null && this.steerId !== e.pointerId) {
@@ -661,7 +747,9 @@ export class CoilEngine {
 
   private syncBoost(): void {
     const key = this.keys.has("Space") || this.keys.has("ArrowUp") || this.keys.has("ShiftLeft");
-    this.boosting = this.phase === "play" && (this.holdBoost || key || this.boostFingers.size > 0);
+    this.boosting =
+      (this.phase === "play" || this.phase === "wisp") &&
+      (this.holdBoost || key || this.boostFingers.size > 0);
   }
 
   /**
@@ -756,6 +844,53 @@ export class CoilEngine {
     if (this.replayBuf.length > 60) this.replayBuf.shift();
   }
 
+  /** Predict the wisp from the aim; the server's position bleeds in. */
+  private stepWisp(dt: number): void {
+    const w = this.wisp;
+    if (!w || this.phase !== "wisp") return;
+    w.angle = Math.atan2(this.pointer.y - w.y, this.pointer.x - w.x);
+    const sp = this.boosting ? WISP_BOOST : WISP_SPEED;
+    w.x += Math.cos(w.angle) * sp * dt;
+    w.y += Math.sin(w.angle) * sp * dt;
+    if (this.wispSrv) {
+      const k = 1 - Math.pow(0.05, dt);
+      w.x += (this.wispSrv.x - w.x) * k;
+      w.y += (this.wispSrv.y - w.y) * k;
+    }
+    w.trail.push({ x: w.x, y: w.y });
+    if (w.trail.length > 28) w.trail.shift();
+  }
+
+  /** The closest unfinished goal: a skin unlock, the active quest step or the next level. */
+  private goalNow(): { text: string; frac: number } | null {
+    const p = this.world.player;
+    const score = p ? Math.floor(p.mass) : 0;
+    const best = Math.max(this.profile?.best ?? 0, this.best, score);
+    const cands: { text: string; frac: number }[] = [];
+    for (const u of [120, 300, 600, 1200]) {
+      if (best < u) {
+        cands.push({
+          text: `skin at ${u} · ${u - Math.max(best, score)} to go`,
+          frac: Math.max(best, score) / u,
+        });
+        break;
+      }
+    }
+    const step = this.challenges.find((c) => !c.done);
+    if (step)
+      cands.push({
+        text: `quest: ${step.text} · ${Math.min(step.progress, step.target)}/${step.target}`,
+        frac: Math.min(1, step.progress / step.target),
+      });
+    if (this.beat && !this.beat.done)
+      cands.push({
+        text: `beat ${this.beat.by} · ${score}/${this.beat.target}`,
+        frac: score / this.beat.target,
+      });
+    if (!cands.length) return null;
+    return cands.sort((a, b) => b.frac - a.frac)[0]!;
+  }
+
   private rematchTarget(): { nid: number; name: string } | null {
     if (this.phase !== "dead" || !this.killerId || !this.online) return null;
     const k = this.world.snakes.find((s) => s.id === this.killerId && s.alive);
@@ -776,13 +911,15 @@ export class CoilEngine {
   private tick(dt: number): void {
     this.refreshAim();
     this.applyKeyboardAim();
-    const boost = this.phase === "play" && this.boosting;
+    const boost = (this.phase === "play" || this.phase === "wisp") && this.boosting;
     const localLife = this.local?.player != null;
     if (this.online && !localLife) {
       const net = this.net!;
       net.update(dt, this.pointer, boost);
       const me = net.world.player;
-      const angle = me ? Math.atan2(this.pointer.y - me.y, this.pointer.x - me.x) : 0;
+      this.stepWisp(dt);
+      const anchor = me ?? this.wisp;
+      const angle = anchor ? Math.atan2(this.pointer.y - anchor.y, this.pointer.x - anchor.x) : 0;
       const cssW = this.canvas.width / this.dpr;
       const cssH = this.canvas.height / this.dpr;
       net.sendInput(angle, boost, {
@@ -818,6 +955,19 @@ export class CoilEngine {
         ? dt * 0.35
         : dt;
     this.recordReplay(dt);
+    if (this.beat && !this.beat.done && this.phase === "play") {
+      const p = this.world.player;
+      if (p && p.mass >= this.beat.target) {
+        this.beat.done = true;
+        this.pushFeed(`you beat ${this.beat.by}'s ${this.beat.target}!`);
+        this.audio.kill();
+      }
+    }
+    if (this.phase === "dead" && this.wispWanted && this.wispSrv && nowMs > this.deathBeatUntil) {
+      this.phase = "wisp";
+      this.wisp = { x: this.wispSrv.x, y: this.wispSrv.y, angle: 0, trail: [] };
+      this.emitHud();
+    }
     this.renderer.stepFx(fxDt, this.particles, this.floaters, this.cam);
     this.audioCues();
     if (this.killTimer > 0) {
@@ -1179,6 +1329,18 @@ export class CoilEngine {
     }
     this.deathCam = { x: p?.x ?? this.cam.x, y: p?.y ?? this.cam.y };
     this.corpse = p ? { ...p, points: p.points.map((q) => ({ ...q })) } : null;
+    {
+      const score = Math.floor(this.deathMass);
+      const best = this.profile?.best ?? this.best;
+      if (best > 30 && score >= best * 0.85 && score < best)
+        this.nearWin = `${best - score} short of your best`;
+      else if (this.deathRank > 1 && this.deathRank <= 3)
+        this.nearWin = `${this.deathRank - 1} rank${this.deathRank === 2 ? "" : "s"} from the top`;
+      else this.nearWin = null;
+    }
+    // The server's first WISP message can arrive before or after DEATH, so
+    // only flag the wish here; the wisp state itself resets on spawn.
+    this.wispWanted = this.online && reason !== undefined;
     this.phase = "dead";
     this.boosting = false;
     this.holdBoost = false;
@@ -1222,6 +1384,9 @@ export class CoilEngine {
         this.cam.x = Math.cos(this.menuT) * 420;
         this.cam.y = Math.sin(this.menuT * 0.7) * 320;
       }
+    } else if (this.phase === "wisp" && this.wisp) {
+      this.cam.x = lerp(this.cam.x, this.wisp.x, 1 - Math.pow(0.0008, dt));
+      this.cam.y = lerp(this.cam.y, this.wisp.y, 1 - Math.pow(0.0008, dt));
     } else if (this.phase === "dead") {
       let target: Vec | null = null;
       if (this.watchNid !== null) {
@@ -1248,7 +1413,7 @@ export class CoilEngine {
       }
     }
     const mass = world.player?.mass ?? this.deathMass;
-    let z = desiredZoom(mass, this.phase);
+    let z = this.phase === "wisp" ? desiredZoom(40, "play") * 1.05 : desiredZoom(mass, this.phase);
     if (this.phase === "dead" && performance.now() < this.deathBeatUntil) z *= 1.25;
     if (this.phase === "play") {
       z *= this.zoomMul;
@@ -1280,6 +1445,7 @@ export class CoilEngine {
         ? { x: this.profile.bestX, y: this.profile.bestY, best: this.profile.best }
         : null,
       this.emotes,
+      this.phase === "wisp" ? this.wisp : null,
     );
     const nowMs = performance.now();
     for (const [id, e] of this.emotes) if (e.until < nowMs) this.emotes.delete(id);

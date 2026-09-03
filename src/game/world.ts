@@ -12,6 +12,11 @@ import {
   NEAR_COOLDOWN,
   NEAR_FACTOR,
   SWARM_ORBS,
+  BOSS_HP,
+  BOSS_HIT_MASS,
+  BOSS_MASS,
+  BOSS_NAME,
+  LANDMARKS,
   SPAWN_INVULN,
   START_MASS,
   type Food,
@@ -553,7 +558,7 @@ export class World {
 
   /** Move the head forward one tick without any rules (client prediction). */
   moveHead(s: Snake, dt: number): void {
-    const speed = speedOf(s.mass, s.boosting);
+    const speed = speedOf(s.mass, s.boosting) * (s.boss ? 0.55 : 1);
     s.x += Math.cos(s.angle) * speed * dt;
     s.y += Math.sin(s.angle) * speed * dt;
   }
@@ -663,7 +668,55 @@ export class World {
     return best;
   }
 
+  /** Boss hits landed this tick: attacker id and hit point, for the server to credit. */
+  bossHits: { attacker: string; x: number; y: number; hp: number; killed: boolean }[] = [];
+  private tickN = 0;
+
+  /** Spawn the Boss Hour snake near a landmark. */
+  spawnBoss(at: Vec): Snake {
+    const s = this.makeSnake("boss", BOSS_NAME, 13, true);
+    s.mass = BOSS_MASS;
+    s.boss = true;
+    s.hp = BOSS_HP;
+    s.hpMax = BOSS_HP;
+    s.temper = 0.2;
+    s.x = at.x;
+    s.y = at.y;
+    s.angle = Math.random() * Math.PI * 2;
+    s.points = [];
+    this.ensureTrail(s);
+    s.invuln = 0;
+    this.snakes.push(s);
+    return s;
+  }
+
+  /** The boss patrols between landmarks slowly and never boosts. */
+  private thinkBoss(s: Snake, dt: number): void {
+    s.think -= dt;
+    s.avoid -= dt;
+    if (s.think <= 0) {
+      s.think = 0.5;
+      const idx = Math.floor(this.tickN / (40 * 45)) % LANDMARKS.length;
+      const t = LANDMARKS[idx]!;
+      const d = Math.hypot(t.x - s.x, t.y - s.y);
+      s.wander =
+        d < 400
+          ? s.angle + randRange(-0.6, 0.6)
+          : Math.atan2(t.y - s.y, t.x - s.x) + randRange(-0.3, 0.3);
+    }
+    if (s.avoid <= 0) {
+      s.avoid = 0.08;
+      this.pickHeading(s);
+    }
+    this.steerHeading(s, s.wander, dt * 0.6);
+    s.boosting = false;
+  }
+
   private thinkBot(s: Snake, dt: number): void {
+    if (s.boss) {
+      this.thinkBoss(s, dt);
+      return;
+    }
     s.think -= dt;
     s.avoid -= dt;
     s.boostLeft -= dt;
@@ -725,6 +778,7 @@ export class World {
       let preyD = (lengthOf(s.mass) * 0.32) ** 2;
       for (const o of this.snakes) {
         if (o === s || !o.alive || o.invuln > 0 || o.mass > s.mass * 0.4) continue;
+        if (o.rookie) continue;
         const d = dist2(s.x, s.y, o.x, o.y);
         if (d < preyD) {
           preyD = d;
@@ -751,6 +805,8 @@ export class World {
     let preyD = (300 + r * 3 + bold * 200) ** 2;
     for (const o of this.snakes) {
       if (o === s || !o.alive || o.mass > s.mass * (0.6 + bold * 0.35) || o.invuln > 0) continue;
+      // Rookies get openings: bots rarely hunt them, and never with a boost.
+      if (o.rookie && Math.random() < 0.75) continue;
       const d = dist2(s.x, s.y, o.x, o.y);
       if (d > preyD) continue;
       const ahead = Math.abs(wrapAngle(Math.atan2(o.y - s.y, o.x - s.x) - s.angle));
@@ -765,7 +821,7 @@ export class World {
         prey.y + Math.sin(prey.angle) * lead - s.y,
         prey.x + Math.cos(prey.angle) * lead - s.x,
       );
-      if (Math.sqrt(preyD) < 280 && Math.random() < 0.3 + bold * 0.5)
+      if (!prey.rookie && Math.sqrt(preyD) < 280 && Math.random() < 0.3 + bold * 0.5)
         s.boostLeft = 0.3 + Math.random() * 0.5;
       return;
     }
@@ -1003,6 +1059,13 @@ export class World {
     const alive = new Set<string>();
     for (const s of this.snakes) if (s.alive) alive.add(s.id);
     const kills: { s: Snake; o: Snake }[] = [];
+    this.tickN++;
+    const hits: { s: Snake; o: Snake }[] = [];
+    // Touching the boss's body is a cut, not a death; its head still kills.
+    const contact = (s: Snake, o: Snake, headOn: boolean): void => {
+      if (o.boss && !headOn) hits.push({ s, o });
+      else kills.push({ s, o });
+    };
     for (const s of this.snakes) {
       if (!s.alive || s.invuln > 0) continue;
       if (!this.owned(s)) continue;
@@ -1024,7 +1087,7 @@ export class World {
           lag > 0 ? this.rewind(o, lag) : { cut: o.points.length - 1, hx: o.x, hy: o.y, d: 0 };
         // Head on head: both lose.
         if (dist2(s.x, s.y, rw.hx, rw.hy) <= hitR2) {
-          kills.push({ s, o });
+          contact(s, o, true);
           break;
         }
         const pts = o.points;
@@ -1040,7 +1103,7 @@ export class World {
           if ((a.x < minX && b.x < minX) || (a.x > maxX && b.x > maxX)) continue;
           if ((a.y < minY && b.y < minY) || (a.y > maxY && b.y > maxY)) continue;
           if (pointSegDist2(s.x, s.y, a.x, a.y, b.x, b.y) <= hitR2) {
-            kills.push({ s, o });
+            contact(s, o, false);
             break;
           }
         }
@@ -1049,7 +1112,7 @@ export class World {
         if (end < pts.length - 1) {
           const a = pts[end]!;
           if (pointSegDist2(s.x, s.y, a.x, a.y, rw.hx, rw.hy) <= hitR2) {
-            kills.push({ s, o });
+            contact(s, o, false);
             break;
           }
         }
@@ -1065,13 +1128,42 @@ export class World {
             prev = q;
           }
           if (hit) {
-            kills.push({ s, o });
+            contact(s, o, false);
             break;
           }
         }
       }
     }
     for (const k of kills) this.kill(k.s, "snake", k.o.id, k.o.name);
+    for (const h of hits) this.bossHit(h.s, h.o);
+  }
+
+  /**
+   * A player's head cutting the boss: once per second per attacker it costs
+   * the boss a hit point, sheds a few remains at the cut and feeds the
+   * attacker. The final hit kills the boss like any snake (big remains).
+   */
+  private bossHit(s: Snake, o: Snake): void {
+    if (!o.alive || s.isBot) return;
+    const marks = (o.bossHitAt ??= new Map());
+    const last = marks.get(s.id);
+    if (last !== undefined && this.tickN - last < 40) return;
+    marks.set(s.id, this.tickN);
+    o.hp = Math.max(0, (o.hp ?? 1) - 1);
+    s.mass += BOSS_HIT_MASS;
+    for (let i = 0; i < 3; i++) {
+      this.addFood({
+        x: s.x + randRange(-30, 30),
+        y: s.y + randRange(-30, 30),
+        v: 3,
+        c: this.skinFoodColor(o.skin),
+        r: 7,
+        k: 2,
+      });
+    }
+    const killed = o.hp <= 0;
+    this.bossHits.push({ attacker: s.id, x: s.x, y: s.y, hp: o.hp, killed });
+    if (killed) this.kill(o, "snake", s.id, s.name);
   }
 
   private kill(
