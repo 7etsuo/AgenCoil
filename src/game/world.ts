@@ -679,10 +679,19 @@ export class World {
     const safe = r * 2.6 + 26;
     const cap = look + safe;
     const goal = s.wander;
-    const offsets = [0, -0.5, 0.5, -1.0, 1.0, -1.6, 1.6, -2.3, 2.3];
+    // The common case: the way we already want to go is clear. Check it
+    // alone before paying for the full fan of candidate headings.
+    const goalClear = Math.min(
+      this.clearance(s, s.x + Math.cos(goal) * look, s.y + Math.sin(goal) * look, cap),
+      this.clearance(s, s.x + Math.cos(goal) * look * 0.5, s.y + Math.sin(goal) * look * 0.5, cap),
+    );
+    if (goalClear >= safe) {
+      s.wander = goal;
+      return;
+    }
+    const offsets = [-0.5, 0.5, -1.0, 1.0, -1.6, 1.6, -2.3, 2.3];
     let bestAngle = goal;
-    let bestScore = -Infinity;
-    let goalClear = -Infinity;
+    let bestScore = Math.min(goalClear, safe * 2) - Math.abs(wrapAngle(goal - s.angle)) * 4;
     for (const off of offsets) {
       const a = goal + off;
       const dx = Math.cos(a);
@@ -690,17 +699,12 @@ export class World {
       const c1 = this.clearance(s, s.x + dx * look, s.y + dy * look, cap);
       const c2 = this.clearance(s, s.x + dx * look * 0.5, s.y + dy * look * 0.5, cap);
       const c = Math.min(c1, c2);
-      if (off === 0) goalClear = c;
       const turn = Math.abs(wrapAngle(a - s.angle));
       const score = Math.min(c, safe * 2) - Math.abs(off) * 6 - turn * 4;
       if (score > bestScore) {
         bestScore = score;
         bestAngle = a;
       }
-    }
-    if (goalClear >= safe) {
-      s.wander = goal;
-      return;
     }
     s.wander = wrapAngle(bestAngle);
     if (goalClear < r * 1.4) s.boostLeft = 0;

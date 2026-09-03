@@ -490,8 +490,7 @@ export class GameServer {
     const foodEvery = Math.max(1, Math.round(SERVER_TICK_HZ / FOOD_SYNC_HZ));
     if (this.tick % snapEvery === 0) for (const c of this.clients) this.sendSnapshot(c);
     if (this.tick % foodEvery === 0) for (const c of this.clients) this.sendFood(c);
-    if (this.tick % Math.round(SERVER_TICK_HZ / 2) === 0)
-      for (const c of this.clients) this.sendStats(c);
+    if (this.tick % Math.round(SERVER_TICK_HZ / 2) === 0) this.sendStatsAll();
     if (this.tick % SERVER_TICK_HZ === 0) for (const c of this.clients) this.sendToken(c);
     if (this.tick % (SERVER_TICK_HZ * 30) === 0) this.decayHeat();
   }
@@ -648,25 +647,33 @@ export class GameServer {
     }
   }
 
-  private sendStats(c: Client): void {
+  /** The ranking and boards are computed once, then each client gets its own line. */
+  private sendStatsAll(): void {
+    if (!this.clients.size) return;
     const alive = this.world.snakes.filter((s) => s.alive).sort((a, b) => b.mass - a.mass);
-    const me = c.sid ? alive.find((s) => s.id === c.sid) : undefined;
-    const rank = me ? alive.indexOf(me) + 1 : 0;
-    const w = new Writer()
-      .u8(S2C.STATS)
-      .f32(me?.mass ?? 0)
-      .u16(rank)
-      .u16(alive.length)
-      .u16(me?.kills ?? 0)
-      .u16(this.clients.size);
-    const board = alive.slice(0, 10);
-    w.u8(board.length);
-    for (const s of board)
-      w.u16(this.nidOf(s.id)).str(s.name).u32(Math.floor(s.mass)).f32(s.x).f32(s.y);
+    const rankOf = new Map<string, number>();
+    alive.forEach((s, i) => rankOf.set(s.id, i + 1));
+    const board = new Writer();
+    const top = alive.slice(0, 10);
+    board.u8(top.length);
+    for (const s of top)
+      board.u16(this.nidOf(s.id)).str(s.name).u32(Math.floor(s.mass)).f32(s.x).f32(s.y);
     const daily = this.daily.top(10);
-    w.u8(daily.length);
-    for (const e of daily) w.str(e.name).u32(e.best);
-    c.ws.send(w.finish());
+    board.u8(daily.length);
+    for (const e of daily) board.str(e.name).u32(e.best);
+    const tail = board.finish();
+    for (const c of this.clients) {
+      const me = c.sid ? alive.find((s) => s.id === c.sid) : undefined;
+      const w = new Writer()
+        .u8(S2C.STATS)
+        .f32(me?.mass ?? 0)
+        .u16(me ? (rankOf.get(me.id) ?? 0) : 0)
+        .u16(alive.length)
+        .u16(me?.kills ?? 0)
+        .u16(this.clients.size);
+      w.raw(tail);
+      c.ws.send(w.finish());
+    }
   }
 }
 

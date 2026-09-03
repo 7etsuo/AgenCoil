@@ -87,6 +87,13 @@ export class Writer {
     this.pos += b.length;
     return this;
   }
+  /** Append already-encoded bytes. */
+  raw(b: Uint8Array): this {
+    this.need(b.length);
+    this.bytes.set(b, this.pos);
+    this.pos += b.length;
+    return this;
+  }
   /** Angle in radians packed into 16 bits. */
   angle(a: number): this {
     let w = a;

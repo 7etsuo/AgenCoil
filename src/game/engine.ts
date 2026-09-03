@@ -221,6 +221,7 @@ export class CoilEngine {
   destroy(): void {
     this.running = false;
     cancelAnimationFrame(this.raf);
+    this.audio.stopMusic();
     this.net?.close();
     window.removeEventListener("resize", this.onResize);
     window.removeEventListener("keydown", this.onKeyDown);
