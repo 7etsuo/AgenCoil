@@ -1,0 +1,12 @@
+node_modules
+.vercel
+.nitro
+.output
+.tanstack
+.grok
+artifacts
+screenshots
+*.log
+.DS_Store
+dist
+routeTree.gen.ts
