@@ -13,6 +13,7 @@ import {
   ARENA_RADIUS,
   BOUNTY_MIN_MASS,
   HUNGER_RATE,
+  LANDMARKS,
   BOUNTY_RATE,
   COMEBACK_KEEP,
   COMEBACK_WINDOW_MS,
@@ -552,6 +553,7 @@ export class GameServer {
     // v2 clients append: device key, death effect, party code, comeback flag.
     let comeback = false;
     let playTicket = "";
+    let nearNid = 0;
     if (r.remaining) {
       client.v2 = true;
       client.key = r
@@ -583,6 +585,8 @@ export class GameServer {
           ? client.deathFx
           : 0;
       playTicket = r.remaining ? r.str() : "";
+      // Rematch: spawn near this snake if it is still alive.
+      nearNid = r.remaining >= 2 ? r.u16() : 0;
     }
     if (client.sid && this.world.snakes.some((s) => s.id === client.sid && s.alive)) {
       // Already playing: a repeated hello just updates the look next spawn,
@@ -677,7 +681,12 @@ export class GameServer {
       // Skill-based placement: veterans start out where the big snakes roam,
       // newcomers in the quietest corner the arena has. A party overrides it.
       const best = client.profile?.best ?? 0;
-      if (best >= 500) this.spawnNearTop(snake);
+      const selfId = snake.id;
+      const rival = nearNid
+        ? this.world.snakes.find((s) => s.alive && s.id !== selfId && this.nidOf(s.id) === nearNid)
+        : undefined;
+      if (rival) this.spawnNearSnake(snake, rival);
+      else if (best >= 500) this.spawnNearTop(snake);
       else if (best < 100) this.spawnQuiet(snake);
       // A first life gets a small, timid bot placed just ahead: the easiest
       // possible first kill, which is what turns a visitor into a player.
@@ -779,6 +788,15 @@ export class GameServer {
     snake.y = at.y;
     snake.points = [];
     this.world.ensureTrail(snake);
+  }
+
+  /** A rematch: 600 to 900 units from the chosen rival, facing them. */
+  private spawnNearSnake(snake: Snake, t: Snake): void {
+    const a = Math.random() * Math.PI * 2;
+    const d = 600 + Math.random() * 300;
+    const at = this.world.safeSpawnNear({ x: t.x + Math.cos(a) * d, y: t.y + Math.sin(a) * d });
+    this.moveSnake(snake, at);
+    snake.angle = Math.atan2(t.y - at.y, t.x - at.x);
   }
 
   private spawnNearTop(snake: Snake): void {
@@ -1085,8 +1103,12 @@ export class GameServer {
     }
   }
 
+  private swarmIndex = Math.floor(Math.random() * LANDMARKS.length);
+
   private startSwarm(): void {
-    const at = this.world.randomOpenPoint();
+    // Events rotate through the landmarks so players learn where to go.
+    const lm = LANDMARKS[this.swarmIndex++ % LANDMARKS.length]!;
+    const at = this.world.safeSpawnNear({ x: lm.x, y: lm.y });
     this.world.spawnGoldSwarm(at.x, at.y);
     this.event = { x: at.x, y: at.y, until: Date.now() + SWARM_DURATION_S * 1000 };
     for (const c of this.clients) this.sendEvent(c);

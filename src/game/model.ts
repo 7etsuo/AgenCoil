@@ -150,6 +150,27 @@ export interface Skin {
   shine: string;
   bands: string[];
   band: number;
+  /** Body texture baked into the segment sprite. */
+  style?: SkinStyle;
+}
+
+export type SkinStyle = "scales" | "stripes";
+
+/**
+ * Fixed places in the arena that players learn by name. Swarm events land on
+ * one of them so the event is a destination, not a random point.
+ */
+export const LANDMARKS: { x: number; y: number; kind: number; name: string }[] = [
+  { x: 0, y: 0, kind: 0, name: "the core" },
+  { x: 4200, y: -2600, kind: 1, name: "the ring" },
+  { x: -4400, y: 2300, kind: 1, name: "the wreck" },
+  { x: -3200, y: -3900, kind: 2, name: "the shard" },
+  { x: 3600, y: 3800, kind: 2, name: "the beacon" },
+];
+
+export function landmarkNear(x: number, y: number, within = 900): string | null {
+  for (const l of LANDMARKS) if (Math.hypot(l.x - x, l.y - y) < within) return l.name;
+  return null;
 }
 
 export const SKINS: Skin[] = [
@@ -180,6 +201,18 @@ export const SKINS: Skin[] = [
   },
   { fill: "#c8d0dc", shine: "#f4f6fa", bands: ["#c8d0dc", "#2a2f3a"], band: 1 },
 ];
+
+// Textures: scales on the odd-numbered classic skins, stripes on a few bold ones.
+for (const [i, style] of [
+  [0, "scales"],
+  [2, "stripes"],
+  [5, "scales"],
+  [7, "stripes"],
+  [10, "scales"],
+  [12, "stripes"],
+] as const) {
+  if (SKINS[i]) SKINS[i]!.style = style;
+}
 
 export const FOOD_COLORS = [
   "#3ee0c4",

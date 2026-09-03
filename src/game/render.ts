@@ -1,4 +1,6 @@
 import {
+  LANDMARKS,
+  type SkinStyle,
   ARENA_RADIUS,
   FOOD_COLORS,
   SKINS,
@@ -115,6 +117,7 @@ export class Renderer {
     const y1 = cam.y + oy + viewH / 2 + 60;
 
     this.drawArena(ctx, cam, x0, y0, x1, y1);
+    this.drawLandmarks(ctx, x0, y0, x1, y1, z);
     this.drawFood(ctx, world, x0, y0, x1, y1, z);
     this.drawParticles(ctx, particles);
     if (ghost && ghost.x >= x0 && ghost.x <= x1 && ghost.y >= y0 && ghost.y <= y1) {
@@ -302,6 +305,94 @@ export class Renderer {
     ctx.stroke();
   }
 
+  /**
+   * Named places: a glowing core at the centre, dark rings and a shard. They
+   * never affect play; they make the arena a map you can learn.
+   */
+  private drawLandmarks(
+    ctx: CanvasRenderingContext2D,
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    z: number,
+  ): void {
+    const t = this.time;
+    for (const l of LANDMARKS) {
+      if (l.x < x0 - 900 || l.x > x1 + 900 || l.y < y0 - 900 || l.y > y1 + 900) continue;
+      if (l.kind === 0) {
+        const pulse = 1 + Math.sin(t * 0.8) * 0.06;
+        const g = ctx.createRadialGradient(l.x, l.y, 0, l.x, l.y, 760 * pulse);
+        g.addColorStop(0, "rgba(62,224,196,0.22)");
+        g.addColorStop(0.25, "rgba(62,224,196,0.08)");
+        g.addColorStop(1, "rgba(62,224,196,0)");
+        ctx.globalCompositeOperation = "lighter";
+        ctx.fillStyle = g;
+        ctx.fillRect(l.x - 800, l.y - 800, 1600, 1600);
+        ctx.globalCompositeOperation = "source-over";
+        ctx.beginPath();
+        ctx.arc(l.x, l.y, 46 * pulse, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(200,255,245,0.18)";
+        ctx.fill();
+        for (let i = 0; i < 8; i++) {
+          const a = t * 0.25 + (i / 8) * Math.PI * 2;
+          ctx.beginPath();
+          ctx.arc(l.x + Math.cos(a) * 240, l.y + Math.sin(a) * 240, 5, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(62,224,196,0.35)";
+          ctx.fill();
+        }
+      } else if (l.kind === 1) {
+        ctx.beginPath();
+        ctx.arc(l.x, l.y, 520, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(0,0,0,0.35)";
+        ctx.lineWidth = 34;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(l.x, l.y, 520, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(180,190,210,0.16)";
+        ctx.lineWidth = 6;
+        ctx.setLineDash([60, 40]);
+        ctx.lineDashOffset = -t * 20;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.arc(l.x, l.y, 380, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(180,190,210,0.08)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      } else {
+        ctx.save();
+        ctx.translate(l.x, l.y);
+        ctx.rotate(t * 0.1);
+        for (const [k, a] of [
+          [1, 0.16],
+          [0.62, 0.1],
+        ] as const) {
+          ctx.beginPath();
+          ctx.moveTo(0, -420 * k);
+          ctx.lineTo(240 * k, 0);
+          ctx.lineTo(0, 420 * k);
+          ctx.lineTo(-240 * k, 0);
+          ctx.closePath();
+          ctx.strokeStyle = `rgba(155,140,255,${a})`;
+          ctx.lineWidth = 4;
+          ctx.stroke();
+        }
+        ctx.restore();
+        const g = ctx.createRadialGradient(l.x, l.y, 0, l.x, l.y, 300);
+        g.addColorStop(0, "rgba(155,140,255,0.16)");
+        g.addColorStop(1, "rgba(155,140,255,0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(l.x - 300, l.y - 300, 600, 600);
+      }
+      ctx.font = `500 ${Math.max(12, 16 / z)}px Outfit, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.fillStyle = "rgba(232,234,238,0.22)";
+      ctx.fillText(l.name, l.x, l.y + (l.kind === 1 ? 540 : l.kind === 2 ? 440 : 280));
+    }
+  }
+
   private drawFood(
     ctx: CanvasRenderingContext2D,
     world: World,
@@ -314,9 +405,16 @@ export class Renderer {
     const t = this.time;
     const minDest = 2.4 / z;
     const sprites = this.foodSprites;
+    // Orbs under five screen pixels are batched into one path per colour
+    // instead of one image draw each; zoomed out that is most of them.
+    const tiny: { x: number; y: number; d: number }[][] = sprites.map(() => []);
     world.forEachFoodIn(x0, y0, x1, y1, (f) => {
       const spr = sprites[f.c % sprites.length];
       if (!spr) return;
+      if (f.k < 2 && f.r * z < 2.5) {
+        tiny[f.c % sprites.length]!.push({ x: f.x, y: f.y, d: f.r * 0.9 });
+        return;
+      }
       const wob = f.k === 3 || f.k === 4 ? 0.18 : f.k === 2 ? 0.14 : 0.09;
       const pulse = 1 - wob + Math.sin(t * (f.k >= 3 ? 6 : 2.6) + f.x * 0.07 + f.y * 0.05) * wob;
       const dest = spr.size * (f.r / 15) * pulse;
@@ -330,13 +428,28 @@ export class Renderer {
       }
       ctx.drawImage(spr.canvas, f.x - dest * 0.5, f.y - dest * 0.5, dest, dest);
     });
+    tiny.forEach((list, c) => {
+      if (!list.length) return;
+      ctx.beginPath();
+      for (const o of list) {
+        ctx.moveTo(o.x + o.d, o.y);
+        ctx.arc(o.x, o.y, o.d, 0, Math.PI * 2);
+      }
+      ctx.fillStyle = FOOD_COLORS[c] ?? "#ffffff";
+      ctx.globalAlpha = 0.85;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    });
   }
 
-  private segmentSprite(color: string): Sprite {
-    let spr = this.segmentSprites.get(color);
+  private boostSince = new Map<string, number>();
+
+  private segmentSprite(color: string, style?: SkinStyle): Sprite {
+    const key = style ? `${style}|${color}` : color;
+    let spr = this.segmentSprites.get(key);
     if (!spr) {
-      spr = makeSegmentSprite(color);
-      this.segmentSprites.set(color, spr);
+      spr = makeSegmentSprite(color, style);
+      this.segmentSprites.set(key, spr);
     }
     return spr;
   }
@@ -421,7 +534,8 @@ export class Renderer {
     const step = Math.max(2.5, spacingOf(s.mass));
     const bandLen = Math.max(1, s.bands ? 3 : SKINS[s.skin % SKINS.length]!.band);
     const nBands = bands.length;
-    const sprites = bands.map((c) => this.segmentSprite(c));
+    const style = s.bands && s.bands.length ? undefined : SKINS[s.skin % SKINS.length]!.style;
+    const sprites = bands.map((c) => this.segmentSprite(c, style));
 
     // Total path length so bands can be counted from the head.
     let total = 0;
@@ -451,10 +565,42 @@ export class Renderer {
     }
     if (s.x >= x0 - r && s.x <= x1 + r && s.y >= y0 - r && s.y <= y1 + r) {
       const hs = size * 1.06;
-      ctx.drawImage(sprites[0]!.canvas, s.x - hs / 2, s.y - hs / 2, hs, hs);
+      // Squash along the heading for 220 ms after a boost starts.
+      if (s.boosting && !this.boostSince.has(s.id)) this.boostSince.set(s.id, this.time);
+      if (!s.boosting) this.boostSince.delete(s.id);
+      const since = this.boostSince.get(s.id);
+      const k = since === undefined ? 0 : Math.max(0, 1 - (this.time - since) / 0.22);
+      if (k > 0) {
+        ctx.save();
+        ctx.translate(s.x, s.y);
+        ctx.rotate(s.angle);
+        ctx.scale(1 - 0.2 * k, 1 + 0.2 * k);
+        ctx.drawImage(sprites[0]!.canvas, -hs / 2, -hs / 2, hs, hs);
+        ctx.restore();
+      } else {
+        ctx.drawImage(sprites[0]!.canvas, s.x - hs / 2, s.y - hs / 2, hs, hs);
+      }
+      if ((s.level ?? 0) >= 20) this.drawShimmer(ctx, s, r);
       this.drawEvolution(ctx, s, r);
       this.drawEyes(ctx, s, r, aim);
     }
+  }
+
+  /** Legendary (level 20+): a bright pulse travelling down the body twice a second. */
+  private drawShimmer(ctx: CanvasRenderingContext2D, s: Snake, r: number): void {
+    const pts = s.points;
+    if (pts.length < 3) return;
+    const frac = 1 - ((this.time * 0.5) % 1);
+    const i = Math.min(pts.length - 1, Math.floor(frac * (pts.length - 1)));
+    const p = pts[i]!;
+    const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 1.8);
+    g.addColorStop(0, "rgba(255,255,255,0.55)");
+    g.addColorStop(0.5, "rgba(255,240,180,0.2)");
+    g.addColorStop(1, "rgba(255,240,180,0)");
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = g;
+    ctx.fillRect(p.x - r * 1.8, p.y - r * 1.8, r * 3.6, r * 3.6);
+    ctx.globalCompositeOperation = "source-over";
   }
 
   /** Evolution marks: dorsal dots from level 5, fins from 10, a gold halo from 20. */
@@ -672,6 +818,13 @@ export class Renderer {
       ctx.lineWidth = 1;
       ctx.stroke();
     }
+    for (const l of LANDMARKS) {
+      ctx.beginPath();
+      ctx.arc(cx + l.x * k, cy + l.y * k, l.kind === 0 ? 3 : 2, 0, Math.PI * 2);
+      ctx.strokeStyle = l.kind === 0 ? "rgba(62,224,196,0.7)" : "rgba(180,190,210,0.45)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
     const me = snakes.find((s) => s.id === localId);
     if (me) {
       ctx.beginPath();
@@ -756,7 +909,7 @@ function makeFoodSprite(color: string): Sprite {
 }
 
 /** A shaded disc used as one body segment. */
-function makeSegmentSprite(color: string): Sprite {
+function makeSegmentSprite(color: string, style?: SkinStyle): Sprite {
   const size = SPRITE;
   const canvas = document.createElement("canvas");
   canvas.width = size;
@@ -777,6 +930,46 @@ function makeSegmentSprite(color: string): Sprite {
   ctx.arc(cx, cy, 31, 0, Math.PI * 2);
   ctx.fillStyle = grd;
   ctx.fill();
+  if (style === "scales") {
+    // Three overlapping crescents in the lower half read as scales.
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, 31, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.strokeStyle = "rgba(0,0,0,0.22)";
+    ctx.lineWidth = 2.4;
+    for (const [ox, oy] of [
+      [-11, 6],
+      [11, 6],
+      [0, 18],
+      [-16, 22],
+      [16, 22],
+    ] as const) {
+      ctx.beginPath();
+      ctx.arc(cx + ox, cy + oy - 10, 11, Math.PI * 0.15, Math.PI * 0.85);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(cx + ox, cy + oy - 12, 11, Math.PI * 0.2, Math.PI * 0.8);
+      ctx.strokeStyle = "rgba(255,255,255,0.14)";
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(0,0,0,0.22)";
+    }
+    ctx.restore();
+  } else if (style === "stripes") {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, 31, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.fillStyle = "rgba(0,0,0,0.2)";
+    ctx.beginPath();
+    ctx.moveTo(cx - 40, cy + 2);
+    ctx.lineTo(cx + 40, cy - 22);
+    ctx.lineTo(cx + 40, cy - 10);
+    ctx.lineTo(cx - 40, cy + 14);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
   ctx.beginPath();
   ctx.arc(cx, cy, 28.5, Math.PI * 1.05, Math.PI * 1.55);
   ctx.strokeStyle = "rgba(255,255,255,0.28)";

@@ -3,6 +3,7 @@ import {
   MAX_BOTS,
   START_MASS,
   fillOf,
+  lengthOf,
   lerp,
   type Camera,
   type Floater,
@@ -25,6 +26,11 @@ import {
   type StatsInfo,
 } from "./net";
 import { COMEBACK_WINDOW_MS, dist2, radiusOf } from "./model";
+
+export interface ReplayFrame {
+  t: number;
+  snakes: { id: string; color: string; r: number; pts: Vec[]; me: boolean }[];
+}
 
 export interface HudState {
   phase: Phase;
@@ -49,6 +55,11 @@ export interface HudState {
   bountyOnYou: number;
   /** Who the menu camera is following. */
   watchingTop: { name: string; mass: number } | null;
+  /** The last seconds before death, for the death card replay. */
+  replay: ReplayFrame[] | null;
+  deathAt: Vec | null;
+  /** Your killer, if still alive, for a one-tap rematch spawn. */
+  rematch: { nid: number; name: string } | null;
   /** Tutorial hint for a first life, if any. */
   hint: string | null;
   firstLife: boolean;
@@ -169,6 +180,13 @@ export class CoilEngine {
   private spawnedAt = 0;
   private firstKillDone = false;
   private emotes = new Map<string, { id: number; until: number }>();
+  private hitStopUntil = 0;
+  private replayBuf: ReplayFrame[] = [];
+  private replayFrozen: ReplayFrame[] | null = null;
+  private replayAcc = 0;
+  private qualityScale = 1;
+  private lowFpsT = 0;
+  private highFpsT = 0;
   private deathRank = 0;
   private deathCount = 0;
   private dbgWall = 0;
@@ -280,6 +298,7 @@ export class CoilEngine {
         this.fps = this.frames / this.fpsT;
         this.frames = 0;
         this.fpsT = 0;
+        this.adaptQuality();
       }
       this.hudAcc += raw;
       if (this.hudAcc >= 0.12) {
@@ -341,7 +360,7 @@ export class CoilEngine {
     this.stickId = null;
   }
 
-  play(look: Look, comeback = false): void {
+  play(look: Look, comeback = false, nearNid = 0): void {
     this.audio.unlock();
     this.audio.startMusic();
     this.look = {
@@ -368,7 +387,7 @@ export class CoilEngine {
       // Online, or still connecting: ask the server and wait for SPAWNED.
       // If nothing arrives within SPAWN_TIMEOUT_MS the tick starts a local game.
       this.spawnWait = performance.now();
-      this.net.play(this.look, comeback);
+      this.net.play(this.look, comeback, nearNid);
       return;
     }
     this.spawnLocal();
@@ -389,6 +408,8 @@ export class CoilEngine {
     this.spawnWait = 0;
     this.phase = "play";
     this.spawnedAt = performance.now();
+    this.replayBuf = [];
+    this.replayFrozen = null;
     this.snapCamTo(s);
     this.emitHud();
   }
@@ -401,10 +422,11 @@ export class CoilEngine {
     this.pointer.y = s.y + Math.sin(s.angle) * AIM_REACH;
   }
 
-  respawn(comeback = false): void {
+  respawn(comeback = false, rematch = false): void {
+    const near = rematch && this.killerId ? Number(this.killerId) || 0 : 0;
     if (this.phase !== "dead") return;
     if (performance.now() < this.deathBeatUntil) return;
-    this.play(this.look, comeback && this.comebackOffer > performance.now());
+    this.play(this.look, comeback && this.comebackOffer > performance.now(), near);
   }
 
   /** Current session party code (friends spawn together). */
@@ -479,6 +501,9 @@ export class CoilEngine {
         this.phase === "menu" && st?.board[0]
           ? { name: st.board[0].name, mass: st.board[0].mass }
           : null,
+      replay: this.phase === "dead" ? this.replayFrozen : null,
+      deathAt: this.phase === "dead" ? this.corpse : null,
+      rematch: this.rematchTarget(),
       hint: this.hint(),
       firstLife: this.isFirstLife(),
       party: this.stats?.party ?? [],
@@ -671,9 +696,77 @@ export class CoilEngine {
     this.pointer.y = p.y + (dy / d) * AIM_REACH;
   }
 
+  /**
+   * Dynamic resolution: under a sustained 45 fps the canvas renders at 80%
+   * then 65% of its pixel size; a sustained 57 fps climbs back. Weak GPUs are
+   * fill-rate bound, so this is worth far more than trimming draw calls.
+   */
+  private adaptQuality(): void {
+    if (this.phase !== "play") return;
+    if (this.fps < 45) {
+      this.lowFpsT += 0.5;
+      this.highFpsT = 0;
+    } else if (this.fps > 57) {
+      this.highFpsT += 0.5;
+      this.lowFpsT = 0;
+    } else {
+      this.lowFpsT = 0;
+      this.highFpsT = 0;
+    }
+    if (this.lowFpsT >= 2 && this.qualityScale > 0.65) {
+      this.qualityScale = Math.max(0.65, this.qualityScale - 0.2);
+      this.lowFpsT = 0;
+      this.resize();
+    } else if (this.highFpsT >= 6 && this.qualityScale < 1) {
+      this.qualityScale = Math.min(1, this.qualityScale + 0.2);
+      this.highFpsT = 0;
+      this.resize();
+    }
+  }
+
+  /** Snapshot nearby snakes ten times a second for the death replay. */
+  private recordReplay(dt: number): void {
+    if (this.phase !== "play") return;
+    this.replayAcc += dt;
+    if (this.replayAcc < 0.1) return;
+    this.replayAcc = 0;
+    const me = this.world.player;
+    if (!me) return;
+    const range = 1500;
+    const frame: ReplayFrame = { t: performance.now(), snakes: [] };
+    for (const s of this.world.snakes) {
+      if (!s.alive || dist2(s.x, s.y, me.x, me.y) > range * range) continue;
+      const src = s.points;
+      const n = Math.min(40, src.length);
+      const pts: Vec[] = [];
+      for (let i = 0; i < n; i++) {
+        const p = src[Math.round((i / Math.max(1, n - 1)) * (src.length - 1))]!;
+        pts.push({ x: p.x, y: p.y });
+      }
+      pts.push({ x: s.x, y: s.y });
+      frame.snakes.push({
+        id: s.id,
+        color: fillOf(s),
+        r: radiusOf(s.mass),
+        pts,
+        me: s.id === me.id,
+      });
+    }
+    this.replayBuf.push(frame);
+    if (this.replayBuf.length > 60) this.replayBuf.shift();
+  }
+
+  private rematchTarget(): { nid: number; name: string } | null {
+    if (this.phase !== "dead" || !this.killerId || !this.online) return null;
+    const k = this.world.snakes.find((s) => s.id === this.killerId && s.alive);
+    if (!k) return null;
+    const nid = Number(this.killerId);
+    return Number.isFinite(nid) && nid > 0 ? { nid, name: k.name } : null;
+  }
+
   private resize(): void {
     const rect = this.canvas.getBoundingClientRect();
-    this.dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    this.dpr = Math.min(window.devicePixelRatio || 1, 1.5) * this.qualityScale;
     const w = Math.max(1, Math.round(rect.width * this.dpr));
     const h = Math.max(1, Math.round(rect.height * this.dpr));
     if (this.canvas.width !== w) this.canvas.width = w;
@@ -719,7 +812,12 @@ export class CoilEngine {
     this.stepDeathFx(dt);
     this.updateCam(dt);
     // The moment of death plays out in slow motion for a beat.
-    const fxDt = this.phase === "dead" && performance.now() < this.deathBeatUntil ? dt * 0.35 : dt;
+    const nowMs = performance.now();
+    const fxDt =
+      (this.phase === "dead" && nowMs < this.deathBeatUntil) || nowMs < this.hitStopUntil
+        ? dt * 0.35
+        : dt;
+    this.recordReplay(dt);
     this.renderer.stepFx(fxDt, this.particles, this.floaters, this.cam);
     this.audioCues();
     if (this.killTimer > 0) {
@@ -919,7 +1017,21 @@ export class CoilEngine {
       if (d < range) danger = Math.max(danger, 1 - d / range);
     }
     this.audio.setDanger(danger);
-    this.audio.setHeartbeat(p.boosting && p.mass < 30);
+    // Heartbeat when a bigger head is within two of your lengths, or while
+    // boosting a snake that is about to run out of length.
+    const reach = 2 * lengthOf(p.mass);
+    let stalked = false;
+    for (const o of this.world.snakes) {
+      if (o.id === p.id || !o.alive || o.mass < p.mass * 1.3) continue;
+      if (dist2(p.x, p.y, o.x, o.y) < reach * reach) {
+        stalked = true;
+        break;
+      }
+    }
+    this.audio.setHeartbeat(stalked || (p.boosting && p.mass < 30));
+    const st = this.stats;
+    if (st && st.rank > 0 && st.count > 1)
+      this.audio.setIntensity(1 - (st.rank - 1) / (st.count - 1));
     this.audio.setMood(p.mass >= 1500 ? 2 : p.mass >= 200 ? 1 : 0);
   }
 
@@ -938,6 +1050,10 @@ export class CoilEngine {
     this.lastKillAt = now;
     this.kills++;
     this.audio.kill();
+    // Hit stop: a camera punch and 250 ms of slowed effects with a slight
+    // zoom-in, so a kill lands as a moment rather than a number ticking up.
+    this.cam.trauma = Math.min(1, this.cam.trauma + 0.3);
+    this.hitStopUntil = now + 250;
     this.killNotice =
       this.streak >= 4
         ? `rampage · ${this.streak} kills`
@@ -1068,6 +1184,7 @@ export class CoilEngine {
     this.holdBoost = false;
     this.spawnWait = 0;
     this.deathBeatUntil = performance.now() + 700;
+    this.replayFrozen = this.replayBuf.length ? this.replayBuf.slice() : null;
     try {
       localStorage.setItem("agencoil-played", "1");
     } catch {
@@ -1136,6 +1253,7 @@ export class CoilEngine {
     if (this.phase === "play") {
       z *= this.zoomMul;
       if (world.player?.boosting) z *= 0.965;
+      if (performance.now() < this.hitStopUntil) z *= 1.05;
     }
     this.cam.z = lerp(this.cam.z, z, 1 - Math.pow(0.02, dt));
   }
@@ -1222,6 +1340,8 @@ export class CoilEngine {
       pts,
       kills: this.kills,
       players: this.stats?.clients ?? 0,
+      replayFrames: (this.replayFrozen ?? this.replayBuf).length,
+      replaySnakes: (this.replayFrozen ?? this.replayBuf).at(-1)?.snakes.length ?? -1,
       deathsWall: this.dbgWall,
       deathsSnake: this.dbgSnake,
       fps: Math.round(this.fps),

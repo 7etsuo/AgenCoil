@@ -31,6 +31,7 @@ import {
 import { Link } from "@tanstack/react-router";
 import { Turnstile } from "@/components/turnstile";
 import { SkinPreview } from "@/components/skin-preview";
+import { ReplayView } from "@/components/replay-view";
 
 const NICK_KEY = "agencoil-nick";
 const SKIN_KEY = "agencoil-skin";
@@ -1001,6 +1002,11 @@ export function CoilApp() {
             <p className="text-xs tracking-[0.2em] text-muted uppercase">down</p>
             <h2 className="mt-2 text-3xl font-semibold tracking-tight">you popped</h2>
             <p className="mt-2 text-sm text-muted">{hud.deathReason}</p>
+            {hud.replay && hud.replay.length > 1 && (
+              <div className="mt-4 overflow-hidden rounded-lg border border-line">
+                <ReplayView frames={hud.replay} at={hud.deathAt} />
+              </div>
+            )}
             {hud.deathRank > 0 && (
               <p className="mt-1 text-xs text-subtle">
                 you were #{hud.deathRank} of {hud.deathCount}
@@ -1023,6 +1029,15 @@ export function CoilApp() {
                 <div className="text-xl font-semibold">{hud.best}</div>
               </div>
             </div>
+            {hud.rematch && (
+              <button
+                type="button"
+                onClick={() => engineRef.current?.respawn(false, true)}
+                className="mt-5 h-12 w-full rounded-lg border border-[#ff6b8a] bg-[#ff6b8a]/15 font-medium text-[#ffb3c1] active:scale-[0.98]"
+              >
+                Rematch · spawn next to {hud.rematch.name}
+              </button>
+            )}
             {hud.comebackLeft > 0 && (
               <button
                 type="button"
@@ -1035,7 +1050,7 @@ export function CoilApp() {
             <button
               type="button"
               onClick={() => engineRef.current?.respawn()}
-              className={`${hud.comebackLeft > 0 ? "mt-2" : "mt-6"} h-12 w-full rounded-lg bg-accent font-medium text-accent-fg active:scale-[0.98]`}
+              className={`${hud.comebackLeft > 0 || hud.rematch ? "mt-2" : "mt-6"} h-12 w-full rounded-lg bg-accent font-medium text-accent-fg active:scale-[0.98]`}
             >
               Play again
             </button>

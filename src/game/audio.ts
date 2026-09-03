@@ -39,7 +39,10 @@ export class GameAudio {
 
   /** Eating pitch climbs with a combo of quick eats or close calls. */
   eat(v: number, combo = 0): void {
-    this.blip(520 + v * 40 + Math.min(combo, 8) * 45, 0.05, 0.08, "triangle");
+    // A pentatonic climb with the combo, so a feeding run sounds like a riff.
+    const steps = [0, 2, 4, 7, 9, 12, 14, 16, 19];
+    const semis = steps[Math.min(combo, steps.length - 1)]!;
+    this.blip((520 + v * 30) * Math.pow(2, semis / 12), 0.05, 0.08, "triangle");
   }
 
   near(combo: number): void {
@@ -161,6 +164,16 @@ export class GameAudio {
    * Three moods that track how big you are: 0 calm and low, 1 brighter and
    * a fourth up, 2 dark and heavy a fourth down. Transitions glide.
    */
+  private intensity = 0;
+
+  /** 0..1 with your rank: the pad opens up and brightens as you climb. */
+  setIntensity(level: number): void {
+    const v = Math.max(0, Math.min(1, level));
+    if (Math.abs(v - this.intensity) < 0.08) return;
+    this.intensity = v;
+    this.applyMood();
+  }
+
   setMood(mood: number): void {
     const m = Math.max(0, Math.min(2, Math.round(mood)));
     if (m === this.mood) return;
@@ -175,11 +188,8 @@ export class GameAudio {
     const root = this.mood === 1 ? 73.4 : this.mood === 2 ? 41.2 : 55;
     const mults = [1, 1, 2, 3];
     mu.oscs.forEach((o, i) => o.frequency.setTargetAtTime(root * mults[i]!, t, 1.5));
-    mu.filter.frequency.setTargetAtTime(
-      this.mood === 1 ? 900 : this.mood === 2 ? 320 : 520,
-      t,
-      1.5,
-    );
+    const base = this.mood === 1 ? 900 : this.mood === 2 ? 320 : 520;
+    mu.filter.frequency.setTargetAtTime(base * (1 + 1.1 * this.intensity), t, 1.5);
   }
 
   stopMusic(): void {

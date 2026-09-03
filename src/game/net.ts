@@ -228,6 +228,7 @@ export class NetSession {
   /** Party code so friends spawn together. */
   party = "";
   private comebackNext = false;
+  private nearNext = 0;
 
   constructor(
     private readonly url: string,
@@ -355,7 +356,8 @@ export class NetSession {
   // ── outgoing ───────────────────────────────────────────────────────────────
 
   /** Join the arena (or respawn after death) with this look. */
-  play(look: Look, comeback = false): void {
+  play(look: Look, comeback = false, nearNid = 0): void {
+    this.nearNext = nearNid;
     this.look = look;
     this.wantPlay = true;
     this.comebackNext = comeback;
@@ -380,8 +382,10 @@ export class NetSession {
       .u8(this.look.deathFx ?? 0)
       .str(this.party)
       .u8(respawn && this.comebackNext ? 1 : 0)
-      .str(respawn ? "" : this.playTicket);
+      .str(respawn ? "" : this.playTicket)
+      .u16(respawn ? this.nearNext & 0xffff : 0);
     this.comebackNext = false;
+    this.nearNext = 0;
     this.ws.send(w.finish());
   }
 
