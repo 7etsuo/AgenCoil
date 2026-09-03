@@ -23,6 +23,8 @@ export const S2C = {
   TOKEN: 8,
   PONG: 9,
   SPAWNED: 10,
+  /** Sequence of the last input applied; only sent to clients that number inputs. */
+  ACK: 11,
 } as const;
 
 const enc = new TextEncoder();

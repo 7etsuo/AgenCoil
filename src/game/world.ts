@@ -31,6 +31,10 @@ import {
 } from "./model";
 
 export const CELL = 96;
+/** Bots past this length boost freely, shedding what they cannot use. */
+const BOT_SOFT_CAP = 2000;
+/** Bots past this length retire soon after, turning into a big pile of remains. */
+const BOT_HARD_CAP = 4500;
 const GRID_OFF = 256;
 const GRID_SPAN = 512;
 const CHASE_SPEED = 265;
@@ -559,6 +563,14 @@ export class World {
     if (s.think <= 0) {
       s.think = 0.2 + Math.random() * 0.2;
       this.chooseGoal(s);
+      // Without enough players to hunt them, bots would compound forever
+      // and the arena would fill with giants. Big bots get reckless and
+      // shed length; the very biggest retire into remains for the rest.
+      if (s.mass > BOT_SOFT_CAP && Math.random() < 0.5) s.boostLeft = 0.4;
+      if (s.mass > BOT_HARD_CAP && Math.random() < 0.02) {
+        this.kill(s, "snake", null, null);
+        return;
+      }
     }
     if (s.avoid <= 0) {
       s.avoid = 0.08;
@@ -572,7 +584,7 @@ export class World {
   /** Long-horizon intent: flee, coil, hunt, eat, or drift. Stored in `wander`. */
   private chooseGoal(s: Snake): void {
     const r = radiusOf(s.mass);
-    const bold = s.temper;
+    const bold = clamp(s.temper + s.mass / 4000, 0, 1);
     const far = Math.hypot(s.x, s.y);
     if (far > ARENA_RADIUS * 0.86) {
       s.wander = Math.atan2(-s.y, -s.x) + randRange(-0.5, 0.5);

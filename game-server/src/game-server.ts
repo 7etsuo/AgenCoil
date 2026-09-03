@@ -56,6 +56,8 @@ interface Client {
   view: View;
   known: Set<string>;
   sentFood: Set<number>;
+  /** Sequence number of the last input applied, echoed in snapshots. */
+  seq: number;
   lastPing: number;
   alive: boolean;
 }
@@ -258,6 +260,7 @@ export class GameServer {
       view: { cx: 0, cy: 0, hw: 900, hh: 600 },
       known: new Set(),
       sentFood: new Set(),
+      seq: 0,
       lastPing: Date.now(),
       alive: true,
     };
@@ -400,6 +403,9 @@ export class GameServer {
   }
 
   private onInput(client: Client, r: Reader): void {
+    // New clients prefix a sequence number; older ones (still deployed on
+    // the platform frontend) do not. Tell them apart by length.
+    if (r.remaining >= 21) client.seq = r.u16();
     const angle = r.angle();
     const boost = r.u8() === 1;
     client.view = {
@@ -576,6 +582,7 @@ export class GameServer {
   }
 
   private sendSnapshot(c: Client): void {
+    if (c.seq) c.ws.send(new Writer().u8(S2C.ACK).u16(c.seq).finish());
     const w = new Writer()
       .u8(S2C.SNAP)
       .u32(this.tick)

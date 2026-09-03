@@ -818,6 +818,7 @@ export class CoilEngine {
       instance: this.net?.instance ?? "",
       rtt: this.net?.rttMs ?? 0,
       eatMisses: this.net?.eatMisses ?? 0,
+      diag: this.net?.diag ?? null,
       score: p ? Math.floor(p.mass) : 0,
       headX: p ? Math.round(p.x) : 0,
       headY: p ? Math.round(p.y) : 0,

@@ -6,7 +6,6 @@
  */
 import {
   BOOST_MIN_MASS,
-  INTERP_DELAY,
   dist2,
   radiusOf,
   speedOf,
@@ -77,8 +76,11 @@ const INPUT_HZ = 30;
 const EAT_CONFIRM_MS = 700;
 const OFFLINE_AFTER_MS = 6000;
 const SNAP_CORRECT_DIST = 140;
+/** Interpolation delay bounds; the live value tracks observed snapshot jitter. */
+const INTERP_MIN_MS = 110;
+const INTERP_MAX_MS = 260;
+const JITTER_WINDOW_MS = 6000;
 const TOKEN_KEY = "agencoil-resume";
-const FREEZE_MAX_MS = 450;
 
 export function defaultServerUrl(): string {
   const env = (import.meta.env.VITE_GAME_SERVER as string | undefined)?.trim();
@@ -109,17 +111,36 @@ export class NetSession {
     angle: number;
     mass: number;
     boosting: boolean;
+    ack: number;
   } | null = null;
+  /** Correction still to be applied to the predicted head, applied smoothly. */
+  private offset = { x: 0, y: 0 };
+  /** Predicted head at the moment each input was sent, keyed by sequence. */
+  private history: { seq: number; x: number; y: number; angle: number }[] = [];
+  private seq = 0;
+  private lastAck = 0;
+  /** Recent snapshot gaps, to size the interpolation delay. */
+  private gaps: { t: number; gap: number }[] = [];
+  private interpDelay = INTERP_MIN_MS;
   private lastInput = 0;
   private pingSent = 0;
-  /** When the predicted head first touched a body; the server has the verdict. */
-  private frozenSince = 0;
   /** Set on spawn: the next full entry for us carries the real body shape. */
   private awaitingBody = false;
   /** Orbs removed locally the moment the head reaches them, awaiting FOOD_DEL. */
   private pendingEats = new Map<number, { food: Food; t: number }>();
   /** Predicted eats the server never confirmed (diagnostic). */
   eatMisses = 0;
+  /** Diagnostics for the netcode: snapshot timing and prediction error. */
+  diag = {
+    snaps: 0,
+    gapMax: 0,
+    gapSum: 0,
+    snaps200: 0,
+    corrSum: 0,
+    corrMax: 0,
+    snapsHard: 0,
+  };
+  private lastSnapAt = 0;
 
   constructor(
     private readonly url: string,
@@ -233,9 +254,16 @@ export class NetSession {
     if (now - this.lastInput < 1000 / INPUT_HZ) return;
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.lastInput = now;
+    this.seq = (this.seq % 65535) + 1;
+    const me = this.world.player;
+    if (me) {
+      this.history.push({ seq: this.seq, x: me.x, y: me.y, angle: me.angle });
+      if (this.history.length > 90) this.history.shift();
+    }
     this.ws.send(
       new Writer()
         .u8(C2S.INPUT)
+        .u16(this.seq)
         .angle(angle)
         .u8(boost ? 1 : 0)
         .f32(view.cx)
@@ -280,8 +308,9 @@ export class NetSession {
         const angle = r.angle();
         const mass = r.f32();
         this.selfNid = nid;
-        this.frozenSince = 0;
         this.pendingEats.clear();
+        this.history = [];
+        this.offset = { x: 0, y: 0 };
         const id = String(nid);
         this.world.snakes = this.world.snakes.filter((s) => s.id !== id);
         const s = this.world.makeSnake(id, this.look?.name ?? "anon", this.look?.skin ?? 0, false);
@@ -385,6 +414,9 @@ export class NetSession {
           /* ignore */
         }
         break;
+      case S2C.ACK:
+        this.lastAck = r.u16();
+        break;
       case S2C.PONG: {
         r.u32();
         this.rttMs = Math.round(performance.now() - this.pingSent);
@@ -398,7 +430,23 @@ export class NetSession {
   private onSnap(r: Reader): void {
     r.u32(); // tick
     r.u32(); // server time (unused; receipt time drives interpolation)
+    const ack = this.lastAck;
     const now = performance.now();
+    if (this.lastSnapAt) {
+      const gap = now - this.lastSnapAt;
+      this.diag.snaps++;
+      this.diag.gapSum += gap;
+      if (gap > this.diag.gapMax) this.diag.gapMax = gap;
+      if (gap > 200) this.diag.snaps200++;
+      // Size the interpolation delay from the worst gap seen recently, so
+      // other snakes never run past their newest sample and jerk back.
+      this.gaps.push({ t: now, gap });
+      while (this.gaps.length && now - this.gaps[0]!.t > JITTER_WINDOW_MS) this.gaps.shift();
+      let worst = 0;
+      for (const g of this.gaps) if (g.gap > worst) worst = g.gap;
+      this.interpDelay = Math.min(INTERP_MAX_MS, Math.max(INTERP_MIN_MS, worst * 1.4));
+    }
+    this.lastSnapAt = now;
     const n = r.u16();
     for (let i = 0; i < n; i++) {
       const e = readSnakeEntry(r);
@@ -411,7 +459,9 @@ export class NetSession {
           angle: e.angle,
           mass: e.mass,
           boosting: e.boosting,
+          ack,
         };
+        this.reconcile(ack, e.x, e.y, e.angle);
         const me = this.world.snakes.find((s) => s.id === id);
         if (me && e.full && e.points && e.points.length > 1 && this.awaitingBody) {
           // A reattached snake gets its real body back instead of the
@@ -483,6 +533,44 @@ export class NetSession {
     }
   }
 
+  /**
+   * Compare the server's head with what we had predicted at the input it
+   * acknowledges. The difference is true prediction error, free of latency,
+   * and is folded into `offset` for the frame loop to apply gradually. A
+   * large error (teleport, hop, rebuilt snake) is applied at once.
+   */
+  private reconcile(ack: number, sx: number, sy: number, sangle: number): void {
+    const me = this.world.player;
+    if (!me) return;
+    let hist: { seq: number; x: number; y: number; angle: number } | undefined;
+    if (ack) {
+      const i = this.history.findIndex((h) => h.seq === ack);
+      if (i >= 0) {
+        hist = this.history[i];
+        this.history.splice(0, i + 1);
+      }
+    }
+    if (!hist) return;
+    const ex = sx - hist.x;
+    const ey = sy - hist.y;
+    const err = Math.hypot(ex, ey);
+    this.diag.corrSum += err;
+    if (err > this.diag.corrMax) this.diag.corrMax = err;
+    if (err > SNAP_CORRECT_DIST) {
+      this.diag.snapsHard++;
+      me.x += ex;
+      me.y += ey;
+      me.angle = sangle;
+      this.offset.x = 0;
+      this.offset.y = 0;
+      this.history = [];
+      return;
+    }
+    // Replace, not accumulate: each ack measures the whole remaining error.
+    this.offset.x = ex;
+    this.offset.y = ey;
+  }
+
   // ── per-frame ──────────────────────────────────────────────────────────────
 
   /**
@@ -491,7 +579,7 @@ export class NetSession {
    */
   update(dt: number, aim: Vec, wantBoost: boolean): void {
     const now = performance.now();
-    const at = now - INTERP_DELAY;
+    const at = now - this.interpDelay;
     for (const s of this.world.snakes) {
       if (s.id === this.selfId) continue;
       const buf = this.buffers.get(s.id);
@@ -510,42 +598,16 @@ export class NetSession {
     if (me) {
       this.world.steerToward(me, aim.x, aim.y, dt);
       me.boosting = wantBoost && me.mass > BOOST_MIN_MASS;
-      // Predict the move, but hold at the first touch of another body so the
-      // head does not visibly sink in while the server's verdict is in flight.
-      const px = me.x;
-      const py = me.y;
       this.world.moveHead(me, dt);
-      if (this.world.wouldCollide(me)) {
-        if (!this.frozenSince) this.frozenSince = now;
-        if (now - this.frozenSince < FREEZE_MAX_MS) {
-          me.x = px;
-          me.y = py;
-        }
-      } else {
-        this.frozenSince = 0;
-      }
       const srv = this.serverSelf;
       if (srv) {
-        // Where the server thinks we are by now, then ease toward it.
-        const elapsed = Math.min(0.3, (now - srv.t) / 1000);
-        const speed = speedOf(srv.mass, srv.boosting);
-        const sx = srv.x + Math.cos(srv.angle) * speed * elapsed;
-        const sy = srv.y + Math.sin(srv.angle) * speed * elapsed;
-        const ex = sx - me.x;
-        const ey = sy - me.y;
-        const err = Math.hypot(ex, ey);
-        if (err > SNAP_CORRECT_DIST) {
-          me.x = sx;
-          me.y = sy;
-          me.angle = srv.angle;
-        } else if (this.frozenSince) {
-          // hold still; the server will either kill us or move us on
-        } else {
-          const k = 1 - Math.pow(0.02, dt);
-          me.x += ex * k;
-          me.y += ey * k;
-          me.angle = wrapAngle(me.angle + wrapAngle(srv.angle - me.angle) * k * 0.5);
-        }
+        // Bleed off whatever offset reconciliation left, a little per frame,
+        // so corrections are never visible as jumps.
+        const k = 1 - Math.pow(0.05, dt);
+        me.x += this.offset.x * k;
+        me.y += this.offset.y * k;
+        this.offset.x *= 1 - k;
+        this.offset.y *= 1 - k;
         me.mass = lerp(me.mass, srv.mass, 1 - Math.pow(0.001, dt));
         if (me.invuln > 0) me.invuln = Math.max(0, me.invuln - dt);
       }
