@@ -40,7 +40,7 @@ node --experimental-strip-types --test src/lib/auth/sign-in-gate.test.ts
 
 Tests are plain `node --test`. Script tests live beside their module as `scripts/*.test.mjs`; the TS tests are the three files named in the `test` script in `package.json` (there is no glob for TS tests, so add new ones to that script).
 
-`npm run e2e` is the suite that matters for the game: `e2e/arena.test.mjs` boots the arena server on 8199 and Vite on 8198 (`e2e/helpers.mjs`), then checks the trail, a shared world across two tabs, reload resume, a server-replacement hop, the offline fallback, a 4x CPU-throttled phone frame rate, and the status endpoint. Run it before touching netcode.
+`npm run e2e` is the suite that matters for the game. `e2e/world.test.mjs` bundles the shared simulation with esbuild and checks the collision rules and the slither.io tuning directly, with no browser; `e2e/arena.test.mjs` boots the arena server on 8199 and Vite on 8198 (`e2e/helpers.mjs`), then checks the trail, a shared world across two tabs, reload resume, a server-replacement hop, the offline fallback, a 4x CPU-throttled phone frame rate, and the status endpoint. Run it before touching netcode.
 
 `npm test` currently fails 16 script tests on a fresh checkout because they read `.grok/skills/*` files that only exist in the sandbox. That is the baseline, not a regression signal. `npm run lint` has one pre-existing error in `src/lib/app-data/client.server.ts`.
 
@@ -74,7 +74,7 @@ The frontend at agencoil.grok.me is deployed by the Grok platform, not from this
 - `world.ts`: the arena. Three uses: offline (`playerId` steered by aim, bots when `host`), server (every player has a `PlayerInput` in `inputs`, bots run, all collisions judged), and client mirror (no stepping, just the entity store, the food grid keyed by cell, and the trail helpers). Snakes are path-history point lists whose last point is always the head; `recordTrail` commits a point once the head is one spacing from the previous committed point. Bots choose a goal every 0.2 s (flee, coil, hunt, eat, drift) and bend it toward open space every 0.08 s using a nine-heading clearance scan. Food has server-assigned ids (`foodById`).
 - `protocol.ts`: the binary wire format (`Writer`/`Reader` over `DataView`, one-byte type tags, `C2S` and `S2C` tables). Snake entries are head-only unless `full`, which adds identity, skin bands and a subsampled body.
 
-Collision rules match slither.io: your head touching any other body or head kills you, both heads die on a head-on hit, the rim kills without leaving remains, and remains are worth most of the dead snake's mass.
+Collision rules match slither.io: your head touching any other body or head kills you, both heads die on a head-on hit (kills are collected against the tick's starting state and applied together, so order does not matter), the rim kills without leaving remains, and remains are worth most of the dead snake's mass. Spawn protection (`invuln`, 1.6 s) is two-way: a protected snake neither dies nor kills.
 
 ### Client (`src/game/net.ts`, `engine.ts`, `render.ts`, `audio.ts`)
 
@@ -86,7 +86,7 @@ Collision rules match slither.io: your head touching any other body or head kill
 
 ### Server (`game-server/`)
 
-- `src/game-server.ts`: `GameServer` wraps one `World`, ticks at `SERVER_TICK_HZ` (40), snapshots at `SNAPSHOT_HZ` (20) and syncs food at `FOOD_SYNC_HZ` (10). Per client it tracks the view rect from the last input, the set of snakes it has been sent (`known`, so the first sighting is `full`), and the set of food ids it holds (`sentFood`, diffed against the cells covering the view). Deaths broadcast to clients that knew the snake; eats go only to the eater. Snake-on-snake deaths feed a coarse heat map (`hotKey`, 400-unit cells); cells with three or more deaths in ten minutes go into `World.hot`, which `findSpawn` avoids. A disconnect holds the snake for `DISCONNECT_GRACE_MS` before killing it. The loop pauses when no client has been connected for 30 s.
+- `src/game-server.ts`: `GameServer` wraps one `World`, ticks at `SERVER_TICK_HZ` (40), snapshots at `SNAPSHOT_HZ` (20) and syncs food at `FOOD_SYNC_HZ` (10). Per client it tracks the view rect from the last input, the set of snakes it has been sent (`known`, so the first sighting is `full`), and the set of food ids it holds (`sentFood`, diffed against the cells covering the view). Deaths broadcast to clients that knew the snake; eats go only to the eater. Snake-on-snake deaths feed a coarse heat map (`hotKey`, 400-unit cells); cells with three or more deaths in ten minutes go into `World.hot`, which `findSpawn` avoids. A disconnect holds the snake for `DISCONNECT_GRACE_MS` before killing it. A resume token is single-use per instance (`usedTokens`); presenting one while another socket still owns the snake transfers ownership rather than building a second copy; a `SPAWN` from a client whose snake is alive ends that life first. The loop pauses when no client has been connected for 30 s.
 - `src/daily.ts`: best length per name for the current UTC day, in memory, flushed to Postgres every 5 s when `DATABASE_URL` is set.
 - `src/vercel-entry.ts` exports an `http.Server` (what Vercel's WebSocket support expects); `dev.ts` listens on `PORT` for local runs.
 

@@ -21,7 +21,12 @@ export class DailyBoard {
   constructor() {
     const url = process.env.DATABASE_URL?.trim();
     if (url) {
-      this.pool = new pg.Pool({ connectionString: url, max: 2 });
+      this.pool = new pg.Pool({
+        connectionString: url,
+        max: 2,
+        // Be explicit about verification; pg warns about implicit sslmode.
+        ssl: /sslmode=(require|verify)/.test(url) ? { rejectUnauthorized: true } : undefined,
+      });
       this.ready = this.load().catch((err) => {
         console.error("[daily] load failed:", err?.message ?? err);
         this.pool = null;
@@ -54,12 +59,12 @@ export class DailyBoard {
 
   record(name: string, length: number): void {
     this.roll();
-    const key = name.trim().toLowerCase();
+    const key = name.trim();
     if (!key) return;
-    const prev = this.best.get(name) ?? 0;
+    const prev = this.best.get(key) ?? 0;
     if (length <= prev) return;
-    this.best.set(name, length);
-    this.dirty.add(name);
+    this.best.set(key, length);
+    this.dirty.add(key);
   }
 
   top(n: number): DailyEntry[] {

@@ -54,7 +54,6 @@ export interface Look {
 
 const ZOOM_MIN = 0.55;
 const ZOOM_MAX = 1.7;
-const CAM_LEAD = 0;
 /** How far ahead of the head the aim point sits, in world units. */
 const AIM_REACH = 240;
 const SPAWN_TIMEOUT_MS = 4000;
@@ -309,7 +308,7 @@ export class CoilEngine {
       this.best = score;
       writeBest(this.best);
     }
-    const st = this.online ? this.stats : null;
+    const st = this.online && world !== this.local ? this.stats : null;
     const rank = st ? st.rank : p ? alive.findIndex((s) => s.id === p.id) + 1 : 0;
     const count = st ? st.count : alive.length;
     const board = st
@@ -331,14 +330,18 @@ export class CoilEngine {
       watching: this.watchNid,
       deathReason: this.deathReason,
       killerName: this.killerName,
-      players: st?.clients ?? (this.online ? 1 : 0),
+      players: this.stats?.clients ?? (this.online ? 1 : 0),
       mode: this.net?.state ?? "offline",
       rtt: this.net?.rttMs ?? 0,
     };
   }
 
   private onNetState(s: NetState): void {
-    if (s === "offline" && this.phase === "play" && !this.local?.player) {
+    if (s === "offline" && this.spawnWait) {
+      this.spawnWait = 0;
+      this.net?.idle();
+      this.spawnLocal();
+    } else if (s === "offline" && this.phase === "play" && !this.local?.player) {
       // Lost the server mid-game: the snake stays there in its grace period,
       // but we cannot steer it, so end this life here.
       this.dieLocal("snake", null, null, "connection lost");
@@ -487,7 +490,8 @@ export class CoilEngine {
     this.refreshAim();
     this.applyKeyboardAim();
     const boost = this.phase === "play" && this.boosting;
-    if (this.online) {
+    const localLife = this.local?.player != null;
+    if (this.online && !localLife) {
       const net = this.net!;
       net.update(dt, this.pointer, boost);
       const me = net.world.player;
@@ -514,6 +518,8 @@ export class CoilEngine {
       const w = this.localWorld();
       w.step(dt, this.pointer.x, this.pointer.y, boost);
       this.handleLocalEvents(w);
+      // Keep the server mirror current so the switch back is seamless.
+      if (this.online) this.net!.update(dt, this.pointer, false);
     }
     this.stepDeathFx(dt);
     this.updateCam(dt);
@@ -686,11 +692,9 @@ export class CoilEngine {
     } else {
       const p = world.player;
       if (p) {
-        // Lead the camera a little into the direction of travel.
-        const tx = p.x + Math.cos(p.angle) * CAM_LEAD;
-        const ty = p.y + Math.sin(p.angle) * CAM_LEAD;
-        this.cam.x = lerp(this.cam.x, tx, 1 - Math.pow(0.0008, dt));
-        this.cam.y = lerp(this.cam.y, ty, 1 - Math.pow(0.0008, dt));
+        // The camera sits on the head, as in slither.io.
+        this.cam.x = lerp(this.cam.x, p.x, 1 - Math.pow(0.0008, dt));
+        this.cam.y = lerp(this.cam.y, p.y, 1 - Math.pow(0.0008, dt));
       }
     }
     const mass = world.player?.mass ?? this.deathMass;

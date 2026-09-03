@@ -115,6 +115,8 @@ export class GameServer {
   private readonly connectLog = new Map<string, number[]>();
   /** Death sites by coarse cell with timestamps, for spawn placement. */
   private readonly heat = new Map<number, number[]>();
+  /** Token signatures already redeemed, so a token cannot be replayed. */
+  private readonly usedTokens = new Map<string, number>();
   private nextNid = 1;
   private nextPlayer = 1;
   private tick = 0;
@@ -222,8 +224,11 @@ export class GameServer {
   private nidOf(sid: string): number {
     let n = this.nids.get(sid);
     if (n === undefined) {
-      n = this.nextNid++;
-      if (this.nextNid > 65000) this.nextNid = 1;
+      const taken = new Set(this.nids.values());
+      do {
+        n = this.nextNid++;
+        if (this.nextNid > 65000) this.nextNid = 1;
+      } while (taken.has(n));
       this.nids.set(sid, n);
     }
     return n;
@@ -325,19 +330,33 @@ export class GameServer {
     client.bands = sanitizeBands(readBands(r));
     const tokenText = r.remaining ? r.str() : "";
     if (client.sid && this.world.snakes.some((s) => s.id === client.sid && s.alive)) {
-      // Already playing: a repeated hello just updates the look next spawn.
+      // Already playing: a repeated hello just updates the look next spawn,
+      // and a respawn request ends the current life first so no snake is
+      // left running unowned.
       if (!respawn) return;
+      this.world.killSnake(client.sid);
+      client.sid = null;
     }
-    const token = tokenText && !respawn ? this.verifyToken(tokenText) : null;
+    const token = tokenText && !respawn ? this.redeemToken(tokenText) : null;
     let snake: Snake | null = null;
     if (token) {
       const held = this.world.snakes.find((s) => s.id === token.sid && s.alive);
       const timer = this.grace.get(token.sid);
-      if (held && timer) {
-        clearTimeout(timer);
+      const owner = held ? [...this.clients].find((c) => c !== client && c.sid === held.id) : null;
+      if (held && (timer || owner)) {
+        // Reattach. If another socket still owns the snake (the old
+        // connection has not closed yet), ownership moves here rather than a
+        // second copy being built.
+        if (timer) clearTimeout(timer);
         this.grace.delete(token.sid);
+        if (owner) {
+          owner.sid = null;
+          owner.known.clear();
+        }
         snake = held;
         snake.name = client.name;
+        snake.skin = client.skin;
+        snake.bands = client.bands;
       } else {
         // The snake lived on another instance (or was lost): rebuild it with
         // the same length near where it was.
@@ -419,14 +438,25 @@ export class GameServer {
     return `${payload}.${this.sign(payload)}`;
   }
 
+  /** Verify a token and mark it spent; a replayed token is refused. */
+  private redeemToken(text: string): Token | null {
+    const t = this.verifyToken(text);
+    if (!t) return null;
+    const sig = text.slice(text.indexOf(".") + 1);
+    const now = Date.now();
+    for (const [k, exp] of this.usedTokens) if (exp < now) this.usedTokens.delete(k);
+    if (this.usedTokens.has(sig)) return null;
+    this.usedTokens.set(sig, t.exp);
+    return t;
+  }
+
   private verifyToken(text: string): Token | null {
     const dot = text.indexOf(".");
     if (dot < 0) return null;
     const payload = text.slice(0, dot);
-    const sig = text.slice(dot + 1);
-    const expect = this.sign(payload);
-    if (sig.length !== expect.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(expect)))
-      return null;
+    const sigBuf = Buffer.from(text.slice(dot + 1));
+    const expectBuf = Buffer.from(this.sign(payload));
+    if (sigBuf.length !== expectBuf.length || !timingSafeEqual(sigBuf, expectBuf)) return null;
     try {
       const t = JSON.parse(Buffer.from(payload, "base64url").toString()) as Token;
       if (typeof t.mass !== "number" || t.exp < Date.now()) return null;
@@ -485,12 +515,10 @@ export class GameServer {
         if (c.known.has(s.id) || c.sid === s.id || (d.killerId && c.sid === d.killerId))
           c.ws.send(msg);
         c.known.delete(s.id);
-        if (c.sid === s.id) {
-          c.sid = null;
-          this.daily.record(s.name, Math.floor(s.mass));
-        }
+        if (c.sid === s.id) c.sid = null;
       }
       if (!s.isBot) this.daily.record(s.name, Math.floor(s.mass));
+      this.nids.delete(s.id);
       if (d.reason === "snake") this.recordDeath(s.x, s.y);
       this.world.inputs.delete(s.id);
       const g = this.grace.get(s.id);

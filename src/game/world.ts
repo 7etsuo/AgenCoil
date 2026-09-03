@@ -109,7 +109,10 @@ export class World {
   resetLocalBots(n: number): void {
     this.snakes = this.snakes.filter((s) => !s.isBot);
     const used = new Set(this.snakes.map((s) => s.name.toLowerCase()));
-    for (let i = 0; i < n; i++) this.spawnBot(used);
+    // The opening population has a spread of sizes; later respawns start
+    // small and earn their length, so no long body is ever laid across a
+    // player.
+    for (let i = 0; i < n; i++) this.spawnBot(used, true);
     this.desiredBots = n;
     this.botTimer = 0;
   }
@@ -145,14 +148,16 @@ export class World {
     return s;
   }
 
-  spawnBot(used: Set<string>): Snake {
+  spawnBot(used: Set<string>, grown = false): Snake {
     const name = pickBotName(used);
     used.add(name.toLowerCase());
     const s = this.makeSnake(`b${this.nextBotId++}`, name, (Math.random() * 16) | 0, true);
-    const roll = Math.random();
-    s.mass = START_MASS + Math.random() * 40;
-    if (roll < 0.35) s.mass += 60 + Math.random() * 160;
-    if (roll < 0.1) s.mass += 300 + Math.random() * 700;
+    s.mass = START_MASS + Math.random() * 20;
+    if (grown) {
+      const roll = Math.random();
+      if (roll < 0.35) s.mass += 60 + Math.random() * 160;
+      if (roll < 0.1) s.mass += 300 + Math.random() * 700;
+    }
     s.temper = Math.random();
     s.points = [];
     this.ensureTrail(s);
@@ -778,9 +783,10 @@ export class World {
 
   /** Would this head, where it is now, be touching any other snake? */
   wouldCollide(s: Snake): boolean {
+    if (s.invuln > 0) return false;
     const hr = radiusOf(s.mass) * 0.8;
     for (const o of this.snakes) {
-      if (o.id === s.id || !o.alive) continue;
+      if (o.id === s.id || !o.alive || o.invuln > 0) continue;
       const orad = radiusOf(o.mass);
       const hitR = hr + orad * 0.88;
       const hitR2 = hitR * hitR;
@@ -800,12 +806,20 @@ export class World {
   }
 
   private resolveKills(): void {
+    // Judge every head against the state at the start of the tick, so a
+    // head-on collision kills both snakes instead of only the one processed
+    // first.
+    const alive = new Set<string>();
+    for (const s of this.snakes) if (s.alive) alive.add(s.id);
+    const kills: { s: Snake; o: Snake }[] = [];
     for (const s of this.snakes) {
       if (!s.alive || s.invuln > 0) continue;
       if (!this.owned(s)) continue;
       const hr = radiusOf(s.mass) * 0.8;
       for (const o of this.snakes) {
-        if (o.id === s.id || !o.alive) continue;
+        // Spawn protection works both ways: a fresh snake neither dies nor
+        // kills, so nobody can be farmed by (or farm) a respawn.
+        if (o.id === s.id || !alive.has(o.id) || o.invuln > 0) continue;
         const orad = radiusOf(o.mass);
         const hitR = hr + orad * 0.88;
         const hitR2 = hitR * hitR;
@@ -813,7 +827,7 @@ export class World {
         if (dist2(s.x, s.y, o.x, o.y) > reach * reach) continue;
         // Head on head: both lose.
         if (dist2(s.x, s.y, o.x, o.y) <= hitR2) {
-          this.kill(s, "snake", o.id, o.name);
+          kills.push({ s, o });
           break;
         }
         const pts = o.points;
@@ -828,13 +842,14 @@ export class World {
           if ((a.x < minX && b.x < minX) || (a.x > maxX && b.x > maxX)) continue;
           if ((a.y < minY && b.y < minY) || (a.y > maxY && b.y > maxY)) continue;
           if (pointSegDist2(s.x, s.y, a.x, a.y, b.x, b.y) <= hitR2) {
-            this.kill(s, "snake", o.id, o.name);
+            kills.push({ s, o });
             break;
           }
         }
-        if (!s.alive) break;
+        if (kills.length && kills[kills.length - 1]!.s === s) break;
       }
     }
+    for (const k of kills) this.kill(k.s, "snake", k.o.id, k.o.name);
   }
 
   private kill(

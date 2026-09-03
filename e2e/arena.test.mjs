@@ -82,26 +82,27 @@ test("a replaced server instance rebuilds the snake from the resume token", asyn
 test("without a server the game falls back to the offline arena", async () => {
   const ctx = await env.browser.newContext({ viewport: { width: 1000, height: 700 } });
   const page = await ctx.newPage();
-  await page.goto(`http://127.0.0.1:8198/`, { waitUntil: "load" });
-  await page.evaluate(() => {
-    // Simulate a dead server: close the socket and block reconnects.
+  // Point every socket at a dead port before the page scripts run.
+  await page.addInitScript(() => {
     const orig = window.WebSocket;
     window.WebSocket = class extends orig {
-      constructor(_url) {
-        super("ws://127.0.0.1:1/dead");
+      constructor(_url, protocols) {
+        super("ws://127.0.0.1:1/dead", protocols);
       }
     };
   });
+  await page.goto(`http://127.0.0.1:8198/`, { waitUntil: "load" });
   await page.waitForTimeout(500);
   await page.fill("#nick", "offline");
   await page.getByRole("button", { name: "Play" }).click();
   let d = null;
-  for (let t = 0; t < 12; t++) {
+  for (let t = 0; t < 14; t++) {
     await page.waitForTimeout(1000);
     d = await page.evaluate(() => window.__coil);
-    if (d.phase === "play" && d.playerPts > 0 && d.snakes > 5) break;
+    if (d.mode === "offline" && d.phase === "play" && d.playerPts > 0 && d.snakes > 5) break;
   }
   assert.equal(d.phase, "play");
+  assert.equal(d.mode, "offline");
   assert.ok(d.snakes > 5, "local bots should populate the arena");
   await ctx.close();
 });

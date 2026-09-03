@@ -110,6 +110,8 @@ export class NetSession {
   private pingSent = 0;
   /** When the predicted head first touched a body; the server has the verdict. */
   private frozenSince = 0;
+  /** Set on spawn: the next full entry for us carries the real body shape. */
+  private awaitingBody = false;
 
   constructor(
     private readonly url: string,
@@ -284,6 +286,7 @@ export class NetSession {
         this.world.snakes.push(s);
         this.world.playerId = id;
         this.serverSelf = null;
+        this.awaitingBody = true;
         this.hooks.onSpawned(s);
         break;
       }
@@ -392,7 +395,13 @@ export class NetSession {
           boosting: e.boosting,
         };
         const me = this.world.snakes.find((s) => s.id === id);
-        if (me && e.full && e.points && !me.points.length) me.points = e.points;
+        if (me && e.full && e.points && e.points.length > 1 && this.awaitingBody) {
+          // A reattached snake gets its real body back instead of the
+          // straight placeholder laid on spawn.
+          me.points = e.points;
+          this.awaitingBody = false;
+          this.world.trimBody(me);
+        }
         continue;
       }
       let s = this.world.snakes.find((x) => x.id === id);

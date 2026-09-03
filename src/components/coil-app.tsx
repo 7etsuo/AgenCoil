@@ -21,6 +21,14 @@ function readBest(): number {
   }
 }
 
+function readMuted(): boolean {
+  try {
+    return localStorage.getItem(MUTE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 function readControls(): Controls {
   try {
     return localStorage.getItem(CONTROLS_KEY) === "stick" ? "stick" : "point";
@@ -100,11 +108,7 @@ export function CoilApp() {
     setNick(n);
     setSkin(readSkin());
     setCustom(readCustom());
-    try {
-      setMuted(localStorage.getItem(MUTE_KEY) === "1");
-    } catch {
-      /* ignore */
-    }
+    setMuted(readMuted());
     setTouch(window.matchMedia("(pointer: coarse)").matches);
     setBest(readBest());
     setControls(readControls());
@@ -121,7 +125,9 @@ export function CoilApp() {
     if (!canvas) return;
     const engine = new CoilEngine(canvas);
     engineRef.current = engine;
-    engine.audio.muted = muted;
+    // Read the saved preference directly: the state set by the first effect
+    // has not re-rendered yet when this runs.
+    engine.audio.muted = readMuted();
     engine.setControls(readControls());
     engine.start();
     const unsub = engine.subscribe(setHud);
@@ -130,8 +136,6 @@ export function CoilApp() {
       engine.destroy();
       engineRef.current = null;
     };
-    // The engine lives for the page; mute is applied through the toggle.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const locked = (i: number) => (UNLOCKS[i] ?? 0) > best;

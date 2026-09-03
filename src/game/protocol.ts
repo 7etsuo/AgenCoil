@@ -76,7 +76,11 @@ export class Writer {
     return this;
   }
   str(s: string): this {
-    const b = enc.encode(s.slice(0, 255));
+    let b = enc.encode(s);
+    if (b.length > 255) {
+      // Cut on a character boundary so the truncated text still decodes.
+      b = enc.encode(dec.decode(b.subarray(0, 255)).replace(/\uFFFD+$/u, ""));
+    }
     this.u8(b.length);
     this.need(b.length);
     this.bytes.set(b, this.pos);
@@ -85,7 +89,10 @@ export class Writer {
   }
   /** Angle in radians packed into 16 bits. */
   angle(a: number): this {
-    return this.i16(Math.round(((a + Math.PI) / (Math.PI * 2)) * 65535) - 32768);
+    let w = a;
+    while (w > Math.PI) w -= Math.PI * 2;
+    while (w < -Math.PI) w += Math.PI * 2;
+    return this.i16(Math.round(((w + Math.PI) / (Math.PI * 2)) * 65535) - 32768);
   }
   finish(): Uint8Array {
     return this.bytes.slice(0, this.pos);
