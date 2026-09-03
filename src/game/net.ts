@@ -331,6 +331,9 @@ export class NetSession {
         .f32(view.cy)
         .f32(view.hw)
         .f32(view.hh)
+        // View lag in 4 ms units: how far in the past other snakes are drawn
+        // (interpolation buffer) plus the round trip our inputs take.
+        .u8(Math.min(255, Math.round((this.interpDelay + this.rttMs) / 4)))
         .finish(),
     );
   }

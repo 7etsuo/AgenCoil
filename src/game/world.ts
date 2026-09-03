@@ -36,6 +36,8 @@ import {
 export const CELL = 96;
 /** Fraction of the summed radii at which two snakes count as touching. */
 const HIT_CONTACT = 0.95;
+/** Longest view lag a player may be compensated for, in seconds. */
+const MAX_LAG_COMP = 0.35;
 /** Bots past this length boost freely, shedding what they cannot use. */
 const BOT_SOFT_CAP = 2000;
 /** Bots past this length retire soon after, turning into a big pile of remains. */
@@ -105,6 +107,12 @@ export class World {
   /** How many bots this world should keep alive (0 when not host). */
   desiredBots = 0;
   inputs = new Map<string, PlayerInput>();
+  /**
+   * Per player: how far in the past (seconds) their screen shows other
+   * snakes. Collisions for that player are judged against other snakes
+   * rewound by that much, so what they saw is what kills them.
+   */
+  lags = new Map<string, number>();
   eats: EatEvent[] = [];
   deaths: DeathEvent[] = [];
   nears: NearEvent[] = [];
@@ -222,6 +230,7 @@ export class World {
     if (drop && s.alive) this.kill(s, "snake", null, null);
     this.snakes = this.snakes.filter((x) => x.id !== id);
     this.inputs.delete(id);
+    this.lags.delete(id);
   }
 
   upsertRemote(s: Snake): void {
@@ -900,6 +909,38 @@ export class World {
     return false;
   }
 
+  /**
+   * Where a snake's head was `lag` seconds ago and how much of its body
+   * existed then: the head is walked back along the body by the distance it
+   * has travelled since. Returns the index of the last body point that was
+   * already behind that head, and the rewound head position.
+   */
+  private rewind(o: Snake, lag: number): { cut: number; hx: number; hy: number } {
+    const pts = o.points;
+    let d = speedOf(o.mass, o.boosting) * lag;
+    let hx = o.x;
+    let hy = o.y;
+    let cut = pts.length - 1;
+    for (let i = pts.length - 1; i > 0 && d > 0; i--) {
+      const a = pts[i]!;
+      const b = pts[i - 1]!;
+      const seg = Math.hypot(a.x - b.x, a.y - b.y);
+      if (seg >= d) {
+        const t = seg > 0 ? d / seg : 0;
+        hx = a.x + (b.x - a.x) * t;
+        hy = a.y + (b.y - a.y) * t;
+        cut = i - 1;
+        d = 0;
+        break;
+      }
+      d -= seg;
+      hx = b.x;
+      hy = b.y;
+      cut = i - 1;
+    }
+    return { cut, hx, hy };
+  }
+
   private resolveKills(): void {
     // Judge every head against the state at the start of the tick, so a
     // head-on collision kills both snakes instead of only the one processed
@@ -911,6 +952,7 @@ export class World {
       if (!s.alive || s.invuln > 0) continue;
       if (!this.owned(s)) continue;
       const hr = radiusOf(s.mass);
+      const lag = Math.min(MAX_LAG_COMP, this.lags.get(s.id) ?? 0);
       for (const o of this.snakes) {
         // Spawn protection works both ways: a fresh snake neither dies nor
         // kills, so nobody can be farmed by (or farm) a respawn.
@@ -922,8 +964,10 @@ export class World {
         const hitR2 = hitR * hitR;
         const reach = lengthOf(o.mass) + hitR + 24;
         if (dist2(s.x, s.y, o.x, o.y) > reach * reach) continue;
+        // Lag compensation: the other snake as this player last saw it.
+        const rw = lag > 0 ? this.rewind(o, lag) : { cut: o.points.length - 1, hx: o.x, hy: o.y };
         // Head on head: both lose.
-        if (dist2(s.x, s.y, o.x, o.y) <= hitR2) {
+        if (dist2(s.x, s.y, rw.hx, rw.hy) <= hitR2) {
           kills.push({ s, o });
           break;
         }
@@ -933,7 +977,8 @@ export class World {
         const maxX = s.x + hitR;
         const minY = s.y - hitR;
         const maxY = s.y + hitR;
-        for (let i = 1; i < pts.length; i++) {
+        const end = Math.min(pts.length - 1, rw.cut);
+        for (let i = 1; i <= end; i++) {
           const a = pts[i - 1]!;
           const b = pts[i]!;
           if ((a.x < minX && b.x < minX) || (a.x > maxX && b.x > maxX)) continue;
@@ -944,6 +989,14 @@ export class World {
           }
         }
         if (kills.length && kills[kills.length - 1]!.s === s) break;
+        // The partial segment between the last kept point and the rewound head.
+        if (end < pts.length - 1) {
+          const a = pts[end]!;
+          if (pointSegDist2(s.x, s.y, a.x, a.y, rw.hx, rw.hy) <= hitR2) {
+            kills.push({ s, o });
+            break;
+          }
+        }
       }
     }
     for (const k of kills) this.kill(k.s, "snake", k.o.id, k.o.name);
@@ -966,6 +1019,7 @@ export class World {
       if (k && k.alive) k.kills++;
     }
     this.deaths.push({ snake: s, reason, killerId, killerName, pellets });
+    this.lags.delete(s.id);
   }
 
   /** Kill from outside the tick (a disconnected player is dropped, for one). */

@@ -622,12 +622,14 @@ export class GameServer {
       hw: Math.min(4000, r.f32()),
       hh: Math.min(3000, r.f32()),
     };
+    const lag = r.remaining >= 1 ? (r.u8() * 4) / 1000 : 0;
     if (!client.sid) return;
     const input = this.world.inputs.get(client.sid);
     if (input) {
       input.angle = angle;
       input.boost = boost;
     }
+    this.world.lags.set(client.sid, lag);
   }
 
   // ── tokens ─────────────────────────────────────────────────────────────────

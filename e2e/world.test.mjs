@@ -162,3 +162,26 @@ test("a close pass along a body counts as a near miss, once per cooldown", () =>
   assert.equal(nears, 1, `expected one near miss in the cooldown window, got ${nears}`);
   assert.ok(wall.alive && runner.alive);
 });
+
+test("lag compensation judges against the other snake as the player saw it", () => {
+  // The other snake drives along +x. The player's head sits just ahead of
+  // where that head is now, which is a head-on hit at zero lag, but with a
+  // 150 ms view lag the other head is rewound behind and there is no touch.
+  const build = (lag) => {
+    const world = new World(false);
+    world.host = true;
+    const other = place(world, "other", 0, 0, 0, 200);
+    const sum = model.radiusOf(20) + model.radiusOf(200);
+    place(world, "me", other.x + sum * 0.7, sum * 0.6, Math.PI / 2, 20);
+    world.lags.set("me", lag);
+    world.inputs.get("other").angle = 0;
+    // Freeze the player in place for the check: one step only.
+    world.step(1 / 40, 0, 0, false);
+    return world.deaths.map((d) => d.snake.id);
+  };
+  assert.ok(build(0).includes("me"), "at zero lag the player runs into the head");
+  assert.ok(
+    !build(0.15).includes("me"),
+    "with 150 ms of view lag the rewound head is not there yet",
+  );
+});
