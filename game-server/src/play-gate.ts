@@ -199,7 +199,7 @@ export class PlayGate {
 export function playGateFromEnv(signingSecret: string): PlayGate {
   const allowedHostnames = (
     process.env.TURNSTILE_HOSTNAMES ??
-    "mmo.agenc.ag,agencoil.vercel.app,agencoil.grok.me,localhost,127.0.0.1"
+    "snek.grok.me,mmo.agenc.ag,agencoil.vercel.app,agencoil.grok.me,localhost,127.0.0.1"
   ).split(",");
   return new PlayGate({
     secret: process.env.TURNSTILE_SECRET_KEY,

@@ -52,7 +52,7 @@ VITE_TURNSTILE_SITE_KEY=<site-key>
 
 # Game server (private)
 TURNSTILE_SECRET_KEY=<secret-key>
-TURNSTILE_HOSTNAMES=mmo.agenc.ag
+TURNSTILE_HOSTNAMES=snek.grok.me,agencoil.vercel.app
 TURNSTILE_ACTION=play
 ```
 
