@@ -155,7 +155,7 @@ export class ProfileStore {
   async load(key: string, name: string): Promise<Profile> {
     const cached = this.cache.get(key);
     if (cached) {
-      cached.name = name;
+      this.setName(cached, name);
       this.rollDay(cached);
       return cached;
     }
@@ -242,6 +242,12 @@ export class ProfileStore {
     p.progress = [0, 0, 0];
     p.done = [false, false, false];
     this.markDirty(p.key);
+  }
+
+  setName(p: Profile, name: string): void {
+    if (!name || name === "anon" || p.name === name) return;
+    p.name = name;
+    this.dirty.add(p.key);
   }
 
   /** Remember the look used for a life. */

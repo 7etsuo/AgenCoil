@@ -251,11 +251,19 @@ export class NetSession {
       this.attempts = 0;
       this.setState("online");
       if (this.deviceKey) {
+        let nick = this.look?.name ?? "";
+        if (!nick) {
+          try {
+            nick = localStorage.getItem("agencoil-nick") ?? "";
+          } catch {
+            /* ignore */
+          }
+        }
         ws.send(
           new Writer()
             .u8(C2S.IDENT)
             .str(this.deviceKey)
-            .str(this.look?.name ?? "anon")
+            .str(nick || "anon")
             .finish(),
         );
       }

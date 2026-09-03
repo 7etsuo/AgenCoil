@@ -516,6 +516,8 @@ export class GameServer {
       if (client.key && !client.profile)
         client.profile = await this.profiles.load(client.key, client.name);
       if (!client.alive) return;
+      // The identify message may have arrived before the nickname was known.
+      if (client.profile) this.profiles.setName(client.profile, client.name);
       const unlocks = client.profile?.unlocks ?? 0;
       client.trail =
         look.trail < UNLOCK_TRAIL.length &&
