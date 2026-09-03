@@ -116,6 +116,10 @@ export class World {
    * rewound by that much, so what they saw is what kills them.
    */
   lags = new Map<string, number>();
+  /** Arena mode modifiers (server), see challenges.ts MODES. */
+  remainsMult = 1;
+  boostAllowed = true;
+  hunger = 0;
   eats: EatEvent[] = [];
   deaths: DeathEvent[] = [];
   nears: NearEvent[] = [];
@@ -345,7 +349,7 @@ export class World {
   pelletsFrom(s: Snake): Food[] {
     const out: Food[] = [];
     const n = Math.round(clamp(8 + s.mass * 0.3, 8, 150));
-    const each = Math.max(1, (s.mass * 0.85) / n);
+    const each = Math.max(1, (s.mass * 0.85 * this.remainsMult) / n);
     const pts = s.points.length ? s.points : [{ x: s.x, y: s.y }];
     for (let i = 0; i < n; i++) {
       const p = pts[((i / n) * (pts.length - 1)) | 0]!;
@@ -380,7 +384,8 @@ export class World {
       const input = this.inputs.get(s.id);
       if (input) {
         this.steerHeading(s, input.angle, dt);
-        s.boosting = input.boost && s.mass > BOOST_MIN_MASS;
+        s.boosting = this.boostAllowed && input.boost && s.mass > BOOST_MIN_MASS;
+        if (this.hunger > 0) s.mass = Math.max(MIN_MASS, s.mass - s.mass * this.hunger * dt);
         this.advance(s, dt);
       } else if (s.id === this.playerId) {
         this.steerToward(s, aimX, aimY, dt);

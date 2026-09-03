@@ -69,7 +69,7 @@ development and existing test environments.
 npm run e2e
 ```
 
-Boots a private server and dev server, then drives real browsers through the trail, shared world, reload resume, server-replacement hop, offline fallback, throttled phone frame rate, and server status.
+Boots a private server and dev server, then drives real browsers through the trail, shared world, reload resume, server-replacement hop, offline fallback, throttled phone frame rate, and server status. `e2e/world.test.mjs` checks the shared simulation rules (collisions, lag compensation, arena modes) and `e2e/rules.test.mjs` checks streaks, leagues, levels, the hourly mode clock and seasons without a browser.
 
 ## Stack
 

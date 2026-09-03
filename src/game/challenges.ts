@@ -15,11 +15,91 @@ export interface Challenge {
   unlock: number;
 }
 
-/** Cosmetic ids. Trails 1..3 and death effects 1..2 map to unlock bits. */
-export const TRAILS = ["none", "sparks", "ember", "rainbow"] as const;
-export const DEATH_FX = ["pop", "ring", "shatter"] as const;
-export const UNLOCK_TRAIL = [0, 1, 2, 4] as const; // bit per trail id
-export const UNLOCK_DEATH = [0, 8, 16] as const; // bit per death fx id
+/**
+ * Cosmetic ids. Trails 1..3 and death effects 1..2 come from challenges;
+ * trails 4..5 and death effects 3..4 come from streak milestones.
+ */
+export const TRAILS = ["none", "sparks", "ember", "rainbow", "frost", "void"] as const;
+export const DEATH_FX = ["pop", "ring", "shatter", "nova", "confetti"] as const;
+export const UNLOCK_TRAIL = [0, 1, 2, 4, 32, 128] as const; // bit per trail id
+export const UNLOCK_DEATH = [0, 8, 16, 64, 256] as const; // bit per death fx id
+
+/** Daily streak milestones and the unlock bit each grants. */
+export const STREAK_MILESTONES: { days: number; unlock: number; label: string }[] = [
+  { days: 3, unlock: 32, label: "frost trail" },
+  { days: 7, unlock: 64, label: "nova death" },
+  { days: 14, unlock: 128, label: "void trail" },
+  { days: 30, unlock: 256, label: "confetti death" },
+];
+/** Games played per earned streak freeze; at most one banked. */
+export const FREEZE_EVERY_GAMES = 5;
+
+/** Weekly leagues by weekly best length. */
+export const LEAGUES = [
+  { name: "Bronze", min: 0 },
+  { name: "Silver", min: 300 },
+  { name: "Gold", min: 800 },
+  { name: "Platinum", min: 1500 },
+  { name: "Diamond", min: 3000 },
+] as const;
+
+export function leagueOf(weekBest: number): number {
+  let tier = 0;
+  LEAGUES.forEach((l, i) => {
+    if (weekBest >= l.min) tier = i;
+  });
+  return tier;
+}
+
+/** Evolution level from total length eaten across all runs. */
+export function levelOf(eaten: number): number {
+  return Math.floor(Math.sqrt(Math.max(0, eaten) / 300));
+}
+
+/** Titles earned from lifetime stats, shown next to a name. */
+export function titleOf(p: {
+  kills: number;
+  survive: number;
+  nearTotal: number;
+  bountyTotal: number;
+}): string {
+  if (p.bountyTotal >= 3) return "Bounty Hunter";
+  if (p.nearTotal >= 200) return "Untouchable";
+  if (p.kills >= 50) return "Hunter";
+  if (p.survive >= 600) return "Survivor";
+  return "";
+}
+
+/** Hourly arena modes: active for the first 15 minutes of every hour. */
+export const MODES = [
+  { id: 1, name: "double remains", text: "Remains are worth twice as much" },
+  { id: 2, name: "no boost", text: "Nobody can boost" },
+  { id: 3, name: "hunger", text: "Length drains slowly, keep eating" },
+  { id: 4, name: "tiny", text: "No comebacks, everyone starts fresh" },
+] as const;
+export const MODE_MINUTES = 15;
+
+export function modeNow(now = Date.now()): { id: number; secsLeft: number; secsToNext: number } {
+  const d = new Date(now);
+  const minute = d.getUTCMinutes();
+  const sec = d.getUTCSeconds();
+  const hourIndex = Math.floor(now / 3_600_000);
+  const active = minute < MODE_MINUTES;
+  const id = active ? MODES[hourIndex % MODES.length]!.id : 0;
+  const secsLeft = active ? (MODE_MINUTES - minute) * 60 - sec : 0;
+  const secsToNext = active ? 0 : (60 - minute) * 60 - sec;
+  return { id, secsLeft, secsToNext };
+}
+
+/** Six-week seasons counted from an epoch. */
+const SEASON_EPOCH = Date.UTC(2026, 8, 7); // Monday 2026-09-07
+const SEASON_MS = 6 * 7 * 86_400_000;
+export function seasonOf(now = Date.now()): number {
+  return Math.max(1, Math.floor((now - SEASON_EPOCH) / SEASON_MS) + 1);
+}
+export function seasonEndsAt(now = Date.now()): number {
+  return SEASON_EPOCH + seasonOf(now) * SEASON_MS;
+}
 
 const POOL: Omit<Challenge, "id">[] = [
   { kind: "length", target: 300, text: "Reach length 300", unlock: 1 },

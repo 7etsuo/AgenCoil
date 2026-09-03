@@ -29,6 +29,14 @@ export const DISCONNECT_GRACE_MS = 10_000;
 export const MAX_CUSTOM_BANDS = 6;
 /** Bots on the authoritative server, where CPU is cheaper than an empty arena. */
 export const SERVER_BOTS = 50;
+/** Fewest bots the server keeps when the arena is crowded with players. */
+export const SERVER_BOTS_MIN = 12;
+/**
+ * Players per server instance before newcomers are told to try again.
+ * Measured: 150 players cost 8 ms of every 25 ms tick on a fast core; the
+ * platform's CPU is several times slower, so the ceiling is set well under.
+ */
+export const MAX_PLAYERS_PER_INSTANCE = 60;
 export const MAX_SCALE = 4.86;
 /** Near miss: head passes within this multiple of the summed radii, without touching. */
 export const NEAR_FACTOR = 1.9;
@@ -42,6 +50,8 @@ export const SWARM_EVERY_S = 200;
 export const SWARM_ORBS = 70;
 export const SWARM_DURATION_S = 45;
 export const COMEBACK_KEEP = 0.25;
+/** Hunger mode: fraction of length lost per second. */
+export const HUNGER_RATE = 0.004;
 export const COMEBACK_WINDOW_MS = 6000;
 export const BASE_WIDTH = 29;
 
@@ -101,6 +111,8 @@ export interface Snake {
   travel?: number[];
   /** Server side: body points trimmed off the tail recently, oldest first. */
   tailHist?: Vec[];
+  /** Evolution level (v2 clients receive it in full entries). */
+  level?: number;
 }
 
 export interface Camera {

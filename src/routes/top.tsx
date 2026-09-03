@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { SKINS } from "@/game/model";
+import { LEAGUES, leagueOf } from "@/game/challenges";
 import { serverHttpUrl } from "@/game/net";
 
 export const Route = createFileRoute("/top")({ component: TopPage });
@@ -15,7 +16,7 @@ interface Row {
   bands: string[];
 }
 
-type Kind = "alltime" | "weekly";
+type Kind = "alltime" | "weekly" | "season";
 
 function stripe(bands: string[]): string {
   const n = bands.length;
@@ -27,6 +28,7 @@ function TopPage() {
   const [kind, setKind] = useState<Kind>("alltime");
   const [rows, setRows] = useState<Row[] | null>(null);
   const [week, setWeek] = useState("");
+  const [season, setSeason] = useState(0);
   const [error, setError] = useState(false);
 
   useEffect(() => {
@@ -35,10 +37,11 @@ function TopPage() {
     setError(false);
     fetch(`${serverHttpUrl()}?top=${kind}`)
       .then((r) => r.json())
-      .then((j: { rows: Row[]; week?: string }) => {
+      .then((j: { rows: Row[]; week?: string; season?: number }) => {
         if (cancelled) return;
         setRows(j.rows ?? []);
         setWeek(j.week ?? "");
+        setSeason(j.season ?? 0);
       })
       .catch(() => !cancelled && setError(true));
     return () => {
@@ -54,22 +57,28 @@ function TopPage() {
             <ArrowLeft size={16} /> back to the arena
           </Link>
           <div className="flex gap-2 text-xs">
-            {(["alltime", "weekly"] as const).map((k) => (
+            {(["alltime", "weekly", "season"] as const).map((k) => (
               <button
                 key={k}
                 type="button"
                 onClick={() => setKind(k)}
                 className={`rounded-md border px-3 py-1.5 ${kind === k ? "border-accent text-fg" : "border-line text-muted hover:text-fg"}`}
               >
-                {k === "alltime" ? "all time" : `this week${week ? ` · ${week}` : ""}`}
+                {k === "alltime"
+                  ? "all time"
+                  : k === "weekly"
+                    ? `this week${week ? ` · ${week}` : ""}`
+                    : `season${season ? ` ${season}` : ""}`}
               </button>
             ))}
           </div>
         </div>
         <h1 className="mt-6 text-3xl font-semibold tracking-tight">Top players</h1>
         <p className="mt-1 text-sm text-muted">
-          Longest single run, {kind === "alltime" ? "ever" : "this week"}. Kills and games are all
-          time.
+          Longest single run,{" "}
+          {kind === "alltime" ? "ever" : kind === "weekly" ? "this week" : "this season"}. Kills and
+          games are all time.
+          {kind === "weekly" && " Leagues promote and relegate every Monday."}
         </p>
         {error && <p className="mt-6 text-sm text-danger">Could not reach the arena server.</p>}
         {rows && rows.length === 0 && !error && (
@@ -88,7 +97,15 @@ function TopPage() {
                     ),
                   }}
                 />
-                <span className="flex-1 truncate font-medium">{r.name}</span>
+                <span className="flex-1 truncate font-medium">
+                  {r.name}
+                  {kind === "weekly" && (
+                    <span className="ml-2 text-xs text-subtle">
+                      {LEAGUES[leagueOf(r.best)]!.name}
+                    </span>
+                  )}
+                  {r.kills >= 50 && <span className="ml-2 text-xs text-[#f0c14a]">Hunter</span>}
+                </span>
                 <span className="hidden text-xs text-subtle sm:inline">
                   {r.kills} kills · {r.games} games
                 </span>

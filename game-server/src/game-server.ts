@@ -12,6 +12,7 @@ import { WebSocketServer, type WebSocket, type RawData } from "ws";
 import {
   ARENA_RADIUS,
   BOUNTY_MIN_MASS,
+  HUNGER_RATE,
   BOUNTY_RATE,
   COMEBACK_KEEP,
   COMEBACK_WINDOW_MS,
@@ -23,6 +24,8 @@ import {
   unpackSkin,
   FOOD_SYNC_HZ,
   SERVER_BOTS,
+  SERVER_BOTS_MIN,
+  MAX_PLAYERS_PER_INSTANCE,
   MAX_CUSTOM_BANDS,
   MAX_NET_POINTS,
   SERVER_TICK_HZ,
@@ -46,7 +49,15 @@ import {
 } from "../../src/game/protocol";
 import { DailyBoard } from "./daily";
 import { ProfileStore, type Profile } from "./profiles";
-import { UNLOCK_DEATH, UNLOCK_TRAIL, isoWeek, type LifeStats } from "../../src/game/challenges";
+import {
+  UNLOCK_DEATH,
+  UNLOCK_TRAIL,
+  isoWeek,
+  levelOf,
+  modeNow,
+  seasonOf,
+  type LifeStats,
+} from "../../src/game/challenges";
 import { playGateFromEnv } from "./play-gate";
 
 interface View {
@@ -83,6 +94,7 @@ interface Client {
   deathAt: number;
   deathMass: number;
   bountied: boolean;
+  lastEmote: number;
   /** Input fingerprint for automated-play detection. */
   fp: { lastAt: number; lastAngle: number; n: number; sumDt: number; sumDt2: number; same: number };
   lastPing: number;
@@ -204,6 +216,7 @@ export class GameServer {
   private lastActivity = Date.now();
   private startedAt = Date.now();
   private stepMs = 0;
+  private loopMs = 0;
   private wss: WebSocketServer | null = null;
 
   constructor() {
@@ -230,11 +243,11 @@ export class GameServer {
     const url = new URL(req.url ?? "/", "http://arena.local");
     const path = url.pathname;
     const top = url.searchParams.get("top");
-    if (top === "alltime" || top === "weekly") {
+    if (top === "alltime" || top === "weekly" || top === "season") {
       res.setHeader("cache-control", "public, max-age=30");
       try {
         const rows = await this.profiles.top(top, 100);
-        res.end(JSON.stringify({ kind: top, week: isoWeek(), rows }));
+        res.end(JSON.stringify({ kind: top, week: isoWeek(), season: seasonOf(), rows }));
       } catch {
         res.end(JSON.stringify({ kind: top, rows: [] }));
       }
@@ -297,6 +310,8 @@ export class GameServer {
       uptimeSec: Math.round((Date.now() - this.startedAt) / 1000),
       tick: this.tick,
       stepMs: Math.round(this.stepMs * 100) / 100,
+      capacity: MAX_PLAYERS_PER_INSTANCE,
+      loopMs: Math.round(this.loopMs * 100) / 100,
       playGate: this.playGate.enabled,
       hot: this.hotSpots(12),
       daily: this.daily.top(3),
@@ -345,6 +360,7 @@ export class GameServer {
     const dt = 1 / SERVER_TICK_HZ;
     this.timer = setInterval(() => {
       const now = Date.now();
+      const t0 = performance.now();
       acc += Math.min(0.25, (now - last) / 1000);
       last = now;
       let steps = 0;
@@ -354,6 +370,8 @@ export class GameServer {
         steps++;
       }
       if (acc > dt * 2) acc = dt;
+      // Whole interval cost: simulation plus every client's broadcast.
+      this.loopMs = this.loopMs * 0.9 + (performance.now() - t0) * 0.1;
       if (this.clients.size === 0 && now - this.lastActivity > IDLE_STOP_MS) this.stopLoop();
     }, 1000 / SERVER_TICK_HZ);
   }
@@ -385,8 +403,26 @@ export class GameServer {
     const recent = (this.connectLog.get(ip) ?? []).filter((t) => now - t < 60_000);
     recent.push(now);
     this.connectLog.set(ip, recent);
-    if (recent.length > CONNECTS_PER_MINUTE || (this.connsByIp.get(ip) ?? 0) >= MAX_CONNS_PER_IP) {
+    // Loopback is exempt from the per-address caps so local load tests can
+    // open hundreds of sockets; it never appears behind the platform proxy.
+    const local = ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+    if (
+      !local &&
+      (recent.length > CONNECTS_PER_MINUTE || (this.connsByIp.get(ip) ?? 0) >= MAX_CONNS_PER_IP)
+    ) {
       ws.close(1008, "too many connections");
+      return;
+    }
+    // A full instance turns newcomers away with a retry hint; on a platform
+    // that scales instances by concurrency the retry lands elsewhere.
+    if (this.clients.size >= MAX_PLAYERS_PER_INSTANCE) {
+      ws.send(
+        new Writer()
+          .u8(S2C.FULL)
+          .u16(3 + Math.floor(Math.random() * 4))
+          .finish(),
+      );
+      ws.close(1013, "arena full");
       return;
     }
     this.connsByIp.set(ip, (this.connsByIp.get(ip) ?? 0) + 1);
@@ -414,6 +450,7 @@ export class GameServer {
       deathAt: 0,
       deathMass: 0,
       bountied: false,
+      lastEmote: 0,
       fp: { lastAt: 0, lastAngle: 0, n: 0, sumDt: 0, sumDt2: 0, same: 0 },
       lastPing: Date.now(),
       alive: true,
@@ -427,7 +464,13 @@ export class GameServer {
     ws.on("close", () => this.onClose(client));
     ws.on("error", () => this.onClose(client));
     ws.send(
-      new Writer().u8(S2C.WELCOME).str(this.instance).f32(ARENA_RADIUS).u8(SERVER_TICK_HZ).finish(),
+      new Writer()
+        .u8(S2C.WELCOME)
+        .str(this.instance)
+        .f32(ARENA_RADIUS)
+        .u8(SERVER_TICK_HZ)
+        .u8(2)
+        .finish(),
     );
   }
 
@@ -480,6 +523,7 @@ export class GameServer {
           console.error("[hello] failed:", (err as Error)?.message ?? err);
         });
       else if (type === C2S.INPUT) this.onInput(client, r);
+      else if (type === C2S.EMOTE) this.onEmote(client, r.u8());
       else if (type === C2S.IDENT)
         void this.onIdent(client, r).catch((err) => {
           console.error("[ident] failed:", (err as Error)?.message ?? err);
@@ -604,6 +648,7 @@ export class GameServer {
       if (
         respawn &&
         comeback &&
+        modeNow().id !== 4 &&
         !client.comebackUsed &&
         client.deathAt &&
         now - client.deathAt < COMEBACK_WINDOW_MS
@@ -625,6 +670,9 @@ export class GameServer {
       const best = client.profile?.best ?? 0;
       if (best >= 500) this.spawnNearTop(snake);
       else if (best < 100) this.spawnQuiet(snake);
+      // A first life gets a small, timid bot placed just ahead: the easiest
+      // possible first kill, which is what turns a visitor into a player.
+      if (client.profile && client.profile.games === 0) this.spawnHelperBot(snake);
       // Friends spawn together: near any live member of the same party.
       const mate = client.party ? this.partyMember(client.party, snake.id) : null;
       if (mate) {
@@ -638,6 +686,7 @@ export class GameServer {
     }
     snake.trail = client.trail;
     snake.deathFx = client.deathFx;
+    snake.level = client.profile ? levelOf(client.profile.eaten) : 0;
     client.sid = snake.id;
     client.known.clear();
     client.life = {
@@ -675,6 +724,17 @@ export class GameServer {
     }
   }
 
+  /** Broadcast a reaction above a live snake to everyone who can see it. */
+  private onEmote(client: Client, id: number): void {
+    if (!client.sid || id > 3) return;
+    const now = Date.now();
+    if (now - client.lastEmote < 1500) return;
+    client.lastEmote = now;
+    const msg = new Writer().u8(S2C.EMOTE).u16(this.nidOf(client.sid)).u8(id).finish();
+    for (const c of this.clients)
+      if (c.v2 && (c.known.has(client.sid) || c === client)) c.ws.send(msg);
+  }
+
   /** A v2 client introducing itself before playing: load and send its profile. */
   private async onIdent(client: Client, r: Reader): Promise<void> {
     const key = r
@@ -689,6 +749,20 @@ export class GameServer {
     if (!client.alive) return;
     void this.sendProfile(client);
     if (this.event && this.event.until > Date.now()) this.sendEvent(client);
+  }
+
+  private spawnHelperBot(snake: Snake): void {
+    const used = new Set(this.world.snakes.map((s) => s.name.toLowerCase()));
+    const bot = this.world.spawnBot(used);
+    bot.mass = 14;
+    bot.temper = 0;
+    bot.angle = snake.angle;
+    const at = {
+      x: snake.x + Math.cos(snake.angle) * 420 + Math.cos(snake.angle + Math.PI / 2) * 60,
+      y: snake.y + Math.sin(snake.angle) * 420 + Math.sin(snake.angle + Math.PI / 2) * 60,
+    };
+    this.moveSnake(bot, at);
+    this.nidOf(bot.id);
   }
 
   private moveSnake(snake: Snake, at: { x: number; y: number }): void {
@@ -763,6 +837,14 @@ export class GameServer {
         .u8(Math.min(255, p.weekDone))
         .u8(p.earned.includes(p.week) ? 1 : 0)
         .u32(p.weekBest)
+        .u16(Math.min(65535, p.streak))
+        .u8(Math.min(255, p.freezes))
+        .u8(p.prevTier)
+        .u32(p.eaten)
+        .u32(p.nearTotal)
+        .u16(Math.min(65535, p.bountyTotal))
+        .u32(p.seasonBest)
+        .u16(p.season)
         .finish(),
     );
     const list = this.profiles.challenges(p);
@@ -943,7 +1025,18 @@ export class GameServer {
     this.trackLives();
     if (this.tick % (SERVER_TICK_HZ * SWARM_EVERY_S) === 0 && this.clients.size) this.startSwarm();
 
-    const snapEvery = Math.max(1, Math.round(SERVER_TICK_HZ / SNAPSHOT_HZ));
+    // Under load: fewer bots as players fill the arena, and snapshots at
+    // 20 Hz instead of 30 when a step is getting expensive.
+    if (this.tick % SERVER_TICK_HZ === 0) {
+      const players = this.clients.size;
+      this.world.desiredBots = Math.max(SERVER_BOTS_MIN, SERVER_BOTS - Math.floor(players * 0.6));
+      const mode = modeNow().id;
+      this.world.remainsMult = mode === 1 ? 2 : 1;
+      this.world.boostAllowed = mode !== 2;
+      this.world.hunger = mode === 3 ? HUNGER_RATE : 0;
+    }
+    const heavy = this.stepMs > 6;
+    const snapEvery = Math.max(1, Math.round(SERVER_TICK_HZ / (heavy ? 20 : SNAPSHOT_HZ)));
     const foodEvery = Math.max(1, Math.round(SERVER_TICK_HZ / FOOD_SYNC_HZ));
     if (this.tick % snapEvery === 0) for (const c of this.clients) this.sendSnapshot(c);
     if (this.tick % foodEvery === 0) for (const c of this.clients) this.sendFood(c);
@@ -1070,8 +1163,14 @@ export class GameServer {
       noboostLength: Math.floor(life.noboostLength),
       bounty: life.bounty,
     };
-    const completed = this.profiles.recordLife(c.profile, stats, { x: s.x, y: s.y });
+    const { completed, milestones, freezeEarned } = this.profiles.recordLife(c.profile, stats, {
+      x: s.x,
+      y: s.y,
+    });
     for (const ch of completed) this.notice(c, 2, `challenge complete: ${ch.text}`);
+    for (const m of milestones) this.notice(c, 2, `streak milestone: ${m} unlocked`);
+    if (freezeEarned)
+      this.notice(c, 0, "streak freeze banked: one missed day will not break your streak");
     void this.sendProfile(c);
   }
 
@@ -1132,16 +1231,27 @@ export class GameServer {
       .u8(S2C.SNAP)
       .u32(this.tick)
       .u32(Date.now() >>> 0);
+    // Snakes near the centre of the view update every snapshot; those out in
+    // the margin update every other one, which halves traffic on a zoomed-out
+    // screen full of bodies. The client's interpolation tolerates the gap.
+    const half = this.tick % 2 === 0;
+    const shrink = -Math.max(c.view.hw, c.view.hh) * 0.2;
     const visible: Snake[] = [];
-    for (const s of this.world.snakes) if (s.alive && this.snakeVisible(c, s)) visible.push(s);
-    w.u16(visible.length);
     const seen = new Set<string>();
+    for (const s of this.world.snakes) {
+      if (!s.alive || !this.snakeVisible(c, s)) continue;
+      seen.add(s.id);
+      const far = s.id !== c.sid && !this.inView(c.view, s.x, s.y, shrink);
+      if (far && !half && c.known.has(s.id)) continue;
+      visible.push(s);
+    }
+    w.u16(visible.length);
     for (const s of visible) {
       const full = !c.known.has(s.id);
       const packed = s.trail ? { ...s, skin: packSkin(s.skin, s.trail) } : s;
       writeSnakeEntry(w, this.nidOf(s.id), packed, full, MAX_NET_POINTS);
+      if (full && c.v2) w.u8(Math.min(255, s.level ?? 0));
       c.known.add(s.id);
-      seen.add(s.id);
     }
     const gone: number[] = [];
     for (const sid of c.known) {
@@ -1233,6 +1343,21 @@ export class GameServer {
         .u16(me?.kills ?? 0)
         .u16(this.clients.size);
       w.raw(tail);
+      if (c.v2) {
+        // Party members' names and lengths, then the arena mode clock.
+        const mates: Snake[] = [];
+        if (c.party) {
+          for (const sid of this.parties.get(c.party) ?? []) {
+            if (sid === c.sid) continue;
+            const m = this.world.snakes.find((x) => x.id === sid && x.alive);
+            if (m) mates.push(m);
+          }
+        }
+        w.u8(Math.min(8, mates.length));
+        for (const m of mates.slice(0, 8)) w.str(m.name).u32(Math.floor(m.mass));
+        const mode = modeNow();
+        w.u8(mode.id).u16(Math.min(65535, mode.secsLeft)).u16(Math.min(65535, mode.secsToNext));
+      }
       c.ws.send(w.finish());
     }
   }

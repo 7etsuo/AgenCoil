@@ -50,6 +50,13 @@ export interface HudState {
   bountyOnYou: number;
   /** Who the menu camera is following. */
   watchingTop: { name: string; mass: number } | null;
+  /** Tutorial hint for a first life, if any. */
+  hint: string | null;
+  firstLife: boolean;
+  party: { name: string; mass: number }[];
+  arenaMode: { id: number; secsLeft: number; secsToNext: number };
+  /** A clip is ready to save (see ClipRecorder). */
+  clipReady: boolean;
   killNotice: string | null;
   /** Recent notable deaths, newest last. */
   feed: string[];
@@ -163,6 +170,10 @@ export class CoilEngine {
   private deathBeatUntil = 0;
   private lastEatAt = 0;
   private eatCombo = 0;
+  private spawnedAt = 0;
+  private firstKillDone = false;
+  private emotes = new Map<string, { id: number; until: number }>();
+  clips: ClipRecorder | null = null;
   private deathRank = 0;
   private deathCount = 0;
   private dbgWall = 0;
@@ -209,6 +220,9 @@ export class CoilEngine {
         onEvent: (e) => {
           this.event = e;
           this.pushFeed("golden swarm spotted, check the map");
+        },
+        onEmote: (nid, id) => {
+          this.emotes.set(String(nid), { id, until: performance.now() + 2200 });
         },
         onNotice: (kind, text) => {
           if (kind === 3) {
@@ -290,6 +304,7 @@ export class CoilEngine {
     this.audio.stopMusic();
     this.audio.setDanger(0);
     this.audio.setHeartbeat(false);
+    this.clips?.stop();
     this.net?.close();
     window.removeEventListener("resize", this.onResize);
     window.removeEventListener("keydown", this.onKeyDown);
@@ -307,6 +322,25 @@ export class CoilEngine {
   setBoost(on: boolean): void {
     this.holdBoost = on;
     this.syncBoost();
+  }
+
+  /** Send a quick reaction; also shown locally at once. */
+  emote(id: number): void {
+    if (this.phase !== "play") return;
+    this.net?.emote(id);
+    const p = this.world.player;
+    if (p) this.emotes.set(p.id, { id, until: performance.now() + 2200 });
+  }
+
+  /** Start recording rolling clips of the canvas (desktop by default). */
+  enableClips(on: boolean): void {
+    if (on && !this.clips) {
+      this.clips = new ClipRecorder(this.canvas);
+      this.clips.start();
+    } else if (!on && this.clips) {
+      this.clips.stop();
+      this.clips = null;
+    }
   }
 
   /** After dying, follow one of the leaderboard snakes (null = your killer). */
@@ -365,6 +399,7 @@ export class CoilEngine {
     s.trail = this.look.trail;
     s.deathFx = this.look.deathFx;
     this.phase = "play";
+    this.spawnedAt = performance.now();
     this.snapCamTo(s);
     this.emitHud();
   }
@@ -372,6 +407,7 @@ export class CoilEngine {
   private onSpawned(s: Snake): void {
     this.spawnWait = 0;
     this.phase = "play";
+    this.spawnedAt = performance.now();
     this.snapCamTo(s);
     this.emitHud();
   }
@@ -462,6 +498,11 @@ export class CoilEngine {
         this.phase === "menu" && st?.board[0]
           ? { name: st.board[0].name, mass: st.board[0].mass }
           : null,
+      hint: this.hint(),
+      firstLife: this.isFirstLife(),
+      party: this.stats?.party ?? [],
+      arenaMode: this.stats?.mode ?? { id: 0, secsLeft: 0, secsToNext: 0 },
+      clipReady: this.clips?.ready ?? false,
       killNotice: this.killNotice,
       feed: this.feed.map((f) => f.text),
       deathRank: this.deathRank,
@@ -528,6 +569,7 @@ export class CoilEngine {
     }
     if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code))
       e.preventDefault();
+    if (this.phase === "play" && /^Digit[1-4]$/.test(e.code)) this.emote(Number(e.code[5]) - 1);
     this.keys.add(e.code);
     this.syncBoost();
   };
@@ -794,6 +836,36 @@ export class CoilEngine {
     }
   }
 
+  private isFirstLife(): boolean {
+    if (this.profile) return this.profile.games === 0;
+    try {
+      return !localStorage.getItem("agencoil-played");
+    } catch {
+      return false;
+    }
+  }
+
+  /** Timed coaching for a first life; null otherwise. */
+  private hint(): string | null {
+    if (this.phase !== "play" || !this.isFirstLife()) return null;
+    const t = (performance.now() - this.spawnedAt) / 1000;
+    if (t < 5) return "move the mouse or drag to steer";
+    if (t < 10) return "hold click, space or a second finger to boost";
+    const p = this.world.player;
+    if (p && !this.firstKillDone) {
+      const prey = this.world.snakes.find(
+        (o) =>
+          o.id !== p.id &&
+          o.alive &&
+          o.mass < p.mass * 0.9 &&
+          dist2(o.x, o.y, p.x, p.y) < 700 * 700,
+      );
+      if (prey) return `cut in front of ${prey.name}: their head hits your body and they pop`;
+    }
+    if (t < 40) return "eat orbs to grow; never touch another snake with your head";
+    return null;
+  }
+
   /** Rough direction from the player (or camera) to a point. */
   private compass(x: number, y: number): string {
     const p = this.world.player ?? { x: this.cam.x, y: this.cam.y };
@@ -831,7 +903,11 @@ export class CoilEngine {
           ? `hsl(${(performance.now() / 4) % 360} 90% 60%)`
           : s.trail === 2
             ? "#ff8a3d"
-            : "#ffffff";
+            : s.trail === 4
+              ? "#bfe9ff"
+              : s.trail === 5
+                ? "#6b3fd6"
+                : "#ffffff";
       const a = Math.random() * Math.PI * 2;
       const sp = s.trail === 1 ? 90 : 30;
       this.particles.push({
@@ -873,6 +949,11 @@ export class CoilEngine {
 
   private registerKill(victim: string): void {
     const now = performance.now();
+    if (!this.firstKillDone) {
+      this.firstKillDone = true;
+      if (this.isFirstLife()) this.pushFeed("first blood! that is the whole game");
+    }
+    this.clips?.mark();
     this.streak = now - this.lastKillAt < 7000 ? this.streak + 1 : 1;
     this.lastKillAt = now;
     this.kills++;
@@ -920,6 +1001,41 @@ export class CoilEngine {
           life: 0.9 + Math.random() * 0.5,
           color,
           r: 3 + Math.random() * 5,
+        });
+      }
+    }
+    if (s.deathFx === 3) {
+      // Nova: two rings, white then skin colour.
+      for (const [ring, col, sp] of [
+        [0, "#ffffff", 300],
+        [1, color, 180],
+      ] as const) {
+        for (let i = 0; i < 36; i++) {
+          const a = (i / 36) * Math.PI * 2 + ring * 0.09;
+          this.particles.push({
+            x: s.x,
+            y: s.y,
+            vx: Math.cos(a) * sp,
+            vy: Math.sin(a) * sp,
+            life: 0.8,
+            color: col,
+            r: 3,
+          });
+        }
+      }
+    } else if (s.deathFx === 4) {
+      // Confetti: many small bright flecks in random colours.
+      for (let i = 0; i < 60; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const sp = 60 + Math.random() * 300;
+        this.particles.push({
+          x: s.x,
+          y: s.y,
+          vx: Math.cos(a) * sp,
+          vy: Math.sin(a) * sp - 60,
+          life: 1 + Math.random() * 0.8,
+          color: `hsl(${Math.floor(Math.random() * 360)} 90% 60%)`,
+          r: 2 + Math.random() * 2.5,
         });
       }
     }
@@ -972,6 +1088,12 @@ export class CoilEngine {
     this.holdBoost = false;
     this.spawnWait = 0;
     this.deathBeatUntil = performance.now() + 700;
+    this.clips?.mark();
+    try {
+      localStorage.setItem("agencoil-played", "1");
+    } catch {
+      /* ignore */
+    }
     this.net?.idle();
     this.deathReason =
       why ??
@@ -1060,7 +1182,10 @@ export class CoilEngine {
       this.profile && this.profile.best > 0 && (this.profile.bestX || this.profile.bestY)
         ? { x: this.profile.bestX, y: this.profile.bestY, best: this.profile.best }
         : null,
+      this.emotes,
     );
+    const nowMs = performance.now();
+    for (const [id, e] of this.emotes) if (e.until < nowMs) this.emotes.delete(id);
     if (this.stick && this.phase === "play") {
       const rect = this.canvas.getBoundingClientRect();
       this.renderer.drawStick(this.ctx, this.dpr, {
@@ -1139,5 +1264,97 @@ function writeBest(n: number): void {
     localStorage.setItem("agencoil-best", String(n));
   } catch {
     /* ignore */
+  }
+}
+
+/**
+ * Rolling clips of the canvas: eight-second MediaRecorder segments started
+ * every four seconds, so two overlap at any moment and the last four to eight
+ * seconds are always covered. `mark()` keeps the segment that is ending next.
+ */
+export class ClipRecorder {
+  private recorders: { rec: MediaRecorder; chunks: Blob[] }[] = [];
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private stream: MediaStream | null = null;
+  private keepNext = false;
+  clip: Blob | null = null;
+  clipAt = 0;
+
+  constructor(private readonly canvas: HTMLCanvasElement) {}
+
+  static supported(): boolean {
+    return (
+      typeof MediaRecorder !== "undefined" &&
+      typeof HTMLCanvasElement !== "undefined" &&
+      "captureStream" in HTMLCanvasElement.prototype
+    );
+  }
+
+  get ready(): boolean {
+    return this.clip !== null;
+  }
+
+  start(): void {
+    if (this.timer || !ClipRecorder.supported()) return;
+    try {
+      this.stream = this.canvas.captureStream(30);
+    } catch {
+      return;
+    }
+    this.spawn();
+    this.timer = setInterval(() => this.spawn(), 4000);
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    for (const r of this.recorders) {
+      try {
+        r.rec.stop();
+      } catch {
+        /* already stopped */
+      }
+    }
+    this.recorders = [];
+    for (const t of this.stream?.getTracks() ?? []) t.stop();
+    this.stream = null;
+  }
+
+  /** Keep the segment that covers this moment. */
+  mark(): void {
+    this.keepNext = true;
+  }
+
+  private spawn(): void {
+    if (!this.stream) return;
+    const mime = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm", "video/mp4"].find(
+      (m) => MediaRecorder.isTypeSupported(m),
+    );
+    let rec: MediaRecorder;
+    try {
+      rec = new MediaRecorder(
+        this.stream,
+        mime ? { mimeType: mime, videoBitsPerSecond: 2_500_000 } : undefined,
+      );
+    } catch {
+      return;
+    }
+    const entry = { rec, chunks: [] as Blob[] };
+    rec.ondataavailable = (e) => {
+      if (e.data.size) entry.chunks.push(e.data);
+    };
+    rec.onstop = () => {
+      this.recorders = this.recorders.filter((r) => r !== entry);
+      if (this.keepNext && entry.chunks.length) {
+        this.clip = new Blob(entry.chunks, { type: rec.mimeType || "video/webm" });
+        this.clipAt = performance.now();
+        this.keepNext = false;
+      }
+    };
+    rec.start(1000);
+    this.recorders.push(entry);
+    setTimeout(() => {
+      if (rec.state !== "inactive") rec.stop();
+    }, 8000);
   }
 }

@@ -43,6 +43,8 @@ export interface StatsInfo {
   clients: number;
   board: { nid: number; name: string; mass: number; x: number; y: number; bounty: number }[];
   daily: { name: string; best: number }[];
+  party: { name: string; mass: number }[];
+  mode: { id: number; secsLeft: number; secsToNext: number };
 }
 
 export interface ProfileInfo {
@@ -60,6 +62,14 @@ export interface ProfileInfo {
   weekDone: number;
   weekEarned: boolean;
   weekBest: number;
+  streak: number;
+  freezes: number;
+  prevTier: number;
+  eaten: number;
+  nearTotal: number;
+  bountyTotal: number;
+  seasonBest: number;
+  season: number;
 }
 
 export interface ChallengeInfo {
@@ -97,6 +107,7 @@ export interface NetHooks {
   onEvent: (e: EventInfo) => void;
   onNotice: (kind: number, text: string) => void;
   onGateRequired: (message: string) => void;
+  onEmote: (nid: number, id: number) => void;
 }
 
 interface Snap {
@@ -183,6 +194,9 @@ export class NetSession {
   private history: { seq: number; x: number; y: number; angle: number }[] = [];
   private seq = 0;
   private lastAck = 0;
+  private fullRetryMs = 0;
+  /** Server protocol version from WELCOME; 2 means full entries carry a level byte. */
+  private serverVersion = 1;
   /** Recent snapshot gaps, to size the interpolation delay. */
   private gaps: { t: number; gap: number }[] = [];
   private interpDelay = INTERP_MIN_MS;
@@ -321,7 +335,12 @@ export class NetSession {
     const waited = performance.now() - this.firstTry;
     if (this.state !== "online" && waited > OFFLINE_AFTER_MS) this.setState("offline");
     else if (this.state === "online") this.setState("connecting");
-    const delay = Math.min(5000, 400 * Math.pow(1.7, Math.min(6, this.attempts)));
+    let delay = Math.min(5000, 400 * Math.pow(1.7, Math.min(6, this.attempts)));
+    if (this.fullRetryMs) {
+      delay = this.fullRetryMs;
+      this.fullRetryMs = 0;
+      this.firstTry = performance.now();
+    }
     this.retryTimer = setTimeout(() => this.connect(), delay);
   }
 
@@ -396,6 +415,16 @@ export class NetSession {
     );
   }
 
+  emote(id: number): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(
+      new Writer()
+        .u8(C2S.EMOTE)
+        .u8(id & 3)
+        .finish(),
+    );
+  }
+
   private ping(): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.pingSent = performance.now();
@@ -421,6 +450,9 @@ export class NetSession {
           this.buffers.clear();
         }
         this.instance = instance;
+        r.f32();
+        r.u8();
+        this.serverVersion = r.remaining >= 1 ? r.u8() : 1;
         break;
       }
       case S2C.SPAWNED: {
@@ -486,6 +518,8 @@ export class NetSession {
           clients: r.u16(),
           board: [],
           daily: [],
+          party: [],
+          mode: { id: 0, secsLeft: 0, secsToNext: 0 },
         };
         const nb = r.u8();
         for (let i = 0; i < nb; i++)
@@ -499,6 +533,11 @@ export class NetSession {
           });
         const nd = r.u8();
         for (let i = 0; i < nd; i++) s.daily.push({ name: r.str(), best: r.u32() });
+        if (v2 && r.remaining >= 1) {
+          const np = r.u8();
+          for (let i = 0; i < np; i++) s.party.push({ name: r.str(), mass: r.u32() });
+          if (r.remaining >= 5) s.mode = { id: r.u8(), secsLeft: r.u16(), secsToNext: r.u16() };
+        }
         this.hooks.onStats(s);
         break;
       }
@@ -564,6 +603,12 @@ export class NetSession {
       case S2C.ACK:
         this.lastAck = r.u16();
         break;
+      case S2C.FULL: {
+        // Try again shortly; the platform may route us to another instance.
+        const secs = r.u16();
+        this.fullRetryMs = Math.max(1000, secs * 1000);
+        break;
+      }
       case S2C.PROFILE: {
         const p: ProfileInfo = {
           best: r.u32(),
@@ -578,6 +623,14 @@ export class NetSession {
           weekDone: 0,
           weekEarned: false,
           weekBest: 0,
+          streak: 0,
+          freezes: 0,
+          prevTier: 0,
+          eaten: 0,
+          nearTotal: 0,
+          bountyTotal: 0,
+          seasonBest: 0,
+          season: 0,
         };
         if (r.remaining >= 14) {
           p.bestX = r.f32();
@@ -585,6 +638,16 @@ export class NetSession {
           p.weekDone = r.u8();
           p.weekEarned = r.u8() === 1;
           p.weekBest = r.u32();
+        }
+        if (r.remaining >= 20) {
+          p.streak = r.u16();
+          p.freezes = r.u8();
+          p.prevTier = r.u8();
+          p.eaten = r.u32();
+          p.nearTotal = r.u32();
+          p.bountyTotal = r.u16();
+          p.seasonBest = r.u32();
+          p.season = r.u16();
         }
         this.hooks.onProfile(p);
         break;
@@ -612,6 +675,11 @@ export class NetSession {
       case S2C.EVENT:
         this.hooks.onEvent({ x: r.f32(), y: r.f32(), left: r.u16(), at: performance.now() });
         break;
+      case S2C.EMOTE: {
+        const nid = r.u16();
+        this.hooks.onEmote(nid, r.u8());
+        break;
+      }
       case S2C.NOTICE: {
         const kind = r.u8();
         this.hooks.onNotice(kind, r.str());
@@ -655,6 +723,7 @@ export class NetSession {
     const n = r.u16();
     for (let i = 0; i < n; i++) {
       const e = readSnakeEntry(r);
+      const level = e.full && this.serverVersion >= 2 ? r.u8() : 0;
       const id = String(e.nid);
       if (e.nid === this.selfNid) {
         this.serverSelf = {
@@ -686,6 +755,7 @@ export class NetSession {
           name: e.name ?? "",
           skin: look.skin,
           trail: look.trail,
+          level,
           bands: e.bands,
           x: e.x,
           y: e.y,

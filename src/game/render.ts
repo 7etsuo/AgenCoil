@@ -82,6 +82,7 @@ export class Renderer {
     insets: { top: number; bottom: number } = { top: 0, bottom: 0 },
     event: Vec | null = null,
     ghost: { x: number; y: number; best: number } | null = null,
+    emotes: Map<string, { id: number; until: number }> | null = null,
   ): void {
     const shake = cam.trauma * cam.trauma;
     const ox = (Math.random() * 2 - 1) * shake * 14;
@@ -125,9 +126,34 @@ export class Renderer {
 
     this.drawFloaters(ctx, floaters, z);
 
+    if (emotes && emotes.size) this.drawEmotes(ctx, snakes, emotes, z);
+
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.drawNames(ctx, snakes, cam, w, h, dpr, z, ox, oy);
     this.drawMinimap(ctx, snakes, localId, w, h, dpr, phase, insets, event, ghost);
+  }
+
+  private drawEmotes(
+    ctx: CanvasRenderingContext2D,
+    snakes: Snake[],
+    emotes: Map<string, { id: number; until: number }>,
+    z: number,
+  ): void {
+    const glyphs = ["👋", "😮", "😅", "😤"];
+    const now = performance.now();
+    for (const s of snakes) {
+      const e = emotes.get(s.id);
+      if (!e || e.until < now) continue;
+      const r = radiusOf(s.mass);
+      const life = (e.until - now) / 2200;
+      const rise = (1 - life) * 18;
+      ctx.globalAlpha = Math.min(1, life * 3);
+      ctx.font = `${Math.max(18, 26 / z)}px system-ui, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(glyphs[e.id] ?? "👋", s.x, s.y - r * 1.6 - rise);
+      ctx.globalAlpha = 1;
+    }
   }
 
   /** A faint ring where your all-time best run ended. */
@@ -341,7 +367,51 @@ export class Renderer {
     if (s.x >= x0 - r && s.x <= x1 + r && s.y >= y0 - r && s.y <= y1 + r) {
       const hs = size * 1.06;
       ctx.drawImage(sprites[0]!.canvas, s.x - hs / 2, s.y - hs / 2, hs, hs);
+      this.drawEvolution(ctx, s, r);
       this.drawEyes(ctx, s, r, aim);
+    }
+  }
+
+  /** Evolution marks: dorsal dots from level 5, fins from 10, a gold halo from 20. */
+  private drawEvolution(ctx: CanvasRenderingContext2D, s: Snake, r: number): void {
+    const lv = s.level ?? 0;
+    if (lv < 5) return;
+    if (lv >= 20) {
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, r * 1.18, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(240,193,74,0.85)";
+      ctx.lineWidth = Math.max(1, r * 0.12);
+      ctx.stroke();
+    }
+    const pts = s.points;
+    const step = Math.max(4, Math.floor(pts.length / 12));
+    for (let i = pts.length - 4; i > 0; i -= step) {
+      const a = pts[i]!;
+      const b = pts[Math.max(0, i - 1)]!;
+      const dx = a.x - b.x;
+      const dy = a.y - b.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const nx = -dy / d;
+      const ny = dx / d;
+      if (lv >= 10) {
+        for (const side of [-1, 1]) {
+          ctx.beginPath();
+          ctx.moveTo(a.x + nx * side * r * 0.85, a.y + ny * side * r * 0.85);
+          ctx.lineTo(a.x + nx * side * r * 1.35, a.y + ny * side * r * 1.35);
+          ctx.lineTo(
+            a.x + nx * side * r * 0.85 + (dx / d) * r * 0.3,
+            a.y + ny * side * r * 0.85 + (dy / d) * r * 0.3,
+          );
+          ctx.closePath();
+          ctx.fillStyle = "rgba(232,234,238,0.7)";
+          ctx.fill();
+        }
+      } else {
+        ctx.beginPath();
+        ctx.arc(a.x, a.y, r * 0.22, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255,255,255,0.35)";
+        ctx.fill();
+      }
     }
   }
 
@@ -445,7 +515,7 @@ export class Renderer {
       const sy = (s.y - cam.y - oy) * z + cssH / 2;
       if (sx < -40 || sy < -40 || sx > cssW + 40 || sy > cssH + 40) continue;
       const r = radiusOf(s.mass) * z;
-      const label = `${s.name} · ${Math.floor(s.mass)}`;
+      const label = `${s.level ? `Lv${s.level} ` : ""}${s.name} · ${Math.floor(s.mass)}`;
       const tw = ctx.measureText(label).width;
       const pad = 6;
       const y = sy - r - 10;

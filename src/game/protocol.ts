@@ -12,6 +12,8 @@ export const C2S = {
   PING: 4,
   /** Device key and name, sent on connect so the menu can show the profile. */
   IDENT: 5,
+  /** A quick reaction (0..3) shown above the snake. */
+  EMOTE: 6,
 } as const;
 
 export const S2C = {
@@ -39,6 +41,10 @@ export const S2C = {
   NOTICE: 16,
   /** Leaderboard v2: board entries carry a bounty. Sent instead of STATS to v2 clients. */
   STATS2: 17,
+  /** This instance is full; the client should reconnect after the given seconds. */
+  FULL: 19,
+  /** Someone emoted: nid, emote id. */
+  EMOTE: 20,
   /** The server refused a spawn because no valid human-verification session exists. */
   GATE_REQUIRED: 18,
 } as const;

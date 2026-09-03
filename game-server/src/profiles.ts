@@ -7,10 +7,14 @@
 import pg from "pg";
 import { retryDb } from "./db-retry";
 import {
+  FREEZE_EVERY_GAMES,
+  STREAK_MILESTONES,
   WEEKLY_GOAL,
   dailyChallenges,
   isoWeek,
+  leagueOf,
   lifeValue,
+  seasonOf,
   todayUtc,
   type Challenge,
   type LifeStats,
@@ -42,6 +46,18 @@ export interface Profile {
   earned: string[];
   /** Automated-play suspicion, kept off the leaderboard page. */
   flagged: boolean;
+  /** Daily streak: consecutive UTC days with at least one life. */
+  streak: number;
+  streakLast: string;
+  freezes: number;
+  /** Lifetime totals for levels and titles. */
+  eaten: number;
+  nearTotal: number;
+  bountyTotal: number;
+  /** League tier finished last week (0 = none yet), and this season's best. */
+  prevTier: number;
+  season: number;
+  seasonBest: number;
 }
 
 export interface TopEntry {
@@ -105,7 +121,16 @@ export class ProfileStore {
              ADD COLUMN IF NOT EXISTS week_best INTEGER NOT NULL DEFAULT 0,
              ADD COLUMN IF NOT EXISTS week_done INTEGER NOT NULL DEFAULT 0,
              ADD COLUMN IF NOT EXISTS earned JSONB NOT NULL DEFAULT '[]',
-             ADD COLUMN IF NOT EXISTS flagged BOOLEAN NOT NULL DEFAULT false`,
+             ADD COLUMN IF NOT EXISTS flagged BOOLEAN NOT NULL DEFAULT false,
+             ADD COLUMN IF NOT EXISTS streak INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS streak_last TEXT NOT NULL DEFAULT '',
+             ADD COLUMN IF NOT EXISTS freezes INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS eaten INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS near_total INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS bounty_total INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS prev_tier INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS season INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS season_best INTEGER NOT NULL DEFAULT 0`,
         );
       })
         .then(() => {
@@ -149,6 +174,15 @@ export class ProfileStore {
       weekDone: 0,
       earned: [],
       flagged: false,
+      streak: 0,
+      streakLast: "",
+      freezes: 0,
+      eaten: 0,
+      nearTotal: 0,
+      bountyTotal: 0,
+      prevTier: 0,
+      season: seasonOf(),
+      seasonBest: 0,
     };
   }
 
@@ -182,9 +216,19 @@ export class ProfileStore {
             week_done: number;
             earned: unknown;
             flagged: boolean;
+            streak: number;
+            streak_last: string;
+            freezes: number;
+            eaten: number;
+            near_total: number;
+            bounty_total: number;
+            prev_tier: number;
+            season: number;
+            season_best: number;
           }>(
             `SELECT name, best, kills, games, survive, unlocks, day, progress, skin, bands, best_x, best_y,
-                  week, week_best, week_done, earned, flagged
+                  week, week_best, week_done, earned, flagged, streak, streak_last, freezes, eaten,
+                  near_total, bounty_total, prev_tier, season, season_best
            FROM agencoil_profiles WHERE key = $1`,
             [key],
           ),
@@ -216,6 +260,15 @@ export class ProfileStore {
               ? (r.earned as string[]).filter((w) => typeof w === "string")
               : [],
             flagged: Boolean(r.flagged),
+            streak: Number(r.streak) || 0,
+            streakLast: r.streak_last || "",
+            freezes: Number(r.freezes) || 0,
+            eaten: Number(r.eaten) || 0,
+            nearTotal: Number(r.near_total) || 0,
+            bountyTotal: Number(r.bounty_total) || 0,
+            prevTier: Number(r.prev_tier) || 0,
+            season: Number(r.season) || seasonOf(),
+            seasonBest: Number(r.season_best) || 0,
           };
         }
       } catch (err) {
@@ -232,9 +285,17 @@ export class ProfileStore {
     const today = todayUtc();
     const week = isoWeek();
     if (p.week !== week) {
+      // Remember the league finished last week before the weekly reset.
+      p.prevTier = p.weekBest > 0 ? leagueOf(p.weekBest) + 1 : 0;
       p.week = week;
       p.weekBest = 0;
       p.weekDone = 0;
+      this.markDirty(p.key);
+    }
+    const season = seasonOf();
+    if (p.season !== season) {
+      p.season = season;
+      p.seasonBest = 0;
       this.markDirty(p.key);
     }
     if (p.day === today) return;
@@ -272,11 +333,52 @@ export class ProfileStore {
     }));
   }
 
+  /**
+   * Daily streak on the first life of a UTC day. A single missed day is
+   * bridged by a banked freeze; otherwise the streak restarts at one. Returns
+   * milestone labels reached today.
+   */
+  private touchStreak(p: Profile): string[] {
+    const today = p.day;
+    if (p.streakLast === today) return [];
+    const reached: string[] = [];
+    const last = p.streakLast ? Date.parse(p.streakLast + "T00:00:00Z") : NaN;
+    const now = Date.parse(today + "T00:00:00Z");
+    const gapDays = Number.isFinite(last) ? Math.round((now - last) / 86_400_000) : 99;
+    if (gapDays === 1) p.streak++;
+    else if (gapDays === 2 && p.freezes > 0) {
+      p.freezes--;
+      p.streak++;
+    } else p.streak = 1;
+    p.streakLast = today;
+    for (const m of STREAK_MILESTONES) {
+      if (p.streak >= m.days && !(p.unlocks & m.unlock)) {
+        p.unlocks |= m.unlock;
+        reached.push(m.label);
+      }
+    }
+    return reached;
+  }
+
   /** Fold a finished life into the profile; returns challenges completed by it. */
-  recordLife(p: Profile, life: LifeStats, at?: { x: number; y: number }): Challenge[] {
+  recordLife(
+    p: Profile,
+    life: LifeStats,
+    at?: { x: number; y: number },
+  ): { completed: Challenge[]; milestones: string[]; freezeEarned: boolean } {
     this.rollDay(p);
+    const milestones = this.touchStreak(p);
     p.games++;
     p.kills += life.kills;
+    p.eaten += Math.max(0, life.length - 10);
+    p.nearTotal += life.near;
+    p.bountyTotal += life.bounty;
+    if (life.length > p.seasonBest) p.seasonBest = life.length;
+    let freezeEarned = false;
+    if (p.games % FREEZE_EVERY_GAMES === 0 && p.freezes < 1) {
+      p.freezes = 1;
+      freezeEarned = true;
+    }
     if (life.length > p.best) {
       p.best = life.length;
       if (at) {
@@ -299,19 +401,26 @@ export class ProfileStore {
     });
     if (p.weekDone >= WEEKLY_GOAL && !p.earned.includes(p.week)) p.earned.push(p.week);
     this.markDirty(p.key);
-    return completed;
+    return { completed, milestones, freezeEarned };
   }
 
   /** Leaderboard rows, all-time or this week, flagged accounts excluded. */
-  async top(kind: "alltime" | "weekly", n: number): Promise<TopEntry[]> {
+  async top(kind: "alltime" | "weekly" | "season", n: number): Promise<TopEntry[]> {
     const week = isoWeek();
+    const season = seasonOf();
     if (this.pool) {
       try {
         await this.ensureReady();
-        const col = kind === "weekly" ? "week_best" : "best";
-        const where = kind === "weekly" ? `AND week = $2 AND week_best > 0` : `AND best > 0`;
+        const col = kind === "weekly" ? "week_best" : kind === "season" ? "season_best" : "best";
+        const where =
+          kind === "weekly"
+            ? `AND week = $2 AND week_best > 0`
+            : kind === "season"
+              ? `AND season = $2 AND season_best > 0`
+              : `AND best > 0`;
         const params: unknown[] = [n];
         if (kind === "weekly") params.push(week);
+        if (kind === "season") params.push(season);
         const rows = await retryDb(() =>
           this.pool!.query<{
             name: string;
@@ -342,7 +451,16 @@ export class ProfileStore {
       .filter((p) => !p.flagged)
       .map((p) => ({
         name: p.name,
-        best: kind === "weekly" ? (p.week === week ? p.weekBest : 0) : p.best,
+        best:
+          kind === "weekly"
+            ? p.week === week
+              ? p.weekBest
+              : 0
+            : kind === "season"
+              ? p.season === season
+                ? p.seasonBest
+                : 0
+              : p.best,
         kills: p.kills,
         games: p.games,
         skin: p.skin,
@@ -392,8 +510,10 @@ export class ProfileStore {
         await retryDb(() =>
           this.pool!.query(
             `INSERT INTO agencoil_profiles (key, name, best, kills, games, survive, unlocks, day, progress,
-             skin, bands, best_x, best_y, week, week_best, week_done, earned, flagged, updated)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now())
+             skin, bands, best_x, best_y, week, week_best, week_done, earned, flagged,
+             streak, streak_last, freezes, eaten, near_total, bounty_total, prev_tier, season, season_best, updated)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+             $19, $20, $21, $22, $23, $24, $25, $26, $27, now())
            ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, best = GREATEST(agencoil_profiles.best, EXCLUDED.best),
              kills = GREATEST(agencoil_profiles.kills, EXCLUDED.kills),
              games = GREATEST(agencoil_profiles.games, EXCLUDED.games),
@@ -401,7 +521,11 @@ export class ProfileStore {
              unlocks = agencoil_profiles.unlocks | EXCLUDED.unlocks, day = EXCLUDED.day, progress = EXCLUDED.progress,
              skin = EXCLUDED.skin, bands = EXCLUDED.bands, best_x = EXCLUDED.best_x, best_y = EXCLUDED.best_y,
              week = EXCLUDED.week, week_best = EXCLUDED.week_best, week_done = EXCLUDED.week_done,
-             earned = EXCLUDED.earned, flagged = agencoil_profiles.flagged OR EXCLUDED.flagged, updated = now()`,
+             earned = EXCLUDED.earned, flagged = agencoil_profiles.flagged OR EXCLUDED.flagged,
+             streak = EXCLUDED.streak, streak_last = EXCLUDED.streak_last, freezes = EXCLUDED.freezes,
+             eaten = EXCLUDED.eaten, near_total = EXCLUDED.near_total, bounty_total = EXCLUDED.bounty_total,
+             prev_tier = EXCLUDED.prev_tier, season = EXCLUDED.season, season_best = EXCLUDED.season_best,
+             updated = now()`,
             [
               p.key,
               p.name,
@@ -421,6 +545,15 @@ export class ProfileStore {
               p.weekDone,
               JSON.stringify(p.earned),
               p.flagged,
+              p.streak,
+              p.streakLast,
+              p.freezes,
+              p.eaten,
+              p.nearTotal,
+              p.bountyTotal,
+              p.prevTier,
+              p.season,
+              p.seasonBest,
             ],
           ),
         );
