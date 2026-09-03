@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import type pg from "pg";
 import { Sandbox } from "@vercel/sandbox";
 import { MAX_PLAYERS_PER_INSTANCE } from "../../src/game/model";
+import { retryDb } from "./db-retry";
 
 export interface ArenaRow {
   name: string;
@@ -55,14 +56,31 @@ export class ArenaHost {
   readonly enabled: boolean;
   private readonly health = new Map<string, ArenaHealth>();
   private lastTick = 0;
-  private ready: Promise<void>;
+  private ready: Promise<void> | null = null;
 
   constructor(
     private readonly pool: pg.Pool | null,
     private readonly env: Record<string, string | undefined>,
   ) {
     this.enabled = Boolean(pool && env.VERCEL);
-    this.ready = this.enabled ? this.init() : Promise.resolve();
+  }
+
+  /** Tables exist; a failed attempt (cold Neon connection) is retried next call. */
+  private ensureReady(): Promise<void> {
+    if (!this.ready) {
+      this.ready = retryDb(() => this.init()).catch((err) => {
+        this.ready = null;
+        throw err;
+      });
+    }
+    return this.ready;
+  }
+
+  private q<T extends object = Record<string, unknown>>(
+    text: string,
+    params: unknown[] = [],
+  ): Promise<pg.QueryResult<T>> {
+    return retryDb(() => this.pool!.query<T>(text, params), { attempts: 3, baseDelayMs: 200 });
   }
 
   private async init(): Promise<void> {
@@ -82,7 +100,7 @@ export class ArenaHost {
   /** The socket URL a client should dial, or null when the coordinator is off. */
   async resolve(party: string): Promise<{ url: string; name: string } | null> {
     if (!this.enabled) return null;
-    await this.ready;
+    await this.ensureReady();
     const now = Date.now();
     if (now - this.lastTick > 60_000) {
       this.lastTick = now;
@@ -106,7 +124,7 @@ export class ArenaHost {
   /** Maintenance: roll arenas near expiry, drop dead ones. Safe to call often. */
   async tick(): Promise<{ arenas: number; created: boolean; drained: string[] }> {
     if (!this.enabled) return { arenas: 0, created: false, drained: [] };
-    await this.ready;
+    await this.ensureReady();
     const now = Date.now();
     const rows = await this.rows();
     let created = false;
@@ -115,7 +133,7 @@ export class ArenaHost {
       const h = await this.checkHealth(r);
       if (!h.ok && now - r.createdAt > 120_000) {
         // Unreachable and not just booting: forget it.
-        await this.pool!.query(`DELETE FROM agencoil_arena WHERE name = $1`, [r.name]);
+        await this.q(`DELETE FROM agencoil_arena WHERE name = $1`, [r.name]);
         continue;
       }
       if (r.expiresAt - now < ARENA_ROLL_BEFORE_MS) {
@@ -176,7 +194,7 @@ export class ArenaHost {
   }
 
   private async setPartyRoute(code: string, name: string): Promise<void> {
-    await this.pool!.query(
+    await this.q(
       `INSERT INTO agencoil_party_route (code, name, until) VALUES ($1, $2, $3)
        ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, until = EXCLUDED.until`,
       [code, name, Date.now() + PARTY_ROUTE_MS],
@@ -186,7 +204,7 @@ export class ArenaHost {
   /** Create one arena under a lease so parallel function instances make only one. */
   private async createArena(): Promise<boolean> {
     const now = Date.now();
-    const lock = await this.pool!.query(
+    const lock = await this.q(
       `UPDATE agencoil_arena_lock SET until = $1 WHERE id = 1 AND until < $2 RETURNING id`,
       [now + LOCK_MS, now],
     );
@@ -247,7 +265,7 @@ export class ArenaHost {
         return false;
       }
       const expiresAt = sandbox.expiresAt?.getTime() ?? now + ARENA_SESSION_MS;
-      await this.pool!.query(
+      await this.q(
         `INSERT INTO agencoil_arena (name, domain, created_at, expires_at) VALUES ($1, $2, $3, $4)
          ON CONFLICT (name) DO UPDATE SET domain = EXCLUDED.domain, expires_at = EXCLUDED.expires_at`,
         [name, domain, now, expiresAt],
@@ -257,9 +275,7 @@ export class ArenaHost {
       console.error("[arena] create failed:", (err as Error)?.message ?? err);
       return false;
     } finally {
-      await this.pool!.query(`UPDATE agencoil_arena_lock SET until = 0 WHERE id = 1`).catch(
-        () => undefined,
-      );
+      await this.q(`UPDATE agencoil_arena_lock SET until = 0 WHERE id = 1`).catch(() => undefined);
     }
   }
 
@@ -274,7 +290,7 @@ export class ArenaHost {
     } catch {
       /* it may already be gone */
     }
-    await this.pool!.query(`DELETE FROM agencoil_arena WHERE name = $1`, [r.name]);
+    await this.q(`DELETE FROM agencoil_arena WHERE name = $1`, [r.name]);
     this.health.delete(r.name);
   }
 }
