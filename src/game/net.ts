@@ -77,8 +77,8 @@ const EAT_CONFIRM_MS = 700;
 const OFFLINE_AFTER_MS = 6000;
 const SNAP_CORRECT_DIST = 140;
 /** Interpolation delay bounds; the live value tracks observed snapshot jitter. */
-const INTERP_MIN_MS = 110;
-const INTERP_MAX_MS = 260;
+const INTERP_MIN_MS = 80;
+const INTERP_MAX_MS = 220;
 const JITTER_WINDOW_MS = 6000;
 const TOKEN_KEY = "agencoil-resume";
 
@@ -131,6 +131,9 @@ export class NetSession {
   /** Predicted eats the server never confirmed (diagnostic). */
   eatMisses = 0;
   /** Diagnostics for the netcode: snapshot timing and prediction error. */
+  get delayMs(): number {
+    return Math.round(this.interpDelay);
+  }
   diag = {
     snaps: 0,
     gapMax: 0,
@@ -444,7 +447,7 @@ export class NetSession {
       while (this.gaps.length && now - this.gaps[0]!.t > JITTER_WINDOW_MS) this.gaps.shift();
       let worst = 0;
       for (const g of this.gaps) if (g.gap > worst) worst = g.gap;
-      this.interpDelay = Math.min(INTERP_MAX_MS, Math.max(INTERP_MIN_MS, worst * 1.4));
+      this.interpDelay = Math.min(INTERP_MAX_MS, Math.max(INTERP_MIN_MS, worst * 1.2));
     }
     this.lastSnapAt = now;
     const n = r.u16();

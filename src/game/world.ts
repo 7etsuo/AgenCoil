@@ -31,6 +31,8 @@ import {
 } from "./model";
 
 export const CELL = 96;
+/** Fraction of the summed radii at which two snakes count as touching. */
+const HIT_CONTACT = 0.95;
 /** Bots past this length boost freely, shedding what they cannot use. */
 const BOT_SOFT_CAP = 2000;
 /** Bots past this length retire soon after, turning into a big pile of remains. */
@@ -800,11 +802,11 @@ export class World {
   /** Would this head, where it is now, be touching any other snake? */
   wouldCollide(s: Snake): boolean {
     if (s.invuln > 0) return false;
-    const hr = radiusOf(s.mass) * 0.8;
+    const hr = radiusOf(s.mass);
     for (const o of this.snakes) {
       if (o.id === s.id || !o.alive || o.invuln > 0) continue;
       const orad = radiusOf(o.mass);
-      const hitR = hr + orad * 0.88;
+      const hitR = (hr + orad) * HIT_CONTACT;
       const hitR2 = hitR * hitR;
       const reach = lengthOf(o.mass) + hitR + 24;
       if (dist2(s.x, s.y, o.x, o.y) > reach * reach) continue;
@@ -831,13 +833,15 @@ export class World {
     for (const s of this.snakes) {
       if (!s.alive || s.invuln > 0) continue;
       if (!this.owned(s)) continue;
-      const hr = radiusOf(s.mass) * 0.8;
+      const hr = radiusOf(s.mass);
       for (const o of this.snakes) {
         // Spawn protection works both ways: a fresh snake neither dies nor
         // kills, so nobody can be farmed by (or farm) a respawn.
         if (o.id === s.id || !alive.has(o.id) || o.invuln > 0) continue;
         const orad = radiusOf(o.mass);
-        const hitR = hr + orad * 0.88;
+        // Death on visual contact, as in slither.io: the drawn discs have
+        // radius r, so the sum of radii is where they touch.
+        const hitR = (hr + orad) * HIT_CONTACT;
         const hitR2 = hitR * hitR;
         const reach = lengthOf(o.mass) + hitR + 24;
         if (dist2(s.x, s.y, o.x, o.y) > reach * reach) continue;

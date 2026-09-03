@@ -858,6 +858,7 @@ export class CoilEngine {
       boosting: this.boosting,
       controls: this.controls,
       diag: this.net?.diag ?? null,
+      interpMs: this.net?.delayMs ?? 0,
       score: p ? Math.floor(p.mass) : 0,
       headX: p ? Math.round(p.x) : 0,
       headY: p ? Math.round(p.y) : 0,
