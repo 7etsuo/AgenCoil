@@ -81,6 +81,7 @@ export class Renderer {
     aim: Vec | null,
     insets: { top: number; bottom: number } = { top: 0, bottom: 0 },
     event: Vec | null = null,
+    ghost: { x: number; y: number; best: number } | null = null,
   ): void {
     const shake = cam.trauma * cam.trauma;
     const ox = (Math.random() * 2 - 1) * shake * 14;
@@ -110,6 +111,9 @@ export class Renderer {
     this.drawArena(ctx, cam, x0, y0, x1, y1);
     this.drawFood(ctx, world, x0, y0, x1, y1, z);
     this.drawParticles(ctx, particles);
+    if (ghost && ghost.x >= x0 && ghost.x <= x1 && ghost.y >= y0 && ghost.y <= y1) {
+      this.drawGhost(ctx, ghost, z);
+    }
 
     const snakes = world.snakes;
     const ordered = snakes.slice().sort((a, b) => a.mass - b.mass);
@@ -123,7 +127,32 @@ export class Renderer {
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.drawNames(ctx, snakes, cam, w, h, dpr, z, ox, oy);
-    this.drawMinimap(ctx, snakes, localId, w, h, dpr, phase, insets, event);
+    this.drawMinimap(ctx, snakes, localId, w, h, dpr, phase, insets, event, ghost);
+  }
+
+  /** A faint ring where your all-time best run ended. */
+  private drawGhost(
+    ctx: CanvasRenderingContext2D,
+    g: { x: number; y: number; best: number },
+    z: number,
+  ): void {
+    const pulse = 26 + Math.sin(this.time * 2) * 4;
+    ctx.beginPath();
+    ctx.arc(g.x, g.y, pulse, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(232,234,238,0.22)";
+    ctx.lineWidth = 2 / z;
+    ctx.setLineDash([6 / z, 6 / z]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(g.x, g.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(232,234,238,0.35)";
+    ctx.fill();
+    ctx.font = `500 ${Math.max(11, 12 / z)}px Outfit, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillStyle = "rgba(232,234,238,0.4)";
+    ctx.fillText(`your best · ${g.best}`, g.x, g.y + pulse + 6);
   }
 
   private drawArena(
@@ -438,6 +467,7 @@ export class Renderer {
     phase: Phase,
     insets: { top: number; bottom: number },
     event: Vec | null,
+    ghost: Vec | null,
   ): void {
     if (phase === "menu") return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -477,6 +507,13 @@ export class Renderer {
       ctx.beginPath();
       ctx.arc(cx + event.x * k, cy + event.y * k, pulse + 4, 0, Math.PI * 2);
       ctx.strokeStyle = "rgba(240,193,74,0.5)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    if (ghost) {
+      ctx.beginPath();
+      ctx.arc(cx + ghost.x * k, cy + ghost.y * k, 2.5, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(232,234,238,0.6)";
       ctx.lineWidth = 1;
       ctx.stroke();
     }

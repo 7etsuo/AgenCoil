@@ -50,6 +50,13 @@ export interface ProfileInfo {
   rank: number;
   unlocks: number;
   persistent: boolean;
+  /** Where the all-time best run ended (0,0 when none). */
+  bestX: number;
+  bestY: number;
+  /** Challenges completed this ISO week, and whether the weekly skin is earned. */
+  weekDone: number;
+  weekEarned: boolean;
+  weekBest: number;
 }
 
 export interface ChallengeInfo {
@@ -121,6 +128,11 @@ export function defaultServerUrl(): string {
   const env = (import.meta.env.VITE_GAME_SERVER as string | undefined)?.trim();
   if (env) return env;
   return "wss://agencoil-server.vercel.app/api/ws";
+}
+
+/** The same server over HTTP, for the leaderboard JSON. */
+export function serverHttpUrl(): string {
+  return defaultServerUrl().replace(/^ws/, "http");
 }
 
 export class NetSession {
@@ -495,8 +507,8 @@ export class NetSession {
       case S2C.ACK:
         this.lastAck = r.u16();
         break;
-      case S2C.PROFILE:
-        this.hooks.onProfile({
+      case S2C.PROFILE: {
+        const p: ProfileInfo = {
           best: r.u32(),
           kills: r.u32(),
           games: r.u32(),
@@ -504,8 +516,22 @@ export class NetSession {
           rank: r.u32(),
           unlocks: r.u32(),
           persistent: r.u8() === 1,
-        });
+          bestX: 0,
+          bestY: 0,
+          weekDone: 0,
+          weekEarned: false,
+          weekBest: 0,
+        };
+        if (r.remaining >= 14) {
+          p.bestX = r.f32();
+          p.bestY = r.f32();
+          p.weekDone = r.u8();
+          p.weekEarned = r.u8() === 1;
+          p.weekBest = r.u32();
+        }
+        this.hooks.onProfile(p);
         break;
+      }
       case S2C.CHALLENGES: {
         const n = r.u8();
         const list: ChallengeInfo[] = [];

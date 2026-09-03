@@ -90,3 +90,31 @@ export function lifeValue(c: Challenge, life: LifeStats): number {
 export function todayUtc(): string {
   return new Date().toISOString().slice(0, 10);
 }
+
+/** ISO week id like 2026-W36, for weekly bests and the weekly skin. */
+export function isoWeek(d = new Date()): string {
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const day = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - day);
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  const week = Math.ceil(((date.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+  return `${date.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
+}
+
+/** Limited skins: one per week, earned by finishing three challenges that week. */
+export const WEEKLY_SKINS: { name: string; bands: string[] }[] = [
+  { name: "aurora", bands: ["#3ee0c4", "#6ea8ff", "#d45dff", "#3ee0c4", "#07090f"] },
+  { name: "magma", bands: ["#ff6b3d", "#2a0d05", "#ffb347", "#2a0d05"] },
+  { name: "tide", bands: ["#0b3a5c", "#5ad0e8", "#ffffff", "#5ad0e8"] },
+  { name: "hornet", bands: ["#f0c14a", "#111318", "#f0c14a", "#111318", "#ffffff"] },
+  { name: "orchid", bands: ["#e45fa0", "#5b2a6e", "#ffd0e7"] },
+  { name: "circuit", bands: ["#7dcf6a", "#0c1a10", "#0c1a10", "#f7f3a6"] },
+];
+
+export const WEEKLY_GOAL = 3;
+
+export function weeklySkinFor(week: string): { name: string; bands: string[] } {
+  let h = 0;
+  for (const ch of week) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return WEEKLY_SKINS[h % WEEKLY_SKINS.length]!;
+}

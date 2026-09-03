@@ -46,7 +46,7 @@ import {
 } from "../../src/game/protocol";
 import { DailyBoard } from "./daily";
 import { ProfileStore, type Profile } from "./profiles";
-import { UNLOCK_DEATH, UNLOCK_TRAIL, type LifeStats } from "../../src/game/challenges";
+import { UNLOCK_DEATH, UNLOCK_TRAIL, isoWeek, type LifeStats } from "../../src/game/challenges";
 
 interface View {
   cx: number;
@@ -82,6 +82,8 @@ interface Client {
   deathAt: number;
   deathMass: number;
   bountied: boolean;
+  /** Input fingerprint for automated-play detection. */
+  fp: { lastAt: number; lastAngle: number; n: number; sumDt: number; sumDt2: number; same: number };
   lastPing: number;
   alive: boolean;
 }
@@ -179,6 +181,16 @@ export class GameServer {
       if (req.headers.upgrade) return;
       res.setHeader("content-type", "application/json");
       res.setHeader("access-control-allow-origin", "*");
+      const url = new URL(req.url ?? "/", "http://x");
+      const top = url.searchParams.get("top");
+      if (top === "alltime" || top === "weekly") {
+        res.setHeader("cache-control", "public, max-age=30");
+        void this.profiles
+          .top(top, 100)
+          .then((rows) => res.end(JSON.stringify({ kind: top, week: isoWeek(), rows })))
+          .catch(() => res.end(JSON.stringify({ kind: top, rows: [] })));
+        return;
+      }
       res.end(JSON.stringify(this.status()));
     });
   }
@@ -311,6 +323,7 @@ export class GameServer {
       deathAt: 0,
       deathMass: 0,
       bountied: false,
+      fp: { lastAt: 0, lastAngle: 0, n: 0, sumDt: 0, sumDt2: 0, same: 0 },
       lastPing: Date.now(),
       alive: true,
     };
@@ -488,6 +501,12 @@ export class GameServer {
         client.bands,
         mass,
       );
+      if (client.profile) this.profiles.setLook(client.profile, client.skin, client.bands);
+      // Skill-based placement: veterans start out where the big snakes roam,
+      // newcomers in the quietest corner the arena has. A party overrides it.
+      const best = client.profile?.best ?? 0;
+      if (best >= 500) this.spawnNearTop(snake);
+      else if (best < 100) this.spawnQuiet(snake);
       // Friends spawn together: near any live member of the same party.
       const mate = client.party ? this.partyMember(client.party, snake.id) : null;
       if (mate) {
@@ -554,6 +573,47 @@ export class GameServer {
     if (this.event && this.event.until > Date.now()) this.sendEvent(client);
   }
 
+  private moveSnake(snake: Snake, at: { x: number; y: number }): void {
+    snake.x = at.x;
+    snake.y = at.y;
+    snake.points = [];
+    this.world.ensureTrail(snake);
+  }
+
+  private spawnNearTop(snake: Snake): void {
+    const top = this.world.snakes
+      .filter((s) => s.alive && s.id !== snake.id)
+      .sort((a, b) => b.mass - a.mass)
+      .slice(0, 5);
+    if (!top.length) return;
+    const t = top[(Math.random() * top.length) | 0]!;
+    const a = Math.random() * Math.PI * 2;
+    const d = 700 + Math.random() * 500;
+    this.moveSnake(
+      snake,
+      this.world.safeSpawnNear({ x: t.x + Math.cos(a) * d, y: t.y + Math.sin(a) * d }),
+    );
+  }
+
+  private spawnQuiet(snake: Snake): void {
+    let best: { x: number; y: number } | null = null;
+    let bestD = -1;
+    for (let i = 0; i < 8; i++) {
+      const p = this.world.randomOpenPoint();
+      let near = Infinity;
+      for (const o of this.world.snakes) {
+        if (!o.alive || o.id === snake.id) continue;
+        const d = Math.hypot(o.x - p.x, o.y - p.y);
+        if (d < near) near = d;
+      }
+      if (near > bestD) {
+        bestD = near;
+        best = p;
+      }
+    }
+    if (best) this.moveSnake(snake, best);
+  }
+
   private partyMember(code: string, exceptSid: string): Snake | null {
     const set = this.parties.get(code);
     if (!set) return null;
@@ -580,6 +640,11 @@ export class GameServer {
         .u32(rank)
         .u32(p.unlocks)
         .u8(this.profiles.persistent ? 1 : 0)
+        .f32(p.bestX)
+        .f32(p.bestY)
+        .u8(Math.min(255, p.weekDone))
+        .u8(p.earned.includes(p.week) ? 1 : 0)
+        .u32(p.weekBest)
         .finish(),
     );
     const list = this.profiles.challenges(p);
@@ -623,6 +688,7 @@ export class GameServer {
       hh: Math.min(3000, r.f32()),
     };
     const lag = r.remaining >= 1 ? (r.u8() * 4) / 1000 : 0;
+    this.fingerprint(client, angle);
     if (!client.sid) return;
     const input = this.world.inputs.get(client.sid);
     if (input) {
@@ -630,6 +696,42 @@ export class GameServer {
       input.boost = boost;
     }
     this.world.lags.set(client.sid, lag);
+  }
+
+  /**
+   * Automated play leaves a signature a hand on a mouse does not: input
+   * timing with almost no jitter beyond the client's own throttle, and a
+   * heading that is either frozen or changes every single message. Over a
+   * long window both together flag the profile, which keeps it off the
+   * leaderboard page. Nothing about play itself changes.
+   */
+  private fingerprint(client: Client, angle: number): void {
+    const fp = client.fp;
+    const now = performance.now();
+    if (fp.lastAt) {
+      const dt = now - fp.lastAt;
+      fp.n++;
+      fp.sumDt += dt;
+      fp.sumDt2 += dt * dt;
+      if (Math.abs(angle - fp.lastAngle) < 1e-4) fp.same++;
+    }
+    fp.lastAt = now;
+    fp.lastAngle = angle;
+    if (fp.n >= 1800) {
+      const mean = fp.sumDt / fp.n;
+      const varc = Math.max(0, fp.sumDt2 / fp.n - mean * mean);
+      const cv = Math.sqrt(varc) / Math.max(1, mean);
+      const sameRatio = fp.same / fp.n;
+      // Real browsers show timing jitter well above 1% even on a throttle;
+      // a scripted sender at a fixed interval sits far below it.
+      if (cv < 0.01 && (sameRatio > 0.97 || sameRatio < 0.03) && client.profile) {
+        this.profiles.flag(client.profile);
+        console.warn(
+          `[anticheat] flagged ${client.name} (cv ${cv.toFixed(4)}, same ${sameRatio.toFixed(2)})`,
+        );
+      }
+      client.fp = { lastAt: now, lastAngle: angle, n: 0, sumDt: 0, sumDt2: 0, same: 0 };
+    }
   }
 
   // ── tokens ─────────────────────────────────────────────────────────────────
@@ -830,7 +932,7 @@ export class GameServer {
       noboostLength: Math.floor(life.noboostLength),
       bounty: life.bounty,
     };
-    const completed = this.profiles.recordLife(c.profile, stats);
+    const completed = this.profiles.recordLife(c.profile, stats, { x: s.x, y: s.y });
     for (const ch of completed) this.notice(c, 2, `challenge complete: ${ch.text}`);
     void this.sendProfile(c);
   }

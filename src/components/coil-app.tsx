@@ -5,6 +5,7 @@ import {
   Maximize2,
   Minimize2,
   Share2,
+  Trophy,
   Users,
   Volume2,
   VolumeX,
@@ -12,7 +13,16 @@ import {
 } from "lucide-react";
 import { CoilEngine, type Controls, type HudState } from "@/game/engine";
 import { MAX_CUSTOM_BANDS, SKINS } from "@/game/model";
-import { DEATH_FX, TRAILS, UNLOCK_DEATH, UNLOCK_TRAIL } from "@/game/challenges";
+import {
+  DEATH_FX,
+  TRAILS,
+  UNLOCK_DEATH,
+  UNLOCK_TRAIL,
+  WEEKLY_GOAL,
+  isoWeek,
+  weeklySkinFor,
+} from "@/game/challenges";
+import { Link } from "@tanstack/react-router";
 
 const NICK_KEY = "agencoil-nick";
 const SKIN_KEY = "agencoil-skin";
@@ -78,7 +88,7 @@ function readSkin(): number {
   try {
     const v = localStorage.getItem(SKIN_KEY) ?? localStorage.getItem("coil-skin");
     const n = v ? Number(v) : 0;
-    return Number.isFinite(n) ? n % (SKINS.length + 1) : 0;
+    return Number.isFinite(n) ? n % (SKINS.length + 2) : 0;
   } catch {
     return 0;
   }
@@ -114,8 +124,9 @@ function gradientOf(bands: string[]): string {
   return `linear-gradient(90deg, ${stops})`;
 }
 
-/** Skin index SKINS.length means "custom". */
+/** Skin index SKINS.length means "custom"; one past that is this week's skin. */
 const CUSTOM = SKINS.length;
+const WEEKLY = SKINS.length + 1;
 
 export function CoilApp() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -226,12 +237,18 @@ export function CoilApp() {
   const trailOpen = (i: number) => i === 0 || (unlocks & (UNLOCK_TRAIL[i] ?? 0)) !== 0;
   const deathOpen = (i: number) => i === 0 || (unlocks & (UNLOCK_DEATH[i] ?? 0)) !== 0;
 
+  const week = isoWeek();
+  const weekly = weeklySkinFor(week);
+  const weekEarned = hud?.profile?.weekEarned ?? false;
+  const weekDone = hud?.profile?.weekDone ?? 0;
+
   const look = () => {
-    const chosen = locked(skin) ? 0 : skin;
+    let chosen = locked(skin) ? 0 : skin;
+    if (chosen === WEEKLY && !weekEarned) chosen = 0;
     return {
       name: nick,
-      skin: chosen === CUSTOM ? 0 : chosen,
-      bands: chosen === CUSTOM ? custom : undefined,
+      skin: chosen === CUSTOM || chosen === WEEKLY ? 0 : chosen,
+      bands: chosen === CUSTOM ? custom : chosen === WEEKLY ? weekly.bands : undefined,
       trail: trailOpen(trail) ? trail : 0,
       deathFx: deathOpen(deathFx) ? deathFx : 0,
     };
@@ -478,7 +495,13 @@ export function CoilApp() {
           <div className="mt-auto w-full max-w-md rounded-xl border border-line bg-surface/92 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.45)] sm:my-auto sm:p-6">
             <div className="flex items-baseline justify-between">
               <p className="text-xs tracking-[0.22em] text-muted uppercase">multiplayer arena</p>
-              <p className="text-xs text-subtle">{hud ? modeLabel : ""}</p>
+              <p className="text-xs text-subtle">
+                {hud?.watchingTop
+                  ? `watching ${hud.watchingTop.name} · ${hud.watchingTop.mass}`
+                  : hud
+                    ? modeLabel
+                    : ""}
+              </p>
             </div>
             <h1
               className="mt-1 text-4xl font-semibold tracking-tight text-fg sm:mt-2 sm:text-5xl"
@@ -489,7 +512,8 @@ export function CoilApp() {
             {hud?.profile && (
               <p className="mt-2 text-xs text-subtle">
                 all-time best {hud.profile.best} · kills {hud.profile.kills} · games{" "}
-                {hud.profile.games} · rank #{hud.profile.rank}
+                {hud.profile.games} ·{" "}
+                {hud.profile.rank > 0 ? `rank #${hud.profile.rank}` : "unranked"}
                 {!hud.profile.persistent && " (this server only)"}
               </p>
             )}
@@ -560,6 +584,37 @@ export function CoilApp() {
                 <span className="rounded bg-bg/70 px-2 py-0.5 text-fg">build your own</span>
               </button>
             </div>
+            <button
+              type="button"
+              aria-label={`This week's skin: ${weekly.name}`}
+              onClick={() => {
+                if (!weekEarned) {
+                  setLockNote(
+                    `finish ${WEEKLY_GOAL} daily challenges this week to earn "${weekly.name}" (${Math.min(weekDone, WEEKLY_GOAL)}/${WEEKLY_GOAL})`,
+                  );
+                  return;
+                }
+                setLockNote(null);
+                setSkin(WEEKLY);
+              }}
+              className="mt-2 flex h-9 w-full items-center justify-between rounded-md border px-3 text-xs"
+              style={{
+                background: gradientOf(weekly.bands),
+                borderColor: skin === WEEKLY ? "#e8eaee" : "transparent",
+                boxShadow: skin === WEEKLY ? "0 0 0 1px #e8eaee" : "none",
+                opacity: weekEarned ? 1 : 0.6,
+              }}
+            >
+              <span className="rounded bg-bg/70 px-2 py-0.5 text-fg">
+                this week only · {weekly.name}
+              </span>
+              <span className="rounded bg-bg/70 px-2 py-0.5 text-fg">
+                {weekEarned
+                  ? "earned"
+                  : `${Math.min(weekDone, WEEKLY_GOAL)}/${WEEKLY_GOAL} challenges`}
+                {!weekEarned && <Lock size={10} className="ml-1 inline" />}
+              </span>
+            </button>
             {lockNote && <p className="mt-2 text-xs text-subtle">{lockNote}</p>}
             {skin === CUSTOM && (
               <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -677,18 +732,27 @@ export function CoilApp() {
             >
               Play
             </button>
-            <button
-              type="button"
-              onClick={() => void invite()}
-              className="mt-2 flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-line text-sm text-muted hover:text-fg"
-            >
-              <Users size={16} />
-              {invited
-                ? "invite link copied"
-                : party
-                  ? `playing with friends · ${party}`
-                  : "play with friends"}
-            </button>
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                onClick={() => void invite()}
+                className="flex h-10 flex-1 items-center justify-center gap-2 rounded-lg border border-line text-sm text-muted hover:text-fg"
+              >
+                <Users size={16} />
+                {invited
+                  ? "invite link copied"
+                  : party
+                    ? `playing with friends · ${party}`
+                    : "play with friends"}
+              </button>
+              <Link
+                to="/top"
+                className="flex h-10 items-center justify-center gap-2 rounded-lg border border-line px-3 text-sm text-muted hover:text-fg"
+              >
+                <Trophy size={16} />
+                top players
+              </Link>
+            </div>
 
             <p className="mt-4 text-xs leading-relaxed text-subtle sm:mt-5">
               {touch

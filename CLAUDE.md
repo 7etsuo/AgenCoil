@@ -99,6 +99,13 @@ Clients that append a device key to HELLO are "v2" and get extra messages; the o
 - Parties: `?with=CODE` (or the invite button) sets a party code sent in HELLO; new members spawn near a live member.
 - Arena events: every `SWARM_EVERY_S` the server drops `SWARM_ORBS` golden orbs (`Food.k` 4) at an open point and broadcasts `EVENT`; the client shows a banner and a minimap marker.
 - Kill cam: the engine holds a 700 ms beat after death (particles at 0.35x, zoom in 1.25x) before the death card appears.
+- Leaderboard page: `src/routes/top.tsx` fetches `GET <server>?top=alltime|weekly` (JSON, 30 s cache) from the game server; `ProfileStore.top` reads the profiles table (or memory) and excludes flagged accounts. Profiles also store the last look (`skin`, `bands`) for the stripe, the ISO-week best, and where the all-time best run ended.
+- Spectating from the menu: while online, the menu camera follows the current leader (`stats.board[0]`), which the server streams because the client sends its view even when not playing.
+- Skill-based spawn: a fresh spawn with all-time best 500 or more is placed 700 to 1200 units from one of the top five snakes; under 100 it goes to the quietest of eight sampled open points; a party overrides both.
+- Weekly skin: `weeklySkinFor(isoWeek())` picks one of `WEEKLY_SKINS`; finishing `WEEKLY_GOAL` (3) daily challenges in a week adds the week to the profile's `earned` list. It is sent as custom bands, so the lock is a menu convenience, not a server rule.
+- Ghost: `PROFILE` carries `bestX`/`bestY`; the renderer draws a faint ring and label there and a dot on the minimap.
+- Anti-bot: `fingerprint` in the server keeps per-client input timing and heading statistics over 1800 inputs; a coefficient of variation under 1% with a heading that almost never or always changes flags the profile (`flagged`), which only removes it from the leaderboard page.
+- Music moods: `GameAudio.setMood` glides the pad root and filter between calm, bright (length 200+) and heavy (1500+).
 
 ### Server (`game-server/`)
 

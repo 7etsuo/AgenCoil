@@ -6,7 +6,9 @@
  */
 import pg from "pg";
 import {
+  WEEKLY_GOAL,
   dailyChallenges,
+  isoWeek,
   lifeValue,
   todayUtc,
   type Challenge,
@@ -26,6 +28,28 @@ export interface Profile {
   day: string;
   progress: number[];
   done: boolean[];
+  /** Look of the last life, for the leaderboard page. */
+  skin: number;
+  bands: string[];
+  /** Where the all-time best run ended. */
+  bestX: number;
+  bestY: number;
+  /** This ISO week's best and challenge completions; weeks earned list. */
+  week: string;
+  weekBest: number;
+  weekDone: number;
+  earned: string[];
+  /** Automated-play suspicion, kept off the leaderboard page. */
+  flagged: boolean;
+}
+
+export interface TopEntry {
+  name: string;
+  best: number;
+  kills: number;
+  games: number;
+  skin: number;
+  bands: string[];
 }
 
 export interface ChallengeView {
@@ -58,6 +82,20 @@ export class ProfileStore {
              unlocks INTEGER NOT NULL DEFAULT 0, day TEXT NOT NULL DEFAULT '',
              progress JSONB NOT NULL DEFAULT '[]', updated TIMESTAMPTZ NOT NULL DEFAULT now())`,
         )
+        .then(() =>
+          this.pool!.query(
+            `ALTER TABLE agencoil_profiles
+               ADD COLUMN IF NOT EXISTS skin INTEGER NOT NULL DEFAULT 0,
+               ADD COLUMN IF NOT EXISTS bands JSONB NOT NULL DEFAULT '[]',
+               ADD COLUMN IF NOT EXISTS best_x REAL NOT NULL DEFAULT 0,
+               ADD COLUMN IF NOT EXISTS best_y REAL NOT NULL DEFAULT 0,
+               ADD COLUMN IF NOT EXISTS week TEXT NOT NULL DEFAULT '',
+               ADD COLUMN IF NOT EXISTS week_best INTEGER NOT NULL DEFAULT 0,
+               ADD COLUMN IF NOT EXISTS week_done INTEGER NOT NULL DEFAULT 0,
+               ADD COLUMN IF NOT EXISTS earned JSONB NOT NULL DEFAULT '[]',
+               ADD COLUMN IF NOT EXISTS flagged BOOLEAN NOT NULL DEFAULT false`,
+          ),
+        )
         .then(() => undefined)
         .catch((err) => {
           console.error("[profiles] init failed:", (err as Error)?.message ?? err);
@@ -83,6 +121,15 @@ export class ProfileStore {
       day: todayUtc(),
       progress: [0, 0, 0],
       done: [false, false, false],
+      skin: 0,
+      bands: [],
+      bestX: 0,
+      bestY: 0,
+      week: isoWeek(),
+      weekBest: 0,
+      weekDone: 0,
+      earned: [],
+      flagged: false,
     };
   }
 
@@ -106,8 +153,19 @@ export class ProfileStore {
           unlocks: number;
           day: string;
           progress: unknown;
+          skin: number;
+          bands: unknown;
+          best_x: number;
+          best_y: number;
+          week: string;
+          week_best: number;
+          week_done: number;
+          earned: unknown;
+          flagged: boolean;
         }>(
-          `SELECT name, best, kills, games, survive, unlocks, day, progress FROM agencoil_profiles WHERE key = $1`,
+          `SELECT name, best, kills, games, survive, unlocks, day, progress, skin, bands, best_x, best_y,
+                  week, week_best, week_done, earned, flagged
+           FROM agencoil_profiles WHERE key = $1`,
           [key],
         );
         const r = rows.rows[0];
@@ -124,6 +182,19 @@ export class ProfileStore {
             day: r.day,
             progress: [0, 1, 2].map((i) => Number(prog[i] ?? 0)),
             done: [0, 1, 2].map((i) => Number(prog[i + 3] ?? 0) === 1),
+            skin: Number(r.skin) || 0,
+            bands: Array.isArray(r.bands)
+              ? (r.bands as string[]).filter((b) => typeof b === "string")
+              : [],
+            bestX: Number(r.best_x) || 0,
+            bestY: Number(r.best_y) || 0,
+            week: r.week || isoWeek(),
+            weekBest: Number(r.week_best) || 0,
+            weekDone: Number(r.week_done) || 0,
+            earned: Array.isArray(r.earned)
+              ? (r.earned as string[]).filter((w) => typeof w === "string")
+              : [],
+            flagged: Boolean(r.flagged),
           };
         }
       } catch (err) {
@@ -137,10 +208,30 @@ export class ProfileStore {
 
   private rollDay(p: Profile): void {
     const today = todayUtc();
+    const week = isoWeek();
+    if (p.week !== week) {
+      p.week = week;
+      p.weekBest = 0;
+      p.weekDone = 0;
+      this.dirty.add(p.key);
+    }
     if (p.day === today) return;
     p.day = today;
     p.progress = [0, 0, 0];
     p.done = [false, false, false];
+    this.dirty.add(p.key);
+  }
+
+  /** Remember the look used for a life. */
+  setLook(p: Profile, skin: number, bands: string[] | undefined): void {
+    p.skin = skin;
+    p.bands = bands ?? [];
+    this.dirty.add(p.key);
+  }
+
+  flag(p: Profile): void {
+    if (p.flagged) return;
+    p.flagged = true;
     this.dirty.add(p.key);
   }
 
@@ -154,11 +245,18 @@ export class ProfileStore {
   }
 
   /** Fold a finished life into the profile; returns challenges completed by it. */
-  recordLife(p: Profile, life: LifeStats): Challenge[] {
+  recordLife(p: Profile, life: LifeStats, at?: { x: number; y: number }): Challenge[] {
     this.rollDay(p);
     p.games++;
     p.kills += life.kills;
-    if (life.length > p.best) p.best = life.length;
+    if (life.length > p.best) {
+      p.best = life.length;
+      if (at) {
+        p.bestX = Math.round(at.x);
+        p.bestY = Math.round(at.y);
+      }
+    }
+    if (life.length > p.weekBest) p.weekBest = life.length;
     if (life.survive > p.survive) p.survive = Math.floor(life.survive);
     const completed: Challenge[] = [];
     dailyChallenges(p.day).forEach((c, i) => {
@@ -167,16 +265,68 @@ export class ProfileStore {
       if (!p.done[i] && v >= c.target) {
         p.done[i] = true;
         p.unlocks |= c.unlock;
+        p.weekDone++;
         completed.push(c);
       }
     });
+    if (p.weekDone >= WEEKLY_GOAL && !p.earned.includes(p.week)) p.earned.push(p.week);
     this.dirty.add(p.key);
     return completed;
   }
 
+  /** Leaderboard rows, all-time or this week, flagged accounts excluded. */
+  async top(kind: "alltime" | "weekly", n: number): Promise<TopEntry[]> {
+    const week = isoWeek();
+    if (this.pool) {
+      try {
+        await this.ready;
+        const col = kind === "weekly" ? "week_best" : "best";
+        const where = kind === "weekly" ? `AND week = $2 AND week_best > 0` : `AND best > 0`;
+        const params: unknown[] = [n];
+        if (kind === "weekly") params.push(week);
+        const rows = await this.pool.query<{
+          name: string;
+          score: number;
+          kills: number;
+          games: number;
+          skin: number;
+          bands: unknown;
+        }>(
+          `SELECT name, ${col} AS score, kills, games, skin, bands FROM agencoil_profiles
+           WHERE flagged = false ${where} ORDER BY ${col} DESC, updated DESC LIMIT $1`,
+          params,
+        );
+        return rows.rows.map((r) => ({
+          name: r.name,
+          best: Number(r.score),
+          kills: Number(r.kills),
+          games: Number(r.games),
+          skin: Number(r.skin) || 0,
+          bands: Array.isArray(r.bands) ? (r.bands as string[]) : [],
+        }));
+      } catch (err) {
+        console.error("[profiles] top failed:", (err as Error)?.message ?? err);
+      }
+    }
+    return [...this.cache.values()]
+      .filter((p) => !p.flagged)
+      .map((p) => ({
+        name: p.name,
+        best: kind === "weekly" ? (p.week === week ? p.weekBest : 0) : p.best,
+        kills: p.kills,
+        games: p.games,
+        skin: p.skin,
+        bands: p.bands,
+      }))
+      .filter((e) => e.best > 0)
+      .sort((a, b) => b.best - a.best)
+      .slice(0, n);
+  }
+
   /** All-time rank by best length (1 = longest ever). */
   async rank(p: Profile): Promise<number> {
-    if (this.pool && p.best > 0) {
+    if (p.best <= 0) return 0;
+    if (this.pool) {
       try {
         await this.ready;
         const r = await this.pool.query<{ n: string }>(
@@ -205,11 +355,15 @@ export class ProfileStore {
         const p = this.cache.get(key);
         if (!p) continue;
         await this.pool.query(
-          `INSERT INTO agencoil_profiles (key, name, best, kills, games, survive, unlocks, day, progress, updated)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+          `INSERT INTO agencoil_profiles (key, name, best, kills, games, survive, unlocks, day, progress,
+             skin, bands, best_x, best_y, week, week_best, week_done, earned, flagged, updated)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now())
            ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, best = GREATEST(agencoil_profiles.best, EXCLUDED.best),
              kills = EXCLUDED.kills, games = EXCLUDED.games, survive = GREATEST(agencoil_profiles.survive, EXCLUDED.survive),
-             unlocks = agencoil_profiles.unlocks | EXCLUDED.unlocks, day = EXCLUDED.day, progress = EXCLUDED.progress, updated = now()`,
+             unlocks = agencoil_profiles.unlocks | EXCLUDED.unlocks, day = EXCLUDED.day, progress = EXCLUDED.progress,
+             skin = EXCLUDED.skin, bands = EXCLUDED.bands, best_x = EXCLUDED.best_x, best_y = EXCLUDED.best_y,
+             week = EXCLUDED.week, week_best = EXCLUDED.week_best, week_done = EXCLUDED.week_done,
+             earned = EXCLUDED.earned, flagged = agencoil_profiles.flagged OR EXCLUDED.flagged, updated = now()`,
           [
             p.key,
             p.name,
@@ -220,6 +374,15 @@ export class ProfileStore {
             p.unlocks,
             p.day,
             JSON.stringify([...p.progress, ...p.done.map((d) => (d ? 1 : 0))]),
+            p.skin,
+            JSON.stringify(p.bands),
+            p.bestX,
+            p.bestY,
+            p.week,
+            p.weekBest,
+            p.weekDone,
+            JSON.stringify(p.earned),
+            p.flagged,
           ],
         );
       }

@@ -48,6 +48,8 @@ export interface HudState {
   /** A beat after death where the card should wait. */
   deathBeat: boolean;
   bountyOnYou: number;
+  /** Who the menu camera is following. */
+  watchingTop: { name: string; mass: number } | null;
   killNotice: string | null;
   /** Recent notable deaths, newest last. */
   feed: string[];
@@ -447,6 +449,10 @@ export class CoilEngine {
           : 0,
       deathBeat: this.phase === "dead" && now < this.deathBeatUntil,
       bountyOnYou: me?.bounty ?? 0,
+      watchingTop:
+        this.phase === "menu" && st?.board[0]
+          ? { name: st.board[0].name, mass: st.board[0].mass }
+          : null,
       killNotice: this.killNotice,
       feed: this.feed.map((f) => f.text),
       deathRank: this.deathRank,
@@ -839,6 +845,7 @@ export class CoilEngine {
     }
     this.audio.setDanger(danger);
     this.audio.setHeartbeat(p.boosting && p.mass < 30);
+    this.audio.setMood(p.mass >= 1500 ? 2 : p.mass >= 200 ? 1 : 0);
   }
 
   private pushFeed(text: string): void {
@@ -966,9 +973,19 @@ export class CoilEngine {
   private updateCam(dt: number): void {
     const world = this.world;
     if (this.phase === "menu") {
-      this.menuT += dt * 0.12;
-      this.cam.x = Math.cos(this.menuT) * 420;
-      this.cam.y = Math.sin(this.menuT * 0.7) * 320;
+      // Spectate the current leader while online; drift around the centre
+      // otherwise.
+      const top = this.online ? this.stats?.board[0] : undefined;
+      const live = top ? world.snakes.find((s) => s.id === String(top.nid)) : undefined;
+      const target = live ?? top;
+      if (target) {
+        this.cam.x = lerp(this.cam.x, target.x, 1 - Math.pow(0.01, dt));
+        this.cam.y = lerp(this.cam.y, target.y, 1 - Math.pow(0.01, dt));
+      } else {
+        this.menuT += dt * 0.12;
+        this.cam.x = Math.cos(this.menuT) * 420;
+        this.cam.y = Math.sin(this.menuT * 0.7) * 320;
+      }
     } else if (this.phase === "dead") {
       let target: Vec | null = null;
       if (this.watchNid !== null) {
@@ -1021,6 +1038,9 @@ export class CoilEngine {
       this.insets,
       this.event && this.event.left - (performance.now() - this.event.at) / 1000 > 0
         ? { x: this.event.x, y: this.event.y }
+        : null,
+      this.profile && this.profile.best > 0 && (this.profile.bestX || this.profile.bestY)
+        ? { x: this.profile.bestX, y: this.profile.bestY, best: this.profile.best }
         : null,
     );
     if (this.stick && this.phase === "play") {

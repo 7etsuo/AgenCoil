@@ -11,7 +11,10 @@ export class GameAudio {
     master: GainNode;
     timer: ReturnType<typeof setInterval>;
     nodes: AudioNode[];
+    oscs: OscillatorNode[];
+    filter: BiquadFilterNode;
   } | null = null;
+  private mood = 0;
 
   unlock(): void {
     if (this.ctx) {
@@ -127,6 +130,7 @@ export class GameAudio {
     lfoGain.connect(filter.frequency);
     lfo.start();
     const nodes: AudioNode[] = [lfo, lfoGain, filter];
+    const oscs: OscillatorNode[] = [];
     const root = 55;
     for (const [mult, detune] of [
       [1, -6],
@@ -144,11 +148,38 @@ export class GameAudio {
       g.connect(filter);
       osc.start();
       nodes.push(osc, g);
+      oscs.push(osc);
     }
     filter.connect(master);
     master.connect(ctx.destination);
     const timer = setInterval(() => this.note(master), 2100 + Math.random() * 1600);
-    this.music = { master, timer, nodes };
+    this.music = { master, timer, nodes, oscs, filter };
+    this.applyMood();
+  }
+
+  /**
+   * Three moods that track how big you are: 0 calm and low, 1 brighter and
+   * a fourth up, 2 dark and heavy a fourth down. Transitions glide.
+   */
+  setMood(mood: number): void {
+    const m = Math.max(0, Math.min(2, Math.round(mood)));
+    if (m === this.mood) return;
+    this.mood = m;
+    this.applyMood();
+  }
+
+  private applyMood(): void {
+    const mu = this.music;
+    if (!mu || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    const root = this.mood === 1 ? 73.4 : this.mood === 2 ? 41.2 : 55;
+    const mults = [1, 1, 2, 3];
+    mu.oscs.forEach((o, i) => o.frequency.setTargetAtTime(root * mults[i]!, t, 1.5));
+    mu.filter.frequency.setTargetAtTime(
+      this.mood === 1 ? 900 : this.mood === 2 ? 320 : 520,
+      t,
+      1.5,
+    );
   }
 
   stopMusic(): void {
@@ -175,7 +206,8 @@ export class GameAudio {
     const t = ctx.currentTime;
     const semis =
       PENTATONIC[(Math.random() * PENTATONIC.length) | 0]! + 12 * (1 + ((Math.random() * 2) | 0));
-    const freq = 110 * Math.pow(2, semis / 12);
+    const base = this.mood === 1 ? 146.8 : this.mood === 2 ? 82.4 : 110;
+    const freq = base * Math.pow(2, semis / 12);
     const osc = ctx.createOscillator();
     osc.type = "sine";
     osc.frequency.setValueAtTime(freq, t);
