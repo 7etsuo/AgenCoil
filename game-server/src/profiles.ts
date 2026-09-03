@@ -88,6 +88,11 @@ export class ProfileStore {
   private readonly dirty = new Set<string>();
   private readonly versions = new Map<string, number>();
   private pool: pg.Pool | null = null;
+
+  /** The shared connection pool, for the arena coordinator. */
+  get db(): pg.Pool | null {
+    return this.pool;
+  }
   private ready: Promise<void> | null = null;
   private initialized = false;
   private flushing = false;

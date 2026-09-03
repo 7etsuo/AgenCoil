@@ -56,8 +56,12 @@ writeFileSync(
         { src: "/(.*)", headers: { "Access-Control-Allow-Origin": "*" }, continue: true },
         { handle: "filesystem" },
         { src: "/api/play-ticket", dest: "/api/ws" },
+        { src: "/api/arena", dest: "/api/ws" },
+        { src: "/api/drain", dest: "/api/ws" },
         { src: "/api/ws", dest: "/api/ws" },
       ],
+      // Keep the arena rolled over before its Sandbox session ends.
+      crons: [{ path: "/api/arena?tick=1", schedule: "*/10 * * * *" }],
     },
     null,
     2,

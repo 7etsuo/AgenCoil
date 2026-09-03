@@ -168,3 +168,31 @@ test("quests are a chain: only the active step progresses, and the chain opens a
   assert.equal(p.shards, 0);
   assert.ok(p.unlocks !== before, "three shards unlocked a cosmetic");
 });
+
+test("the coordinator picks the party's arena, else the oldest with room, else the newest", async () => {
+  const { mkdirSync: mk } = await import("node:fs");
+  const outDir = join(root, "game-server", "node_modules", ".cache");
+  mk(outDir, { recursive: true });
+  const out = join(outDir, "agencoil-arena.test.mjs");
+  await esbuild.build({
+    entryPoints: [join(root, "game-server", "src", "arena-host.ts")],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    external: ["pg", "@vercel/sandbox"],
+    outfile: out,
+    logLevel: "silent",
+  });
+  const { pickArena } = await import(pathToFileURL(out).href);
+  const ok = (players) => ({ ok: true, players, at: 0 });
+  const arenas = [
+    { name: "a", domain: "https://a", createdAt: 1, expiresAt: 9, health: ok(60) },
+    { name: "b", domain: "https://b", createdAt: 2, expiresAt: 9, health: ok(3) },
+    { name: "c", domain: "https://c", createdAt: 3, expiresAt: 9, health: { ok: false, players: 0, at: 0 } },
+  ];
+  assert.equal(pickArena(arenas, null, 60).name, "b", "oldest arena with room");
+  assert.equal(pickArena(arenas, "a", 60).name, "a", "party sticks to its arena even when full");
+  assert.equal(pickArena(arenas, "c", 60).name, "b", "a dead party arena is ignored");
+  assert.equal(pickArena([arenas[0]], null, 60).name, "a", "everything full: the newest live one");
+  assert.equal(pickArena([arenas[2]], null, 60), null, "nothing live");
+});

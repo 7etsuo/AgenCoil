@@ -78,7 +78,8 @@ export async function openPlayer(browser, name, opts = {}) {
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto(opts.url ?? WEB, { waitUntil: "load" });
-  await page.waitForTimeout(500);
+  // The first page after a fresh bundle compiles for a moment; give it room.
+  await page.waitForTimeout(1500);
   await page.fill("#nick", name);
   await page.getByRole("button", { name: "Play", exact: true }).click();
   await page.waitForTimeout(1200);

@@ -157,6 +157,15 @@ export function serverHttpUrl(): string {
   return defaultServerUrl().replace(/^ws/, "http");
 }
 
+/** The coordinator endpoint next to a socket URL: where to ask which arena to join. */
+export function arenaLookupUrl(serverUrl: string): string {
+  const url = new URL(serverUrl);
+  url.protocol = url.protocol === "wss:" ? "https:" : "http:";
+  url.pathname = url.pathname.replace(/\/api\/ws\/?$/, "/api/arena");
+  url.search = "";
+  return url.toString();
+}
+
 export function playTicketUrl(serverUrl: string): string {
   const url = new URL(serverUrl);
   url.protocol = url.protocol === "wss:" ? "https:" : "http:";
@@ -236,6 +245,11 @@ export class NetSession {
   party = "";
   private comebackNext = false;
   private nearNext = 0;
+  /** The arena the coordinator assigned; null means dial `url` directly. */
+  private arena: string | null = null;
+  private resolving = false;
+  /** Skip lookups until then: the server said it has no coordinator, or the lookup failed. */
+  private noLookupUntil = 0;
 
   constructor(
     private readonly url: string,
@@ -258,13 +272,57 @@ export class NetSession {
   }
 
   connect(): void {
-    if (this.closed) return;
+    if (this.closed || this.resolving) return;
     this.setState(this.state === "online" ? "connecting" : this.state);
+    this.resolving = true;
+    void this.resolveArena().then((target) => {
+      this.resolving = false;
+      if (this.closed) return;
+      this.open(target);
+    });
+  }
+
+  /**
+   * Ask the coordinator which arena to join. It answers with the address of
+   * the one process every player shares; when it is absent (local server,
+   * or the lookup fails) the socket URL itself is the arena.
+   */
+  private async resolveArena(): Promise<string> {
+    if (this.arena) return this.arena;
+    if (performance.now() < this.noLookupUntil) return this.url;
+    try {
+      const q = this.party ? `?with=${encodeURIComponent(this.party)}` : "";
+      const res = await fetch(arenaLookupUrl(this.url) + q, {
+        signal: AbortSignal.timeout(1500),
+        cache: "no-store",
+      });
+      if (res.ok) {
+        const j = (await res.json()) as { ok?: boolean; url?: string };
+        if (j.ok && j.url && /^wss?:\/\//.test(j.url)) {
+          this.arena = j.url;
+          return j.url;
+        }
+        // No coordinator here: dial directly for a while.
+        this.noLookupUntil = performance.now() + 60_000;
+      }
+    } catch {
+      // Unreachable: reconnect attempts should not wait on lookups.
+      this.noLookupUntil = performance.now() + 8_000;
+    }
+    return this.url;
+  }
+
+  /** The address the socket currently dials (for play tickets). */
+  private get target(): string {
+    return this.arena ?? this.url;
+  }
+
+  private open(target: string): void {
     let ws: WebSocket;
     try {
       // Announce the wire protocol on the URL so the server knows it before
       // the first snapshot (see `proto` on the server's client record).
-      ws = new WebSocket(this.url + (this.url.includes("?") ? "&" : "?") + "v=2");
+      ws = new WebSocket(target + (target.includes("?") ? "&" : "?") + "v=2");
     } catch {
       this.scheduleRetry();
       return;
@@ -321,7 +379,7 @@ export class NetSession {
 
   /** Exchange a Turnstile response over HTTPS before asking the socket to spawn. */
   async authorize(turnstileToken: string): Promise<void> {
-    const response = await fetch(playTicketUrl(this.url), {
+    const response = await fetch(playTicketUrl(this.target), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ turnstileToken }),
@@ -345,6 +403,9 @@ export class NetSession {
     const waited = performance.now() - this.firstTry;
     if (this.state !== "online" && waited > OFFLINE_AFTER_MS) this.setState("offline");
     else if (this.state === "online") this.setState("connecting");
+    // After a couple of failures ask the coordinator again: the arena may
+    // have rolled over to a new process.
+    if (this.attempts >= 2) this.arena = null;
     let delay = Math.min(5000, 400 * Math.pow(1.7, Math.min(6, this.attempts)));
     if (this.fullRetryMs) {
       delay = this.fullRetryMs;
@@ -632,6 +693,7 @@ export class NetSession {
         // Try again shortly; the platform may route us to another instance.
         const secs = r.u16();
         this.fullRetryMs = Math.max(1000, secs * 1000);
+        this.arena = null;
         break;
       }
       case S2C.PROFILE: {

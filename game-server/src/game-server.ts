@@ -68,6 +68,7 @@ import {
   type LifeStats,
 } from "../../src/game/challenges";
 import { playGateFromEnv } from "./play-gate";
+import { ArenaHost } from "./arena-host";
 
 interface View {
   cx: number;
@@ -215,7 +216,11 @@ function sanitizeBands(bands: string[] | undefined): string[] | undefined {
 
 export class GameServer {
   readonly world = new World(true);
-  readonly instance = `${process.env.VERCEL_DEPLOYMENT_ID ?? "local"}-${randomBytes(3).toString("hex")}`;
+  readonly instance =
+    process.env.ARENA_NAME ??
+    `${process.env.VERCEL_DEPLOYMENT_ID ?? "local"}-${randomBytes(3).toString("hex")}`;
+  /** Set once an old arena has been told to hand its players to the coordinator. */
+  private draining = false;
   private readonly secret = process.env.GAME_SECRET ?? randomBytes(32).toString("hex");
   private readonly playGate = playGateFromEnv(this.secret);
   private readonly clients = new Set<Client>();
@@ -223,6 +228,7 @@ export class GameServer {
   private readonly grace = new Map<string, NodeJS.Timeout>();
   private readonly daily = new DailyBoard();
   private readonly profiles = new ProfileStore();
+  private readonly host = new ArenaHost(this.profiles.db, process.env);
   private readonly parties = new Map<string, Set<string>>();
   private bountyOf = new Map<string, number>();
   private event: { x: number; y: number; until: number } | null = null;
@@ -265,6 +271,39 @@ export class GameServer {
 
     const url = new URL(req.url ?? "/", "http://arena.local");
     const path = url.pathname;
+    if (path === "/api/arena") {
+      if (url.searchParams.get("tick")) {
+        const r = await this.host.tick().catch((e: Error) => ({ error: e.message }));
+        res.end(JSON.stringify({ ok: true, ...r }));
+        return;
+      }
+      const party = (url.searchParams.get("with") ?? "").replace(/[^A-Za-z0-9]/g, "").slice(0, 12);
+      try {
+        const pick = await this.host.resolve(party);
+        res.setHeader("cache-control", "no-store");
+        if (!pick) {
+          // A plain 200 so the browser console stays clean on local servers.
+          res.end(JSON.stringify({ ok: false }));
+          return;
+        }
+        res.end(JSON.stringify({ ok: true, ...pick }));
+      } catch (e) {
+        res.statusCode = 503;
+        res.end(JSON.stringify({ ok: false, error: (e as Error).message }));
+      }
+      return;
+    }
+    if (path === "/api/drain") {
+      const secret = process.env.GAME_SECRET ?? "";
+      if (!secret || req.headers["x-game-secret"] !== secret) {
+        res.statusCode = 403;
+        res.end(JSON.stringify({ ok: false }));
+        return;
+      }
+      this.drain();
+      res.end(JSON.stringify({ ok: true, drained: this.clients.size }));
+      return;
+    }
     const top = url.searchParams.get("top");
     if (top === "alltime" || top === "weekly" || top === "season" || top === "crew") {
       res.setHeader("cache-control", "public, max-age=30");
@@ -327,6 +366,8 @@ export class GameServer {
     return {
       ok: true,
       instance: this.instance,
+      draining: this.draining,
+      coordinator: this.host.enabled,
       players: snakes.filter((s) => !s.isBot).length,
       bots: snakes.filter((s) => s.isBot).length,
       clients: this.clients.size,
@@ -440,6 +481,11 @@ export class GameServer {
     }
     // A full instance turns newcomers away with a retry hint; on a platform
     // that scales instances by concurrency the retry lands elsewhere.
+    if (this.draining) {
+      ws.send(new Writer().u8(S2C.FULL).u16(1).finish());
+      ws.close(1013, "arena draining");
+      return;
+    }
     if (this.clients.size >= MAX_PLAYERS_PER_INSTANCE) {
       ws.send(
         new Writer()
@@ -1041,6 +1087,19 @@ export class GameServer {
       }
     }
     this.world.bossHits.length = 0;
+  }
+
+  /** Hand every player to the coordinator: FULL with a one second retry, then close. */
+  private drain(): void {
+    this.draining = true;
+    for (const c of this.clients) {
+      try {
+        c.ws.send(new Writer().u8(S2C.FULL).u16(1).finish());
+        c.ws.close(1013, "arena draining");
+      } catch {
+        /* already gone */
+      }
+    }
   }
 
   private notice(client: Client, kind: number, text: string): void {
