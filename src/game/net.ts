@@ -110,7 +110,7 @@ const INPUT_HZ = 30;
 /** A predicted eat the server has not confirmed by then is put back. */
 const EAT_CONFIRM_MS = 700;
 const OFFLINE_AFTER_MS = 6000;
-const SNAP_CORRECT_DIST = 140;
+const SNAP_CORRECT_DIST = 220;
 /** Interpolation delay bounds; the live value tracks observed snapshot jitter. */
 const INTERP_MIN_MS = 80;
 const INTERP_MAX_MS = 220;
@@ -150,6 +150,9 @@ export class NetSession {
   } | null = null;
   /** Correction still to be applied to the predicted head, applied smoothly. */
   private offset = { x: 0, y: 0 };
+  /** When we last flipped boost on or off; the server's flag wins after a round trip. */
+  private boostChangedAt = 0;
+  private lastWantBoost = false;
   /** Predicted head at the moment each input was sent, keyed by sequence. */
   private history: { seq: number; x: number; y: number; angle: number }[] = [];
   private seq = 0;
@@ -575,7 +578,7 @@ export class NetSession {
           boosting: e.boosting,
           ack,
         };
-        this.reconcile(ack, e.x, e.y, e.angle);
+        this.reconcile(ack, e.x, e.y);
         const me = this.world.snakes.find((s) => s.id === id);
         if (me && e.full && e.points && e.points.length > 1 && this.awaitingBody) {
           // A reattached snake gets its real body back instead of the
@@ -655,7 +658,7 @@ export class NetSession {
    * and is folded into `offset` for the frame loop to apply gradually. A
    * large error (teleport, hop, rebuilt snake) is applied at once.
    */
-  private reconcile(ack: number, sx: number, sy: number, sangle: number): void {
+  private reconcile(ack: number, sx: number, sy: number): void {
     const me = this.world.player;
     if (!me) return;
     let hist: { seq: number; x: number; y: number; angle: number } | undefined;
@@ -673,13 +676,19 @@ export class NetSession {
     this.diag.corrSum += err;
     if (err > this.diag.corrMax) this.diag.corrMax = err;
     if (err > SNAP_CORRECT_DIST) {
+      // Far off: move at once, but keep steering and the input history so
+      // the player never loses control of the heading.
       this.diag.snapsHard++;
       me.x += ex;
       me.y += ey;
-      me.angle = sangle;
+      // Later predictions were made from the uncorrected head: shift them
+      // too, or every following ack would measure the same error again.
+      for (const h of this.history) {
+        h.x += ex;
+        h.y += ey;
+      }
       this.offset.x = 0;
       this.offset.y = 0;
-      this.history = [];
       return;
     }
     // Replace, not accumulate: each ack measures the whole remaining error.
@@ -713,13 +722,23 @@ export class NetSession {
     const me = this.world.player;
     if (me) {
       this.world.steerToward(me, aim.x, aim.y, dt);
-      me.boosting = wantBoost && me.mass > BOOST_MIN_MASS;
+      if (wantBoost !== this.lastWantBoost) {
+        this.lastWantBoost = wantBoost;
+        this.boostChangedAt = now;
+      }
+      // Predict boost from our own intent right after a toggle, then defer
+      // to the server's flag: it alone knows when the length floor stops the
+      // boost, and a 2.5x speed disagreement would snowball into hard snaps.
+      const srvSelf = this.serverSelf;
+      const settled = srvSelf && now - this.boostChangedAt > this.rttMs + 80;
+      me.boosting = settled ? srvSelf.boosting : wantBoost && me.mass > BOOST_MIN_MASS;
       this.world.moveHead(me, dt);
       const srv = this.serverSelf;
       if (srv) {
         // Bleed off whatever offset reconciliation left, a little per frame,
-        // so corrections are never visible as jumps.
-        const k = 1 - Math.pow(0.05, dt);
+        // so corrections are never visible as jumps; big offsets close faster.
+        const big = Math.hypot(this.offset.x, this.offset.y) > 60;
+        const k = 1 - Math.pow(big ? 0.002 : 0.05, dt);
         me.x += this.offset.x * k;
         me.y += this.offset.y * k;
         this.offset.x *= 1 - k;
