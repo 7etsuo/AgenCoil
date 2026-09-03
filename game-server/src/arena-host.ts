@@ -21,6 +21,8 @@ export interface ArenaRow {
   domain: string;
   createdAt: number;
   expiresAt: number;
+  /** The function deployment whose bundle this arena runs. */
+  build: string;
 }
 
 export interface ArenaHealth {
@@ -87,6 +89,9 @@ export class ArenaHost {
     await this.pool!.query(`CREATE TABLE IF NOT EXISTS agencoil_arena (
       name TEXT PRIMARY KEY, domain TEXT NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL)`);
     await this.pool!.query(
+      `ALTER TABLE agencoil_arena ADD COLUMN IF NOT EXISTS build TEXT NOT NULL DEFAULT ''`,
+    );
+    await this.pool!.query(
       `CREATE TABLE IF NOT EXISTS agencoil_arena_lock (id INTEGER PRIMARY KEY, until BIGINT NOT NULL)`,
     );
     await this.pool!.query(
@@ -129,6 +134,7 @@ export class ArenaHost {
     const rows = await this.rows();
     let created = false;
     const drained: string[] = [];
+    const build = this.build;
     for (const r of rows) {
       const h = await this.checkHealth(r);
       if (!h.ok && now - r.createdAt > 120_000) {
@@ -136,11 +142,15 @@ export class ArenaHost {
         await this.q(`DELETE FROM agencoil_arena WHERE name = $1`, [r.name]);
         continue;
       }
-      if (r.expiresAt - now < ARENA_ROLL_BEFORE_MS) {
+      // Roll an arena that is near its session end, or that runs an older
+      // bundle than this function: a push reaches the world within a tick.
+      const stale = r.build !== build;
+      if (stale || r.expiresAt - now < ARENA_ROLL_BEFORE_MS) {
         const younger = rows.find(
           (o) =>
             o.name !== r.name &&
             o.createdAt > r.createdAt &&
+            o.build === build &&
             o.expiresAt - now > ARENA_ROLL_BEFORE_MS,
         );
         if (!younger) {
@@ -154,14 +164,20 @@ export class ArenaHost {
     return { arenas: rows.length, created, drained };
   }
 
+  /** The deployment this function runs; arenas built from another are rolled. */
+  private get build(): string {
+    return this.env.VERCEL_DEPLOYMENT_ID ?? "local";
+  }
+
   private async rows(): Promise<ArenaRow[]> {
-    const res = await this.pool!.query<{
+    const res = await this.q<{
       name: string;
       domain: string;
       created_at: string;
       expires_at: string;
+      build: string;
     }>(
-      `SELECT name, domain, created_at, expires_at FROM agencoil_arena WHERE expires_at > $1 ORDER BY created_at ASC`,
+      `SELECT name, domain, created_at, expires_at, build FROM agencoil_arena WHERE expires_at > $1 ORDER BY created_at ASC`,
       [Date.now()],
     );
     return res.rows.map((r) => ({
@@ -169,6 +185,7 @@ export class ArenaHost {
       domain: r.domain,
       createdAt: Number(r.created_at),
       expiresAt: Number(r.expires_at),
+      build: r.build ?? "",
     }));
   }
 
@@ -266,9 +283,9 @@ export class ArenaHost {
       }
       const expiresAt = sandbox.expiresAt?.getTime() ?? now + ARENA_SESSION_MS;
       await this.q(
-        `INSERT INTO agencoil_arena (name, domain, created_at, expires_at) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (name) DO UPDATE SET domain = EXCLUDED.domain, expires_at = EXCLUDED.expires_at`,
-        [name, domain, now, expiresAt],
+        `INSERT INTO agencoil_arena (name, domain, created_at, expires_at, build) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (name) DO UPDATE SET domain = EXCLUDED.domain, expires_at = EXCLUDED.expires_at, build = EXCLUDED.build`,
+        [name, domain, now, expiresAt, this.build],
       );
       return true;
     } catch (err) {
