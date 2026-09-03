@@ -1,0 +1,8 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>AgenCoil server</title>
+<style>body{font:14px system-ui;background:#07090f;color:#e8eaee;padding:2rem}pre{color:#8b93a1}</style>
+<h1>AgenCoil arena server</h1>
+<p>WebSocket endpoint: <code>/api/ws</code></p>
+<pre id="s">loading status</pre>
+<script>fetch("/api/ws").then(r=>r.json()).then(j=>{document.getElementById("s").textContent=JSON.stringify(j,null,2)}).catch(e=>{document.getElementById("s").textContent="status unavailable: "+e})</script>

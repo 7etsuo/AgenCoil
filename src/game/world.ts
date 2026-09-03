@@ -30,7 +30,7 @@ import {
   wrapAngle,
 } from "./model";
 
-const CELL = 96;
+export const CELL = 96;
 const GRID_OFF = 256;
 const GRID_SPAN = 512;
 const CHASE_SPEED = 215;
@@ -52,12 +52,26 @@ export interface DeathEvent {
   pellets: Food[];
 }
 
-function cellKey(x: number, y: number): number {
+/** What a networked player wants this tick. */
+export interface PlayerInput {
+  angle: number;
+  boost: boolean;
+}
+
+export function cellKey(x: number, y: number): number {
   const gx = Math.floor(x / CELL) + GRID_OFF;
   const gy = Math.floor(y / CELL) + GRID_OFF;
   return gx * GRID_SPAN + gy;
 }
 
+/**
+ * The arena. Three ways to use it:
+ *  - offline: `playerId` is steered by aim, bots run when `host` is true;
+ *  - server: every player has an entry in `inputs`, bots run, all collisions
+ *    are judged here;
+ *  - client mirror: no stepping at all, just the entity store, the food grid,
+ *    and the trail helpers the network layer uses to grow bodies.
+ */
 export class World {
   snakes: Snake[] = [];
   foods: Food[] = [];
@@ -65,15 +79,19 @@ export class World {
   host = true;
   /** How many bots this world should keep alive (0 when not host). */
   desiredBots = 0;
+  inputs = new Map<string, PlayerInput>();
   eats: EatEvent[] = [];
   deaths: DeathEvent[] = [];
+  foodById = new Map<number, Food>();
   private grid = new Map<number, Food[]>();
   private foodIndex = new Map<Food, number>();
   private chasers: Food[] = [];
   private botTimer = 0;
+  private nextFoodId = 1;
+  private nextBotId = 1;
 
-  constructor() {
-    this.fillFood(FOOD_TARGET);
+  constructor(fill = true) {
+    if (fill) this.fillFood(FOOD_TARGET);
   }
 
   get player(): Snake | undefined {
@@ -92,10 +110,29 @@ export class World {
     this.snakes = this.snakes.filter((s) => !s.isBot);
   }
 
-  spawnPlayer(id: string, name: string, skin: number): Snake {
-    this.snakes = this.snakes.filter((s) => s.id !== id);
-    const s = this.makeSnake(id, name, skin, false);
+  spawnPlayer(id: string, name: string, skin: number, bands?: string[]): Snake {
+    const s = this.spawnSnake(id, name, skin, false, bands);
     this.playerId = id;
+    return s;
+  }
+
+  /** Spawn (or respawn) a snake without touching `playerId`. */
+  spawnSnake(
+    id: string,
+    name: string,
+    skin: number,
+    isBot: boolean,
+    bands?: string[],
+    mass?: number,
+  ): Snake {
+    this.snakes = this.snakes.filter((s) => s.id !== id);
+    const s = this.makeSnake(id, name, skin, isBot);
+    if (bands && bands.length) s.bands = bands.slice(0, 6);
+    if (mass && mass > START_MASS) {
+      s.mass = mass;
+      s.points = [];
+      this.ensureTrail(s);
+    }
     this.snakes.push(s);
     return s;
   }
@@ -103,16 +140,12 @@ export class World {
   spawnBot(used: Set<string>): Snake {
     const name = pickBotName(used);
     used.add(name.toLowerCase());
-    const s = this.makeSnake(
-      `b-${Math.random().toString(36).slice(2, 9)}`,
-      name,
-      (Math.random() * 16) | 0,
-      true,
-    );
+    const s = this.makeSnake(`b${this.nextBotId++}`, name, (Math.random() * 16) | 0, true);
     const roll = Math.random();
     s.mass = START_MASS + Math.random() * 40;
     if (roll < 0.35) s.mass += 60 + Math.random() * 160;
     if (roll < 0.1) s.mass += 300 + Math.random() * 700;
+    s.temper = Math.random();
     s.points = [];
     this.ensureTrail(s);
     this.snakes.push(s);
@@ -141,6 +174,8 @@ export class World {
       avoidDir: 1,
       boostLeft: 0,
       dropped: 0,
+      temper: 0.5,
+      kills: 0,
     };
     this.ensureTrail(s);
     return s;
@@ -149,8 +184,9 @@ export class World {
   removeSnake(id: string, drop = false): void {
     const s = this.snakes.find((x) => x.id === id);
     if (!s) return;
-    if (drop && s.alive) this.kill(s, "wall", null, null);
+    if (drop && s.alive) this.kill(s, "snake", null, null);
     this.snakes = this.snakes.filter((x) => x.id !== id);
+    this.inputs.delete(id);
   }
 
   upsertRemote(s: Snake): void {
@@ -159,7 +195,12 @@ export class World {
     else this.snakes.push(s);
   }
 
-  addFood(f: Food): void {
+  // ── food store ─────────────────────────────────────────────────────────────
+
+  addFood(f: Food): Food {
+    if (f.id === undefined) f.id = this.nextFoodId++;
+    else if (f.id >= this.nextFoodId) this.nextFoodId = f.id + 1;
+    this.foodById.set(f.id, f);
     this.foodIndex.set(f, this.foods.length);
     this.foods.push(f);
     const key = cellKey(f.x, f.y);
@@ -167,6 +208,7 @@ export class World {
     if (bucket) bucket.push(f);
     else this.grid.set(key, [f]);
     if (f.k === 3) this.chasers.push(f);
+    return f;
   }
 
   removeFood(f: Food): void {
@@ -178,11 +220,25 @@ export class World {
     this.foodIndex.set(moved, idx);
     this.foods.pop();
     this.foodIndex.delete(f);
+    if (f.id !== undefined) this.foodById.delete(f.id);
     this.unbucket(f);
     if (f.k === 3) {
       const ci = this.chasers.indexOf(f);
       if (ci >= 0) this.chasers.splice(ci, 1);
     }
+  }
+
+  removeFoodById(id: number): void {
+    const f = this.foodById.get(id);
+    if (f) this.removeFood(f);
+  }
+
+  clearFood(): void {
+    this.foods = [];
+    this.foodById.clear();
+    this.foodIndex.clear();
+    this.grid.clear();
+    this.chasers = [];
   }
 
   private unbucket(f: Food): void {
@@ -197,7 +253,7 @@ export class World {
     if (!bucket.length) this.grid.delete(key);
   }
 
-  private moveFood(f: Food, x: number, y: number): void {
+  moveFood(f: Food, x: number, y: number): void {
     const before = cellKey(f.x, f.y);
     const after = cellKey(x, y);
     if (before === after) {
@@ -234,6 +290,10 @@ export class World {
     return out;
   }
 
+  get chaseOrbs(): readonly Food[] {
+    return this.chasers;
+  }
+
   /** The glowing remains a snake leaves behind: worth most of its mass. */
   pelletsFrom(s: Snake): Food[] {
     const out: Food[] = [];
@@ -259,6 +319,8 @@ export class World {
     return skin % FOOD_COLORS.length;
   }
 
+  // ── simulation ─────────────────────────────────────────────────────────────
+
   step(dt: number, aimX: number, aimY: number, wantBoost: boolean): void {
     this.deaths = [];
     this.eats = [];
@@ -267,7 +329,12 @@ export class World {
 
     for (const s of this.snakes) {
       if (!s.alive) continue;
-      if (s.id === this.playerId) {
+      const input = this.inputs.get(s.id);
+      if (input) {
+        this.steerHeading(s, input.angle, dt);
+        s.boosting = input.boost && s.mass > MIN_MASS + 0.4;
+        this.advance(s, dt);
+      } else if (s.id === this.playerId) {
         this.steerToward(s, aimX, aimY, dt);
         s.boosting = wantBoost && s.mass > MIN_MASS + 0.4;
         this.advance(s, dt);
@@ -284,9 +351,17 @@ export class World {
     this.cullDead();
   }
 
-  private findSpawn(): Vec {
+  private owned(s: Snake): boolean {
+    return this.inputs.has(s.id) || s.id === this.playerId || (s.isBot && this.host);
+  }
+
+  private findSpawn(near?: Vec): Vec {
     for (let n = 0; n < 24; n++) {
-      const p = randomInDisk(ARENA_RADIUS * 0.8);
+      const p =
+        near && n < 8
+          ? { x: near.x + randRange(-300, 300), y: near.y + randRange(-300, 300) }
+          : randomInDisk(ARENA_RADIUS * 0.8);
+      if (p.x * p.x + p.y * p.y > (ARENA_RADIUS * 0.85) ** 2) continue;
       let ok = true;
       for (const s of this.snakes) {
         if (!s.alive) continue;
@@ -310,8 +385,13 @@ export class World {
     return randomInDisk(ARENA_RADIUS * 0.5);
   }
 
+  /** A safe spawn point near a location, for players hopping instances. */
+  safeSpawnNear(near: Vec): Vec {
+    return this.findSpawn(near);
+  }
+
   /** Lay a straight body behind the head. The last point is the head itself. */
-  private ensureTrail(s: Snake): void {
+  ensureTrail(s: Snake): void {
     if (s.points.length) return;
     const sp = spacingOf(s.mass);
     const n = Math.max(8, Math.round(lengthOf(s.mass) / sp));
@@ -324,31 +404,27 @@ export class World {
     s.points.push({ x: s.x, y: s.y });
   }
 
-  private steerToward(s: Snake, tx: number, ty: number, dt: number): void {
+  steerToward(s: Snake, tx: number, ty: number, dt: number): void {
     const desired = Math.atan2(ty - s.y, tx - s.x);
     this.steerHeading(s, desired, dt);
   }
 
-  private steerHeading(s: Snake, desired: number, dt: number): void {
+  steerHeading(s: Snake, desired: number, dt: number): void {
     const maxTurn = turnRateOf(s.mass) * dt;
     const delta = wrapAngle(desired - s.angle);
     s.angle = wrapAngle(s.angle + clamp(delta, -maxTurn, maxTurn));
   }
 
-  private advance(s: Snake, dt: number): void {
-    if (s.invuln > 0) s.invuln = Math.max(0, s.invuln - dt);
-    const speed = s.boosting ? BOOST_SPEED : BASE_SPEED;
-    s.x += Math.cos(s.angle) * speed * dt;
-    s.y += Math.sin(s.angle) * speed * dt;
-
-    // points[last] always sits on the head; a new point is committed once the
-    // head has travelled one spacing away from the previous committed point.
+  /**
+   * Record the head's current position into the trail. points[last] always
+   * sits on the head; a new point is committed once the head has travelled
+   * one spacing away from the previous committed point.
+   */
+  recordTrail(s: Snake): void {
     const pts = s.points;
     const head = pts[pts.length - 1];
     const anchor = pts[pts.length - 2];
-    if (!head) {
-      pts.push({ x: s.x, y: s.y });
-    } else if (!anchor) {
+    if (!head || !anchor) {
       pts.push({ x: s.x, y: s.y });
     } else {
       const sp = spacingOf(s.mass);
@@ -360,6 +436,19 @@ export class World {
       }
     }
     this.trimBody(s);
+  }
+
+  /** Move the head forward one tick without any rules (client prediction). */
+  moveHead(s: Snake, dt: number): void {
+    const speed = s.boosting ? BOOST_SPEED : BASE_SPEED;
+    s.x += Math.cos(s.angle) * speed * dt;
+    s.y += Math.sin(s.angle) * speed * dt;
+  }
+
+  private advance(s: Snake, dt: number): void {
+    if (s.invuln > 0) s.invuln = Math.max(0, s.invuln - dt);
+    this.moveHead(s, dt);
+    this.recordTrail(s);
 
     if (s.boosting) {
       const drain = boostDrainOf(s.mass) * dt;
@@ -400,7 +489,7 @@ export class World {
     }
   }
 
-  private trimBody(s: Snake): void {
+  trimBody(s: Snake): void {
     const want = lengthOf(s.mass);
     const pts = s.points;
     if (pts.length < 2) return;
@@ -421,6 +510,8 @@ export class World {
     const cap = maxPointsOf(s.mass) + 40;
     if (pts.length > cap) pts.splice(0, pts.length - cap);
   }
+
+  // ── bots ───────────────────────────────────────────────────────────────────
 
   /**
    * Free space in front of a point: distance to the nearest foreign body
@@ -464,9 +555,10 @@ export class World {
     s.boosting = s.boostLeft > 0 && s.mass > MIN_MASS + 6;
   }
 
-  /** Long-horizon intent: flee, hunt, eat, or drift. Stored in `wander`. */
+  /** Long-horizon intent: flee, coil, hunt, eat, or drift. Stored in `wander`. */
   private chooseGoal(s: Snake): void {
     const r = radiusOf(s.mass);
+    const bold = s.temper;
     const far = Math.hypot(s.x, s.y);
     if (far > ARENA_RADIUS * 0.86) {
       s.wander = Math.atan2(-s.y, -s.x) + randRange(-0.5, 0.5);
@@ -478,7 +570,7 @@ export class World {
     let threat: Snake | null = null;
     let threatD = (300 + r * 4) ** 2;
     for (const o of this.snakes) {
-      if (o === s || !o.alive || o.mass < s.mass * 1.15) continue;
+      if (o === s || !o.alive || o.mass < s.mass * (1.05 + bold * 0.4)) continue;
       const d = dist2(s.x, s.y, o.x, o.y);
       if (d > threatD) continue;
       const toward = Math.abs(wrapAngle(Math.atan2(s.y - o.y, s.x - o.x) - o.angle));
@@ -493,11 +585,38 @@ export class World {
       return;
     }
 
+    // Coil: a big snake wraps a much smaller one that strayed inside its reach.
+    if (s.mass > 140) {
+      let prey: Snake | null = null;
+      let preyD = (lengthOf(s.mass) * 0.32) ** 2;
+      for (const o of this.snakes) {
+        if (o === s || !o.alive || o.invuln > 0 || o.mass > s.mass * 0.4) continue;
+        const d = dist2(s.x, s.y, o.x, o.y);
+        if (d < preyD) {
+          preyD = d;
+          prey = o;
+        }
+      }
+      if (prey) {
+        // Orbit the prey clockwise, biased inward so the loop tightens.
+        const out = Math.atan2(s.y - prey.y, s.x - prey.x);
+        const d = Math.sqrt(preyD);
+        const ring = Math.max(
+          radiusOf(prey.mass) * 4 + r * 2,
+          (lengthOf(s.mass) / (2 * Math.PI)) * 0.9,
+        );
+        const inward = clamp((d - ring) / ring, -0.6, 0.6);
+        s.wander = out + Math.PI / 2 + inward * 0.9;
+        s.boostLeft = 0;
+        return;
+      }
+    }
+
     // Hunt: cut across the path of a smaller snake that is ahead of us.
     let prey: Snake | null = null;
-    let preyD = (360 + r * 3) ** 2;
+    let preyD = (300 + r * 3 + bold * 200) ** 2;
     for (const o of this.snakes) {
-      if (o === s || !o.alive || o.mass > s.mass * 0.8 || o.invuln > 0) continue;
+      if (o === s || !o.alive || o.mass > s.mass * (0.6 + bold * 0.35) || o.invuln > 0) continue;
       const d = dist2(s.x, s.y, o.x, o.y);
       if (d > preyD) continue;
       const ahead = Math.abs(wrapAngle(Math.atan2(o.y - s.y, o.x - s.x) - s.angle));
@@ -506,13 +625,14 @@ export class World {
         prey = o;
       }
     }
-    if (prey && s.mass > 18) {
+    if (prey && s.mass > 18 && Math.random() < 0.35 + bold * 0.6) {
       const lead = 70 + radiusOf(prey.mass) * 2 + (prey.boosting ? BOOST_SPEED : BASE_SPEED) * 0.45;
       s.wander = Math.atan2(
         prey.y + Math.sin(prey.angle) * lead - s.y,
         prey.x + Math.cos(prey.angle) * lead - s.x,
       );
-      if (Math.sqrt(preyD) < 280 && Math.random() < 0.55) s.boostLeft = 0.3 + Math.random() * 0.5;
+      if (Math.sqrt(preyD) < 280 && Math.random() < 0.3 + bold * 0.5)
+        s.boostLeft = 0.3 + Math.random() * 0.5;
       return;
     }
 
@@ -531,7 +651,7 @@ export class World {
     }
     if (best) {
       s.wander = Math.atan2(best.y - s.y, best.x - s.x);
-      if (best.k === 3 && Math.random() < 0.4) s.boostLeft = 0.4;
+      if (best.k === 3 && Math.random() < 0.2 + bold * 0.4) s.boostLeft = 0.4;
       return;
     }
     s.wander = wrapAngle(s.angle + randRange(-0.9, 0.9));
@@ -569,13 +689,13 @@ export class World {
       return;
     }
     s.wander = wrapAngle(bestAngle);
-    if (goalClear < r * 1.4) {
-      // Nothing good ahead: brake off boosting so the turn is tighter.
-      s.boostLeft = 0;
-    }
+    if (goalClear < r * 1.4) s.boostLeft = 0;
   }
 
-  private magnet(dt: number): void {
+  // ── orbs ───────────────────────────────────────────────────────────────────
+
+  /** Pull loose orbs toward every head. Cosmetic on clients, real on servers. */
+  magnet(dt: number): void {
     const step = MAGNET_SPEED * dt;
     for (const s of this.snakes) {
       if (!s.alive) continue;
@@ -633,7 +753,7 @@ export class World {
   private resolveEats(): void {
     for (const s of this.snakes) {
       if (!s.alive) continue;
-      const gains = s.id === this.playerId || (s.isBot && this.host);
+      const gains = this.owned(s);
       const reach = radiusOf(s.mass) + 3;
       const nearby = this.queryFood(s.x, s.y, reach + 18);
       for (const f of nearby) {
@@ -650,7 +770,7 @@ export class World {
   private resolveKills(): void {
     for (const s of this.snakes) {
       if (!s.alive || s.invuln > 0) continue;
-      if (!(s.id === this.playerId || (s.isBot && this.host))) continue;
+      if (!this.owned(s)) continue;
       const hr = radiusOf(s.mass) * 0.8;
       for (const o of this.snakes) {
         if (o.id === s.id || !o.alive) continue;
@@ -697,7 +817,17 @@ export class World {
     // Like slither.io, the rim eats you whole: no remains.
     const pellets = reason === "wall" ? [] : this.pelletsFrom(s);
     for (const p of pellets) this.addFood(p);
+    if (killerId) {
+      const k = this.snakes.find((x) => x.id === killerId);
+      if (k && k.alive) k.kills++;
+    }
     this.deaths.push({ snake: s, reason, killerId, killerName, pellets });
+  }
+
+  /** Kill from outside the tick (a disconnected player is dropped, for one). */
+  killSnake(id: string): void {
+    const s = this.snakes.find((x) => x.id === id);
+    if (s) this.kill(s, "snake", null, null);
   }
 
   private cullDead(): void {

@@ -2,6 +2,8 @@ import {
   ARENA_RADIUS,
   FOOD_COLORS,
   SKINS,
+  bandsOf,
+  fillOf,
   type Camera,
   type Floater,
   type Particle,
@@ -215,7 +217,9 @@ export class Renderer {
     y1: number,
     z: number,
   ): void {
-    const skin = SKINS[s.skin % SKINS.length]!;
+    const bands = bandsOf(s);
+    const shine = "#ffffff";
+    const fill = bands[0]!;
     const r = radiusOf(s.mass);
     const pts = s.points;
     if (pts.length < 2) return;
@@ -240,7 +244,7 @@ export class Renderer {
       const pulse = 0.28 + Math.sin(this.time * 18) * 0.1;
       tracePath(0, 0);
       ctx.globalAlpha = pulse;
-      ctx.strokeStyle = skin.shine;
+      ctx.strokeStyle = shine;
       ctx.lineWidth = r * 3.2;
       ctx.stroke();
       ctx.globalAlpha = 1;
@@ -255,7 +259,7 @@ export class Renderer {
 
     if (invisible) {
       tracePath(0, 0);
-      ctx.strokeStyle = skin.fill;
+      ctx.strokeStyle = fill;
       ctx.lineWidth = r * 2;
       ctx.stroke();
       return;
@@ -272,8 +276,7 @@ export class Renderer {
     const size = r * 2.08;
     const half = size / 2;
     const step = Math.max(2.5, r * 0.5);
-    const bands = skin.bands;
-    const bandLen = Math.max(1, skin.band);
+    const bandLen = Math.max(1, s.bands ? 3 : SKINS[s.skin % SKINS.length]!.band);
     const nBands = bands.length;
     const sprites = bands.map((c) => this.segmentSprite(c));
 
@@ -449,11 +452,10 @@ export class Renderer {
     const k = (size / 2 - 6) / ARENA_RADIUS;
     for (const s of snakes) {
       if (s.id === localId) continue;
-      const skin = SKINS[s.skin % SKINS.length]!;
       const big = s.mass > 250;
       ctx.beginPath();
       ctx.arc(cx + s.x * k, cy + s.y * k, big ? 2.6 : 1.7, 0, Math.PI * 2);
-      ctx.fillStyle = skin.fill;
+      ctx.fillStyle = fillOf(s);
       ctx.globalAlpha = big ? 0.9 : 0.55;
       ctx.fill();
     }

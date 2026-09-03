@@ -1,16 +1,12 @@
 import {
   FOOD_COLORS,
-  INTERP_DELAY,
   MAX_BOTS,
-  MAX_NET_POINTS,
-  NET_INTERVAL,
-  SKINS,
   START_MASS,
   TICK,
+  fillOf,
   lerp,
   type Camera,
   type Floater,
-  type Food,
   type Particle,
   type Phase,
   type Snake,
@@ -19,6 +15,7 @@ import {
 import { World } from "./world";
 import { Renderer, desiredZoom } from "./render";
 import { GameAudio } from "./audio";
+import { NetSession, defaultServerUrl, type DeathInfo, type NetState, type StatsInfo } from "./net";
 
 export interface HudState {
   phase: Phase;
@@ -28,70 +25,42 @@ export interface HudState {
   count: number;
   kills: number;
   board: { name: string; mass: number; you: boolean }[];
+  daily: { name: string; best: number }[];
   killNotice: string | null;
   deathReason: string | null;
   killerName: string | null;
-  peers: number;
-  joined: boolean;
-  host: boolean;
+  players: number;
+  mode: NetState;
+  rtt: number;
 }
 
-export interface NetHandle {
-  selfId: string;
-  peers: { id: string; connectionState?: string }[];
-  joined: boolean;
-  broadcast: (data: unknown) => void;
-  send: (data: unknown, peerId?: string) => void;
-  onMessage: (
-    fn: (from: string, data: unknown, channel: "state" | "reliable") => void,
-  ) => () => void;
-}
-
-interface Snap {
-  t: number;
+export interface Look {
   name: string;
   skin: number;
-  x: number;
-  y: number;
-  angle: number;
-  mass: number;
-  boosting: boolean;
-  points: Vec[];
+  bands?: string[];
 }
-
-type WireSnake = {
-  t: "s" | "b";
-  id: string;
-  n: string;
-  k: number;
-  x: number;
-  y: number;
-  a: number;
-  m: number;
-  boost: boolean;
-  p: number[];
-};
-
-type WireDeath = {
-  t: "d";
-  id: string;
-  n: string;
-  k: number;
-  pellets: Food[];
-};
-
-type WireMsg = WireSnake | WireDeath | { t: "h"; id: string; n: string; k: number };
 
 const ZOOM_MIN = 0.55;
 const ZOOM_MAX = 1.7;
+const CAM_LEAD = 48;
+const SPAWN_TIMEOUT_MS = 4000;
+
+interface DeathFx {
+  pts: Vec[];
+  color: string;
+  t: number;
+  dur: number;
+  next: number;
+}
 
 export class CoilEngine {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
-  readonly world = new World();
   private renderer = new Renderer();
   readonly audio = new GameAudio();
   phase: Phase = "menu";
+  private net: NetSession | null = null;
+  private local: World | null = null;
   private cam: Camera = { x: 0, y: 0, z: 0.55, trauma: 0 };
   private pointer: Vec = { x: 80, y: 0 };
   private boosting = false;
@@ -105,17 +74,16 @@ export class CoilEngine {
   private acc = 0;
   private dpr = 1;
   private best = 0;
-  private nick = "anon";
-  private skin = 0;
+  private look: Look = { name: "anon", skin: 0 };
   private kills = 0;
+  private streak = 0;
+  private lastKillAt = 0;
   private killNotice: string | null = null;
   private deathReason: string | null = null;
   private killerName: string | null = null;
-  private net: NetHandle | null = null;
-  private unsub: (() => void) | null = null;
-  private lastNet = 0;
-  private remoteBuf = new Map<string, Snap[]>();
-  private lastRemote = new Map<string, number>();
+  private killerId: string | null = null;
+  private corpse: Snake | null = null;
+  private deathFx: DeathFx | null = null;
   private menuT = Math.random() * 20;
   private deathCam: Vec = { x: 0, y: 0 };
   private deathMass = START_MASS;
@@ -126,10 +94,9 @@ export class CoilEngine {
   private frames = 0;
   private fpsT = 0;
   private fps = 0;
-  private selfId = "local";
-  private killerId: string | null = null;
-  private corpse: Snake | null = null;
   private zoomMul = 1;
+  private stats: StatsInfo | null = null;
+  private spawnWait = 0;
   private dbgWall = 0;
   private dbgSnake = 0;
   private onResize = () => this.resize();
@@ -140,15 +107,52 @@ export class CoilEngine {
     this.holdBoost = false;
   };
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(canvas: HTMLCanvasElement, serverUrl: string | null = defaultServerUrl()) {
     this.canvas = canvas;
     const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
     if (!ctx) throw new Error("canvas unsupported");
     this.ctx = ctx;
     this.best = readBest();
-    this.world.resetLocalBots(MAX_BOTS);
+    if (serverUrl) {
+      this.net = new NetSession(serverUrl, {
+        onState: (s) => this.onNetState(s),
+        onSpawned: (s) => this.onSpawned(s),
+        onDeath: (d) => this.onNetDeath(d),
+        onEats: (eats) => {
+          for (const e of eats) this.eatFx(e.x, e.y, e.v, e.c);
+        },
+        onStats: (s) => {
+          this.stats = s;
+        },
+      });
+      this.net.connect();
+    } else {
+      this.localWorld();
+    }
     this.bind();
     this.resize();
+  }
+
+  /** The arena being drawn: the server mirror when online, else local bots. */
+  get world(): World {
+    // A local life in progress keeps its world even if the server comes up
+    // mid-game; the next Play goes online.
+    if (this.local?.player) return this.local;
+    if (this.online) return this.net!.world;
+    return this.localWorld();
+  }
+
+  private get online(): boolean {
+    return this.net?.state === "online";
+  }
+
+  private localWorld(): World {
+    if (!this.local) {
+      this.local = new World(true);
+      this.local.host = true;
+      this.local.resetLocalBots(MAX_BOTS);
+    }
+    return this.local;
   }
 
   start(): void {
@@ -188,8 +192,7 @@ export class CoilEngine {
   destroy(): void {
     this.running = false;
     cancelAnimationFrame(this.raf);
-    this.unsub?.();
-    this.unsub = null;
+    this.net?.close();
     window.removeEventListener("resize", this.onResize);
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("keyup", this.onKeyUp);
@@ -201,49 +204,59 @@ export class CoilEngine {
     window.removeEventListener("wheel", this.onWheel);
   }
 
-  setNet(net: NetHandle | null): void {
-    this.unsub?.();
-    this.unsub = null;
-    this.net = net;
-    if (!net) return;
-    this.selfId = net.selfId;
-    this.unsub = net.onMessage((from, data, channel) => this.onNet(from, data, channel));
-  }
-
   /** Hold-to-boost from an on-screen control (touch). */
   setBoost(on: boolean): void {
     this.holdBoost = on;
     this.syncBoost();
   }
 
-  play(nick: string, skin: number): void {
+  play(look: Look): void {
     this.audio.unlock();
-    this.nick = nick.slice(0, 16) || "anon";
-    this.skin = skin % SKINS.length;
-    this.phase = "play";
-    this.boosting = false;
+    this.look = { name: look.name.slice(0, 16) || "anon", skin: look.skin % 16, bands: look.bands };
     this.kills = 0;
+    this.streak = 0;
     this.killNotice = null;
     this.deathReason = null;
     this.killerName = null;
     this.killerId = null;
     this.corpse = null;
-    const id = this.net?.selfId ?? "local";
-    this.selfId = id;
-    this.world.spawnPlayer(id, this.nick, this.skin);
-    const p = this.world.player;
-    if (p) {
-      this.cam.x = p.x;
-      this.cam.y = p.y;
-      this.pointer.x = p.x + Math.cos(p.angle) * 80;
-      this.pointer.y = p.y + Math.sin(p.angle) * 80;
+    this.deathFx = null;
+    this.boosting = false;
+    if (this.net && this.net.state !== "offline") {
+      // Online, or still connecting: ask the server and wait for SPAWNED.
+      // If nothing arrives within SPAWN_TIMEOUT_MS the tick starts a local game.
+      this.spawnWait = performance.now();
+      this.net.play(this.look);
+      return;
     }
+    this.spawnLocal();
+  }
+
+  private spawnLocal(): void {
+    const w = this.localWorld();
+    const s = w.spawnPlayer("local", this.look.name, this.look.skin, this.look.bands);
+    this.phase = "play";
+    this.snapCamTo(s);
     this.emitHud();
+  }
+
+  private onSpawned(s: Snake): void {
+    this.spawnWait = 0;
+    this.phase = "play";
+    this.snapCamTo(s);
+    this.emitHud();
+  }
+
+  private snapCamTo(s: Snake): void {
+    this.cam.x = s.x;
+    this.cam.y = s.y;
+    this.pointer.x = s.x + Math.cos(s.angle) * 80;
+    this.pointer.y = s.y + Math.sin(s.angle) * 80;
   }
 
   respawn(): void {
     if (this.phase !== "dead") return;
-    this.play(this.nick, this.skin);
+    this.play(this.look);
   }
 
   subscribe(fn: (h: HudState) => void): () => void {
@@ -253,37 +266,47 @@ export class CoilEngine {
   }
 
   hud(): HudState {
-    const p = this.world.player;
-    const alive = this.world.snakes.filter((s) => s.alive).sort((a, b) => b.mass - a.mass);
-    const rank = p ? alive.findIndex((s) => s.id === p.id) + 1 : 0;
+    const world = this.world;
+    const p = world.player;
+    const alive = world.snakes.filter((s) => s.alive).sort((a, b) => b.mass - a.mass);
     const score = p ? Math.floor(p.mass) : this.phase === "dead" ? Math.floor(this.deathMass) : 0;
     if (score > this.best) {
       this.best = score;
       writeBest(this.best);
     }
+    const st = this.online ? this.stats : null;
+    const rank = st ? st.rank : p ? alive.findIndex((s) => s.id === p.id) + 1 : 0;
+    const count = st ? st.count : alive.length;
+    const board = st
+      ? st.board.map((b) => ({ name: b.name, mass: b.mass, you: b.nid === this.net!.selfNid }))
+      : alive
+          .slice(0, 10)
+          .map((s) => ({ name: s.name, mass: Math.floor(s.mass), you: s.id === world.playerId }));
     return {
       phase: this.phase,
       score,
       best: this.best,
-      rank: rank || alive.length,
-      count: alive.length,
+      rank: rank || count,
+      count,
       kills: this.kills,
-      board: alive.slice(0, 10).map((s) => ({
-        name: s.name,
-        mass: Math.floor(s.mass),
-        you: s.id === this.world.playerId,
-      })),
+      board,
+      daily: st?.daily ?? [],
       killNotice: this.killNotice,
       deathReason: this.deathReason,
       killerName: this.killerName,
-      peers: this.connectedPeers().length,
-      joined: this.net?.joined ?? false,
-      host: this.world.host,
+      players: st?.clients ?? (this.online ? 1 : 0),
+      mode: this.net?.state ?? "offline",
+      rtt: this.net?.rttMs ?? 0,
     };
   }
 
-  private connectedPeers(): { id: string }[] {
-    return (this.net?.peers ?? []).filter((p) => p.connectionState === "connected");
+  private onNetState(s: NetState): void {
+    if (s === "offline" && this.phase === "play" && !this.local?.player) {
+      // Lost the server mid-game: the snake stays there in its grace period,
+      // but we cannot steer it, so end this life here.
+      this.dieLocal("snake", null, null, "connection lost");
+    }
+    this.emitHud();
   }
 
   private bind(): void {
@@ -371,12 +394,36 @@ export class CoilEngine {
 
   private tick(dt: number): void {
     this.applyKeyboardAim();
-    this.electHost();
-    this.world.step(dt, this.pointer.x, this.pointer.y, this.phase === "play" && this.boosting);
-    this.handleLocalEvents();
-    this.pruneRemotes();
-    this.interpRemotes();
-    this.netTick();
+    const boost = this.phase === "play" && this.boosting;
+    if (this.online) {
+      const net = this.net!;
+      net.update(dt, this.pointer, boost);
+      const me = net.world.player;
+      const angle = me ? Math.atan2(this.pointer.y - me.y, this.pointer.x - me.x) : 0;
+      const cssW = this.canvas.width / this.dpr;
+      const cssH = this.canvas.height / this.dpr;
+      net.sendInput(angle, boost, {
+        cx: this.cam.x,
+        cy: this.cam.y,
+        hw: cssW / (2 * this.cam.z) + 40,
+        hh: cssH / (2 * this.cam.z) + 40,
+      });
+      if (this.spawnWait && performance.now() - this.spawnWait > SPAWN_TIMEOUT_MS) {
+        this.spawnWait = 0;
+        net.idle();
+        this.spawnLocal();
+      }
+    } else {
+      if (this.spawnWait && performance.now() - this.spawnWait > SPAWN_TIMEOUT_MS) {
+        this.spawnWait = 0;
+        this.net?.idle();
+        this.spawnLocal();
+      }
+      const w = this.localWorld();
+      w.step(dt, this.pointer.x, this.pointer.y, boost);
+      this.handleLocalEvents(w);
+    }
+    this.stepDeathFx(dt);
     this.updateCam(dt);
     this.renderer.stepFx(dt, this.particles, this.floaters, this.cam);
     if (this.killTimer > 0) {
@@ -407,45 +454,93 @@ export class CoilEngine {
     this.pointer.y = origin.y + dy * 240;
   }
 
-  private handleLocalEvents(): void {
-    for (const e of this.world.eats) {
-      if (e.id === this.world.playerId) {
-        this.audio.eat(e.v);
-        this.burst(e.x, e.y, FOOD_COLORS[e.c % FOOD_COLORS.length]!, e.v >= 3 ? 10 : 4, 40);
-        if (e.v >= 2) {
-          const v = Math.round(e.v);
-          this.floaters.push({ x: e.x, y: e.y, text: `+${v}`, life: 0.7, color: "#e8eaee" });
-        }
-      }
-    }
-    for (const d of this.world.deaths) {
+  private eatFx(x: number, y: number, v: number, c: number): void {
+    this.audio.eat(v);
+    this.burst(x, y, FOOD_COLORS[c % FOOD_COLORS.length]!, v >= 3 ? 10 : 4, 40);
+    if (v >= 2)
+      this.floaters.push({ x, y, text: `+${Math.round(v)}`, life: 0.7, color: "#e8eaee" });
+  }
+
+  private handleLocalEvents(w: World): void {
+    for (const e of w.eats) if (e.id === w.playerId) this.eatFx(e.x, e.y, e.v, e.c);
+    for (const d of w.deaths) {
       if (d.reason === "wall") this.dbgWall++;
       else this.dbgSnake++;
-      const skin = SKINS[d.snake.skin % SKINS.length]!;
-      this.burst(d.snake.x, d.snake.y, skin.fill, 28, 140);
-      this.cam.trauma = Math.min(
-        1,
-        this.cam.trauma + (d.snake.id === this.world.playerId ? 0.7 : 0.28),
-      );
-      if (d.snake.id === this.world.playerId) {
+      this.deathBurst(d.snake);
+      if (d.snake.id === w.playerId) {
         this.dieLocal(d.reason, d.killerName, d.killerId);
-        this.broadcastDeath(d.snake);
-      } else {
-        if (d.killerId === this.world.playerId) {
-          this.kills++;
-          this.audio.kill();
-          this.killNotice = `you took down ${d.snake.name}`;
-          this.killTimer = 2.4;
-        }
-        if (d.snake.isBot && this.net) this.broadcastDeath(d.snake);
+      } else if (d.killerId === w.playerId) {
+        this.registerKill(d.snake.name);
       }
     }
+  }
+
+  private onNetDeath(d: DeathInfo): void {
+    const net = this.net!;
+    const id = String(d.nid);
+    const s = net.world.snakes.find((x) => x.id === id);
+    if (s) this.deathBurst(s);
+    if (d.nid === net.selfNid) {
+      this.dieLocal(d.reason, d.killerName || null, d.killerNid ? String(d.killerNid) : null);
+    } else if (d.killerNid && d.killerNid === net.selfNid) {
+      this.registerKill(d.name);
+    }
+  }
+
+  private registerKill(victim: string): void {
+    const now = performance.now();
+    this.streak = now - this.lastKillAt < 7000 ? this.streak + 1 : 1;
+    this.lastKillAt = now;
+    this.kills++;
+    this.audio.kill();
+    this.killNotice =
+      this.streak >= 4
+        ? `rampage · ${this.streak} kills`
+        : this.streak === 3
+          ? `triple kill · ${victim}`
+          : this.streak === 2
+            ? `double kill · ${victim}`
+            : `you took down ${victim}`;
+    this.killTimer = 2.6;
+  }
+
+  /** Pop the body into orbs from head to tail over a few hundred ms. */
+  private deathBurst(s: Snake): void {
+    const color = fillOf(s);
+    this.cam.trauma = Math.min(1, this.cam.trauma + (s.id === this.world.playerId ? 0.7 : 0.28));
+    const pts = s.points.length ? s.points.slice().reverse() : [{ x: s.x, y: s.y }];
+    const fx: DeathFx = {
+      pts,
+      color,
+      t: 0,
+      dur: Math.min(0.9, 0.25 + pts.length * 0.008),
+      next: 0,
+    };
+    if (s.id === this.world.playerId) this.deathFx = fx;
+    else this.deathFxList.push(fx);
+  }
+
+  private deathFxList: DeathFx[] = [];
+
+  private stepDeathFx(dt: number): void {
+    const list = this.deathFx ? [this.deathFx, ...this.deathFxList] : this.deathFxList;
+    for (const fx of list) {
+      fx.t += dt;
+      const upto = Math.min(fx.pts.length, Math.floor((fx.t / fx.dur) * fx.pts.length));
+      for (; fx.next < upto; fx.next++) {
+        const p = fx.pts[fx.next]!;
+        if (fx.next % 2 === 0) this.burst(p.x, p.y, fx.color, 5, 120);
+      }
+    }
+    this.deathFxList = this.deathFxList.filter((f) => f.t < f.dur + 0.2);
+    if (this.deathFx && this.deathFx.t > this.deathFx.dur + 0.2) this.deathFx = null;
   }
 
   private dieLocal(
     reason: "wall" | "snake",
     killerName: string | null,
     killerId: string | null,
+    why?: string,
   ): void {
     this.audio.death();
     const p = this.world.player;
@@ -455,159 +550,31 @@ export class CoilEngine {
     this.phase = "dead";
     this.boosting = false;
     this.holdBoost = false;
+    this.spawnWait = 0;
+    this.net?.idle();
     this.deathReason =
-      reason === "wall"
+      why ??
+      (reason === "wall"
         ? "you hit the rim"
         : killerName
           ? `you ran into ${killerName}`
-          : "you crashed";
+          : "you crashed");
     this.killerName = killerName;
     this.killerId = killerId;
+    if (this.local && this.local.playerId) {
+      this.local.playerId = null;
+    }
     this.emitHud();
   }
 
-  /**
-   * The smallest id among this client and its *connected* peers runs the bots.
-   * Roster entries that never connected (a stale tab, a peer mid-handshake)
-   * must not silence the arena.
-   */
-  private electHost(): void {
-    const ids = [this.selfId, ...this.connectedPeers().map((p) => p.id)].sort();
-    const host = ids[0] === this.selfId || !this.net;
-    const was = this.world.host;
-    this.world.host = host;
-    this.world.desiredBots = host ? MAX_BOTS : 0;
-    if (!host && was) this.world.clearBots();
-    if (host && !was) {
-      // The previous host's bots vanish; a fresh set spawns here at once.
-      for (const id of Array.from(this.remoteBuf.keys())) {
-        if (id.startsWith("b-")) {
-          this.remoteBuf.delete(id);
-          this.lastRemote.delete(id);
-          this.world.removeSnake(id, false);
-        }
-      }
-      this.world.resetLocalBots(MAX_BOTS);
-    }
-  }
-
-  private pruneRemotes(): void {
-    const now = performance.now();
-    const live = new Set(this.net?.peers.map((p) => p.id) ?? []);
-    for (const [id, t] of this.lastRemote) {
-      const stale = now - t > 2500;
-      const gone = !id.startsWith("b-") && !live.has(id);
-      if (stale || gone) {
-        this.remoteBuf.delete(id);
-        this.lastRemote.delete(id);
-        if (id !== this.selfId) this.world.removeSnake(id, false);
-      }
-    }
-  }
-
-  private netTick(): void {
-    if (!this.net) return;
-    const now = performance.now();
-    if (now - this.lastNet < NET_INTERVAL) return;
-    this.lastNet = now;
-    const p = this.world.player;
-    if (this.phase === "play" && p) this.net.broadcast(packSnake("s", p));
-    if (this.world.host && this.connectedPeers().length) {
-      for (const s of this.world.snakes) {
-        if (s.isBot && s.alive) this.net.broadcast(packSnake("b", s));
-      }
-    }
-  }
-
-  private onNet(_from: string, data: unknown, _channel: "state" | "reliable"): void {
-    if (!data || typeof data !== "object") return;
-    const msg = data as WireMsg;
-    if (msg.t === "s" || msg.t === "b") this.pushSnap(msg);
-    else if (msg.t === "d") this.applyDeath(msg);
-  }
-
-  private pushSnap(msg: WireSnake): void {
-    if (msg.id === this.selfId) return;
-    // Only the elected host's bots are real; ignore bot echoes while hosting.
-    if (msg.t === "b" && this.world.host) return;
-    const pts = unpackPoints(msg.p);
-    const snap: Snap = {
-      t: performance.now(),
-      name: msg.n,
-      skin: msg.k,
-      x: msg.x,
-      y: msg.y,
-      angle: msg.a,
-      mass: msg.m,
-      boosting: msg.boost,
-      points: pts,
-    };
-    const buf = this.remoteBuf.get(msg.id) ?? [];
-    buf.push(snap);
-    while (buf.length > 12) buf.shift();
-    this.remoteBuf.set(msg.id, buf);
-    this.lastRemote.set(msg.id, snap.t);
-  }
-
-  private applyDeath(msg: WireDeath): void {
-    if (msg.id === this.selfId) return;
-    this.world.removeSnake(msg.id, false);
-    this.remoteBuf.delete(msg.id);
-    this.lastRemote.delete(msg.id);
-    for (const p of msg.pellets) this.world.addFood({ ...p, k: p.k ?? 2 });
-    this.cam.trauma = Math.min(1, this.cam.trauma + 0.25);
-  }
-
-  private broadcastDeath(s: Snake): void {
-    if (!this.net) return;
-    const pellets = this.world.pelletsFrom({ ...s, alive: false });
-    this.net.send({
-      t: "d",
-      id: s.id,
-      n: s.name,
-      k: s.skin,
-      pellets: pellets.slice(0, 90),
-    } satisfies WireDeath);
-  }
-
-  private interpRemotes(): void {
-    const now = performance.now();
-    const at = now - INTERP_DELAY;
-    for (const [id, buf] of this.remoteBuf) {
-      if (id === this.selfId) continue;
-      const snap = sample(buf, at) ?? buf[buf.length - 1];
-      if (!snap) continue;
-      const snake: Snake = {
-        id,
-        name: snap.name,
-        skin: snap.skin,
-        x: snap.x,
-        y: snap.y,
-        angle: snap.angle,
-        mass: snap.mass,
-        boosting: snap.boosting,
-        points: snap.points,
-        alive: true,
-        isBot: id.startsWith("b-"),
-        invuln: 0,
-        wander: snap.angle,
-        think: 0,
-        avoid: 0,
-        avoidDir: 1,
-        boostLeft: 0,
-        dropped: 0,
-      };
-      this.world.upsertRemote(snake);
-    }
-  }
-
   private updateCam(dt: number): void {
+    const world = this.world;
     if (this.phase === "menu") {
       this.menuT += dt * 0.12;
       this.cam.x = Math.cos(this.menuT) * 420;
       this.cam.y = Math.sin(this.menuT * 0.7) * 320;
     } else if (this.phase === "dead") {
-      const killer = this.killerId ? this.world.snakes.find((s) => s.id === this.killerId) : null;
+      const killer = this.killerId ? world.snakes.find((s) => s.id === this.killerId) : null;
       const target = killer ?? this.corpse;
       if (target) {
         this.deathCam.x = lerp(this.deathCam.x, target.x, 1 - Math.pow(0.04, dt));
@@ -616,14 +583,21 @@ export class CoilEngine {
       this.cam.x = lerp(this.cam.x, this.deathCam.x, 1 - Math.pow(0.001, dt));
       this.cam.y = lerp(this.cam.y, this.deathCam.y, 1 - Math.pow(0.001, dt));
     } else {
-      const p = this.world.player;
+      const p = world.player;
       if (p) {
-        this.cam.x = lerp(this.cam.x, p.x, 1 - Math.pow(0.0008, dt));
-        this.cam.y = lerp(this.cam.y, p.y, 1 - Math.pow(0.0008, dt));
+        // Lead the camera a little into the direction of travel.
+        const tx = p.x + Math.cos(p.angle) * CAM_LEAD;
+        const ty = p.y + Math.sin(p.angle) * CAM_LEAD;
+        this.cam.x = lerp(this.cam.x, tx, 1 - Math.pow(0.0008, dt));
+        this.cam.y = lerp(this.cam.y, ty, 1 - Math.pow(0.0008, dt));
       }
     }
-    const mass = this.world.player?.mass ?? this.deathMass;
-    const z = desiredZoom(mass, this.phase) * (this.phase === "play" ? this.zoomMul : 1);
+    const mass = world.player?.mass ?? this.deathMass;
+    let z = desiredZoom(mass, this.phase);
+    if (this.phase === "play") {
+      z *= this.zoomMul;
+      if (world.player?.boosting) z *= 0.965;
+    }
     this.cam.z = lerp(this.cam.z, z, 1 - Math.pow(0.02, dt));
   }
 
@@ -666,87 +640,27 @@ export class CoilEngine {
   }
 
   private exposeDebug(): void {
-    const p = this.world.player;
+    const world = this.world;
+    const p = world.player;
     let pts = 0;
-    for (const s of this.world.snakes) if (s.points.length > pts) pts = s.points.length;
+    for (const s of world.snakes) if (s.points.length > pts) pts = s.points.length;
     (window as unknown as { __coil?: unknown }).__coil = {
       phase: this.phase,
+      mode: this.net?.state ?? "offline",
+      instance: this.net?.instance ?? "",
+      rtt: this.net?.rttMs ?? 0,
       score: p ? Math.floor(p.mass) : 0,
       playerPts: p?.points.length ?? 0,
-      snakes: this.world.snakes.length,
-      foods: this.world.foods.length,
-      host: this.world.host,
+      snakes: world.snakes.length,
+      foods: world.foods.length,
       pts,
       kills: this.kills,
+      players: this.stats?.clients ?? 0,
       deathsWall: this.dbgWall,
       deathsSnake: this.dbgSnake,
-      peers: this.net?.peers.map((p) => `${p.id}:${p.connectionState ?? "?"}`) ?? [],
       fps: Math.round(this.fps),
     };
   }
-}
-
-function packSnake(kind: "s" | "b", s: Snake): WireSnake {
-  const pts = subsample(s.points, MAX_NET_POINTS);
-  const p: number[] = [];
-  for (const v of pts) {
-    p.push(Math.round(v.x * 10) / 10, Math.round(v.y * 10) / 10);
-  }
-  return {
-    t: kind,
-    id: s.id,
-    n: s.name,
-    k: s.skin,
-    x: s.x,
-    y: s.y,
-    a: s.angle,
-    m: s.mass,
-    boost: s.boosting,
-    p,
-  };
-}
-
-function unpackPoints(p: number[]): Vec[] {
-  const out: Vec[] = [];
-  for (let i = 0; i + 1 < p.length; i += 2) out.push({ x: p[i]!, y: p[i + 1]! });
-  return out;
-}
-
-/** Keep the first and last points (tail and head) and spread the rest. */
-function subsample(pts: Vec[], max: number): Vec[] {
-  if (pts.length <= max) return pts;
-  const out: Vec[] = [];
-  const n = pts.length - 1;
-  for (let i = 0; i < max; i++) {
-    const t = (i / (max - 1)) * n;
-    const i0 = Math.min(n, Math.round(t));
-    out.push(pts[i0]!);
-  }
-  return out;
-}
-
-function sample(buf: Snap[], at: number): Snap | null {
-  if (!buf.length) return null;
-  if (buf.length === 1 || at <= buf[0]!.t) return buf[0]!;
-  for (let i = 1; i < buf.length; i++) {
-    const b = buf[i]!;
-    const a = buf[i - 1]!;
-    if (b.t >= at) {
-      const t = (at - a.t) / Math.max(1, b.t - a.t);
-      return {
-        t: at,
-        name: b.name,
-        skin: b.skin,
-        x: lerp(a.x, b.x, t),
-        y: lerp(a.y, b.y, t),
-        angle: a.angle + (b.angle - a.angle) * t,
-        mass: lerp(a.mass, b.mass, t),
-        boosting: b.boosting,
-        points: t < 0.5 ? a.points : b.points,
-      };
-    }
-  }
-  return buf[buf.length - 1]!;
 }
 
 function readBest(): number {

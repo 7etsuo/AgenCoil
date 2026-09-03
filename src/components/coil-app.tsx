@@ -1,13 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Volume2, VolumeX, Zap } from "lucide-react";
+import { Share2, Volume2, VolumeX, Zap } from "lucide-react";
 import { CoilEngine, type HudState } from "@/game/engine";
-import { SKINS } from "@/game/model";
-import { useP2PRoom } from "@/lib/multiplayer/use-p2p-room";
+import { MAX_CUSTOM_BANDS, SKINS } from "@/game/model";
 
 const NICK_KEY = "agencoil-nick";
 const SKIN_KEY = "agencoil-skin";
 const MUTE_KEY = "agencoil-mute";
-const ARENA = "agencoil-arena";
+const CUSTOM_KEY = "agencoil-custom";
 
 function readNick(): string {
   try {
@@ -21,27 +20,44 @@ function readSkin(): number {
   try {
     const v = localStorage.getItem(SKIN_KEY) ?? localStorage.getItem("coil-skin");
     const n = v ? Number(v) : 0;
-    return Number.isFinite(n) ? n % SKINS.length : 0;
+    return Number.isFinite(n) ? n % (SKINS.length + 1) : 0;
   } catch {
     return 0;
   }
 }
 
-function persist(nick: string, skin: number): void {
+function readCustom(): string[] {
+  try {
+    const raw = localStorage.getItem(CUSTOM_KEY);
+    const list = raw ? (JSON.parse(raw) as unknown) : null;
+    if (Array.isArray(list)) {
+      const ok = list.filter((c) => typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c));
+      if (ok.length) return ok.slice(0, MAX_CUSTOM_BANDS);
+    }
+  } catch {
+    /* ignore */
+  }
+  return ["#3ee0c4", "#f0c14a", "#e45fa0"];
+}
+
+function persist(nick: string, skin: number, custom: string[]): void {
   try {
     localStorage.setItem(NICK_KEY, nick);
     localStorage.setItem(SKIN_KEY, String(skin));
+    localStorage.setItem(CUSTOM_KEY, JSON.stringify(custom));
   } catch {
     /* ignore */
   }
 }
 
-function skinGradient(i: number): string {
-  const s = SKINS[i % SKINS.length]!;
-  const n = s.bands.length;
-  const stops = s.bands.map((c, k) => `${c} ${(k / n) * 100}% ${((k + 1) / n) * 100}%`).join(", ");
+function gradientOf(bands: string[]): string {
+  const n = bands.length;
+  const stops = bands.map((c, k) => `${c} ${(k / n) * 100}% ${((k + 1) / n) * 100}%`).join(", ");
   return `linear-gradient(90deg, ${stops})`;
 }
+
+/** Skin index SKINS.length means "custom". */
+const CUSTOM = SKINS.length;
 
 export function CoilApp() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -49,13 +65,17 @@ export function CoilApp() {
   const [hud, setHud] = useState<HudState | null>(null);
   const [nick, setNick] = useState("anon");
   const [skin, setSkin] = useState(0);
+  const [custom, setCustom] = useState<string[]>(["#3ee0c4", "#f0c14a", "#e45fa0"]);
   const [muted, setMuted] = useState(false);
   const [touch, setTouch] = useState(false);
+  const [boardTab, setBoardTab] = useState<"arena" | "today">("arena");
+  const [shared, setShared] = useState(false);
 
   useEffect(() => {
     const n = readNick() || `coil${(Math.random() * 90 + 10) | 0}`;
     setNick(n);
     setSkin(readSkin());
+    setCustom(readCustom());
     try {
       setMuted(localStorage.getItem(MUTE_KEY) === "1");
     } catch {
@@ -63,9 +83,6 @@ export function CoilApp() {
     }
     setTouch(window.matchMedia("(pointer: coarse)").matches);
   }, []);
-
-  // One public arena for everyone; the hook shards it when a mesh fills up.
-  const p2p = useP2PRoom({ room: ARENA, name: nick });
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -80,24 +97,18 @@ export function CoilApp() {
       engine.destroy();
       engineRef.current = null;
     };
-    // room changes remount via key on parent
+    // The engine lives for the page; mute is applied through the toggle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    engineRef.current?.setNet({
-      selfId: p2p.selfId,
-      peers: p2p.peers,
-      joined: p2p.joined,
-      broadcast: p2p.broadcast,
-      send: p2p.send,
-      onMessage: p2p.onMessage,
-    });
-  }, [p2p]);
-
   const play = () => {
-    persist(nick, skin);
-    engineRef.current?.play(nick, skin);
+    persist(nick, skin, custom);
+    setShared(false);
+    engineRef.current?.play({
+      name: nick,
+      skin: skin === CUSTOM ? 0 : skin,
+      bands: skin === CUSTOM ? custom : undefined,
+    });
     engineRef.current?.audio.unlock();
   };
 
@@ -111,9 +122,28 @@ export function CoilApp() {
     }
   };
 
+  const share = async () => {
+    if (!hud) return;
+    const text = `I reached length ${hud.score} with ${hud.kills} kill${hud.kills === 1 ? "" : "s"} in AgenCoil. Beat me.`;
+    const url = typeof window !== "undefined" ? window.location.origin : "";
+    try {
+      if (navigator.share) await navigator.share({ title: "AgenCoil", text, url });
+      else await navigator.clipboard?.writeText(`${text} ${url}`);
+      setShared(true);
+    } catch {
+      /* dismissed */
+    }
+  };
+
   const phase = hud?.phase ?? "menu";
   const boostOn = () => engineRef.current?.setBoost(true);
   const boostOff = () => engineRef.current?.setBoost(false);
+  const modeLabel =
+    hud?.mode === "online"
+      ? `${hud.count} in the arena · ${hud.players} online`
+      : hud?.mode === "connecting"
+        ? "connecting"
+        : "offline · practice arena";
 
   return (
     <div className="relative h-dvh w-full overflow-hidden bg-bg text-fg">
@@ -134,25 +164,48 @@ export function CoilApp() {
               </div>
               <div className="text-xs text-subtle">best {hud.best}</div>
             </div>
-            <div className="hidden min-w-44 rounded-xl border border-line/80 bg-bg/70 px-3 py-2 sm:block">
-              <div className="mb-1 text-xs tracking-wide text-muted">leaderboard</div>
+            <div
+              data-ui
+              className="pointer-events-auto hidden min-w-48 rounded-xl border border-line/80 bg-bg/70 px-3 py-2 sm:block"
+            >
+              <div className="mb-1 flex gap-3 text-xs tracking-wide text-muted">
+                <button
+                  type="button"
+                  onClick={() => setBoardTab("arena")}
+                  className={boardTab === "arena" ? "text-fg" : "hover:text-fg"}
+                >
+                  arena
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBoardTab("today")}
+                  className={boardTab === "today" ? "text-fg" : "hover:text-fg"}
+                >
+                  today
+                </button>
+              </div>
               <ol className="space-y-0.5 text-sm">
-                {hud.board.map((row, i) => (
+                {(boardTab === "arena"
+                  ? hud.board.map((r) => ({ name: r.name, n: r.mass, you: r.you }))
+                  : hud.daily.map((r) => ({ name: r.name, n: r.best, you: r.name === nick }))
+                ).map((row, i) => (
                   <li
                     key={`${row.name}-${i}`}
                     className={row.you ? "font-semibold text-fg" : "text-muted"}
                   >
                     <span className="inline-block w-5 text-subtle">{i + 1}</span>
                     <span className="font-medium">{row.name}</span>
-                    <span className="float-right tabular-nums">{row.mass}</span>
+                    <span className="float-right tabular-nums">{row.n}</span>
                   </li>
                 ))}
+                {boardTab === "today" && hud.daily.length === 0 && (
+                  <li className="text-subtle">no scores yet today</li>
+                )}
               </ol>
             </div>
           </div>
           <div className="absolute left-4 top-[calc(6.5rem+env(safe-area-inset-top))] rounded-full border border-line bg-bg/70 px-3 py-1 text-xs text-muted">
-            {`${hud.count} in the arena`}
-            {hud.peers > 0 ? ` · ${hud.peers} linked` : ""}
+            {modeLabel}
           </div>
           {hud.killNotice && (
             <div className="absolute left-1/2 top-[calc(6.5rem+env(safe-area-inset-top))] -translate-x-1/2 rounded-full border border-line bg-bg/80 px-4 py-1.5 text-sm">
@@ -188,7 +241,10 @@ export function CoilApp() {
           className="absolute inset-0 flex items-end justify-center p-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] sm:items-center"
         >
           <div className="w-full max-w-md rounded-xl border border-line bg-surface/92 p-6 shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
-            <p className="text-xs tracking-[0.22em] text-muted uppercase">multiplayer arena</p>
+            <div className="flex items-baseline justify-between">
+              <p className="text-xs tracking-[0.22em] text-muted uppercase">multiplayer arena</p>
+              <p className="text-xs text-subtle">{hud ? modeLabel : ""}</p>
+            </div>
             <h1
               className="mt-2 text-5xl font-semibold tracking-tight text-fg"
               style={{ letterSpacing: "-0.04em" }}
@@ -218,13 +274,64 @@ export function CoilApp() {
                   onClick={() => setSkin(i)}
                   className="h-9 w-full rounded-md border"
                   style={{
-                    background: skinGradient(i),
+                    background: gradientOf(s.bands),
                     borderColor: i === skin ? "#e8eaee" : "transparent",
                     boxShadow: i === skin ? "0 0 0 1px #e8eaee" : "none",
                   }}
                 />
               ))}
+              <button
+                type="button"
+                aria-label="Custom skin"
+                onClick={() => setSkin(CUSTOM)}
+                className="col-span-8 mt-1 flex h-9 items-center justify-between rounded-md border px-3 text-xs"
+                style={{
+                  background: gradientOf(custom),
+                  borderColor: skin === CUSTOM ? "#e8eaee" : "transparent",
+                  boxShadow: skin === CUSTOM ? "0 0 0 1px #e8eaee" : "none",
+                }}
+              >
+                <span className="rounded bg-bg/70 px-2 py-0.5 text-fg">build your own</span>
+              </button>
             </div>
+            {skin === CUSTOM && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                {custom.map((c, i) => (
+                  <label
+                    key={i}
+                    className="relative h-9 w-9 overflow-hidden rounded-md border border-line"
+                  >
+                    <input
+                      type="color"
+                      value={c}
+                      aria-label={`Band ${i + 1} colour`}
+                      onChange={(e) =>
+                        setCustom(custom.map((x, k) => (k === i ? e.target.value : x)))
+                      }
+                      className="absolute -inset-2 h-14 w-14 cursor-pointer border-0 bg-transparent p-0"
+                    />
+                  </label>
+                ))}
+                {custom.length < MAX_CUSTOM_BANDS && (
+                  <button
+                    type="button"
+                    onClick={() => setCustom([...custom, custom[custom.length - 1] ?? "#ffffff"])}
+                    className="h-9 rounded-md border border-line px-3 text-xs text-muted hover:text-fg"
+                  >
+                    + band
+                  </button>
+                )}
+                {custom.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => setCustom(custom.slice(0, -1))}
+                    className="h-9 rounded-md border border-line px-3 text-xs text-muted hover:text-fg"
+                  >
+                    remove
+                  </button>
+                )}
+              </div>
+            )}
 
             <button
               type="button"
@@ -271,6 +378,13 @@ export function CoilApp() {
               className="mt-6 h-12 w-full rounded-lg bg-accent font-medium text-accent-fg active:scale-[0.98]"
             >
               Play again
+            </button>
+            <button
+              type="button"
+              onClick={() => void share()}
+              className="mt-2 flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-line text-sm text-muted hover:text-fg"
+            >
+              <Share2 size={16} /> {shared ? "copied" : "share your run"}
             </button>
             <p className="mt-3 text-xs text-subtle">tap anywhere or press space</p>
           </div>

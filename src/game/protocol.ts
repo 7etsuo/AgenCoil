@@ -1,0 +1,280 @@
+/**
+ * Binary wire protocol between the game server and clients. Both sides import
+ * this file, so the layout lives in one place. Every message starts with a
+ * one-byte type tag.
+ */
+import type { Food, Snake, Vec } from "./model";
+
+export const C2S = {
+  HELLO: 1,
+  INPUT: 2,
+  SPAWN: 3,
+  PING: 4,
+} as const;
+
+export const S2C = {
+  WELCOME: 1,
+  SNAP: 2,
+  FOOD_ADD: 3,
+  FOOD_DEL: 4,
+  STATS: 5,
+  EAT: 6,
+  DEATH: 7,
+  TOKEN: 8,
+  PONG: 9,
+  SPAWNED: 10,
+} as const;
+
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+export class Writer {
+  private buf = new ArrayBuffer(1024);
+  private view = new DataView(this.buf);
+  private bytes = new Uint8Array(this.buf);
+  private pos = 0;
+
+  private need(n: number): void {
+    if (this.pos + n <= this.buf.byteLength) return;
+    let size = this.buf.byteLength * 2;
+    while (size < this.pos + n) size *= 2;
+    const next = new ArrayBuffer(size);
+    new Uint8Array(next).set(this.bytes.subarray(0, this.pos));
+    this.buf = next;
+    this.view = new DataView(next);
+    this.bytes = new Uint8Array(next);
+  }
+
+  u8(v: number): this {
+    this.need(1);
+    this.view.setUint8(this.pos, v);
+    this.pos += 1;
+    return this;
+  }
+  u16(v: number): this {
+    this.need(2);
+    this.view.setUint16(this.pos, v);
+    this.pos += 2;
+    return this;
+  }
+  i16(v: number): this {
+    this.need(2);
+    this.view.setInt16(this.pos, v);
+    this.pos += 2;
+    return this;
+  }
+  u32(v: number): this {
+    this.need(4);
+    this.view.setUint32(this.pos, v >>> 0);
+    this.pos += 4;
+    return this;
+  }
+  f32(v: number): this {
+    this.need(4);
+    this.view.setFloat32(this.pos, v);
+    this.pos += 4;
+    return this;
+  }
+  str(s: string): this {
+    const b = enc.encode(s.slice(0, 255));
+    this.u8(b.length);
+    this.need(b.length);
+    this.bytes.set(b, this.pos);
+    this.pos += b.length;
+    return this;
+  }
+  /** Angle in radians packed into 16 bits. */
+  angle(a: number): this {
+    return this.i16(Math.round(((a + Math.PI) / (Math.PI * 2)) * 65535) - 32768);
+  }
+  finish(): Uint8Array {
+    return this.bytes.slice(0, this.pos);
+  }
+}
+
+export class Reader {
+  private view: DataView;
+  private bytes: Uint8Array;
+  pos = 0;
+
+  constructor(data: ArrayBuffer | Uint8Array) {
+    this.bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    this.view = new DataView(this.bytes.buffer, this.bytes.byteOffset, this.bytes.byteLength);
+  }
+
+  get remaining(): number {
+    return this.bytes.byteLength - this.pos;
+  }
+  u8(): number {
+    const v = this.view.getUint8(this.pos);
+    this.pos += 1;
+    return v;
+  }
+  u16(): number {
+    const v = this.view.getUint16(this.pos);
+    this.pos += 2;
+    return v;
+  }
+  i16(): number {
+    const v = this.view.getInt16(this.pos);
+    this.pos += 2;
+    return v;
+  }
+  u32(): number {
+    const v = this.view.getUint32(this.pos);
+    this.pos += 4;
+    return v;
+  }
+  f32(): number {
+    const v = this.view.getFloat32(this.pos);
+    this.pos += 4;
+    return v;
+  }
+  str(): string {
+    const n = this.u8();
+    const s = dec.decode(this.bytes.subarray(this.pos, this.pos + n));
+    this.pos += n;
+    return s;
+  }
+  angle(): number {
+    return ((this.i16() + 32768) / 65535) * Math.PI * 2 - Math.PI;
+  }
+}
+
+// ── helpers shared by both sides ─────────────────────────────────────────────
+
+export function hexToRgb(hex: string): [number, number, number] {
+  const h = hex.replace("#", "");
+  return [
+    parseInt(h.slice(0, 2), 16) || 0,
+    parseInt(h.slice(2, 4), 16) || 0,
+    parseInt(h.slice(4, 6), 16) || 0,
+  ];
+}
+
+export function rgbToHex(r: number, g: number, b: number): string {
+  return `#${[r, g, b].map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+}
+
+export function writeBands(w: Writer, bands: string[] | undefined): void {
+  const list = bands ?? [];
+  w.u8(Math.min(6, list.length));
+  for (const c of list.slice(0, 6)) {
+    const [r, g, b] = hexToRgb(c);
+    w.u8(r).u8(g).u8(b);
+  }
+}
+
+export function readBands(r: Reader): string[] | undefined {
+  const n = r.u8();
+  if (!n) return undefined;
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) out.push(rgbToHex(r.u8(), r.u8(), r.u8()));
+  return out;
+}
+
+export function writeFood(w: Writer, f: Food): void {
+  w.u32(f.id ?? 0)
+    .f32(f.x)
+    .f32(f.y)
+    .u16(Math.min(65535, Math.round(f.v * 10)))
+    .u8(f.c)
+    .u8(Math.min(255, Math.round(f.r * 4)))
+    .u8(f.k);
+}
+
+export function readFood(r: Reader): Food {
+  return {
+    id: r.u32(),
+    x: r.f32(),
+    y: r.f32(),
+    v: r.u16() / 10,
+    c: r.u8(),
+    r: r.u8() / 4,
+    k: r.u8(),
+  };
+}
+
+export function writePoints(w: Writer, pts: Vec[], max: number): void {
+  let list = pts;
+  if (list.length > max) {
+    const out: Vec[] = [];
+    const n = list.length - 1;
+    for (let i = 0; i < max; i++) out.push(list[Math.min(n, Math.round((i / (max - 1)) * n))]!);
+    list = out;
+  }
+  w.u16(list.length);
+  for (const p of list) w.f32(p.x).f32(p.y);
+}
+
+export function readPoints(r: Reader): Vec[] {
+  const n = r.u16();
+  const out: Vec[] = [];
+  for (let i = 0; i < n; i++) out.push({ x: r.f32(), y: r.f32() });
+  return out;
+}
+
+export const SNAKE_FULL = 1;
+export const SNAKE_BOOST = 2;
+export const SNAKE_BOT = 4;
+export const SNAKE_INVULN = 8;
+
+/** One snake entry inside a snapshot. `full` includes identity and body. */
+export function writeSnakeEntry(
+  w: Writer,
+  nid: number,
+  s: Snake,
+  full: boolean,
+  maxPts: number,
+): void {
+  let flags = 0;
+  if (full) flags |= SNAKE_FULL;
+  if (s.boosting) flags |= SNAKE_BOOST;
+  if (s.isBot) flags |= SNAKE_BOT;
+  if (s.invuln > 0) flags |= SNAKE_INVULN;
+  w.u16(nid).u8(flags).f32(s.x).f32(s.y).angle(s.angle).f32(s.mass);
+  if (full) {
+    w.u8(s.skin).str(s.name);
+    writeBands(w, s.bands);
+    writePoints(w, s.points, maxPts);
+  }
+}
+
+export interface SnakeEntry {
+  nid: number;
+  full: boolean;
+  boosting: boolean;
+  isBot: boolean;
+  invuln: boolean;
+  x: number;
+  y: number;
+  angle: number;
+  mass: number;
+  skin?: number;
+  name?: string;
+  bands?: string[];
+  points?: Vec[];
+}
+
+export function readSnakeEntry(r: Reader): SnakeEntry {
+  const nid = r.u16();
+  const flags = r.u8();
+  const e: SnakeEntry = {
+    nid,
+    full: (flags & SNAKE_FULL) !== 0,
+    boosting: (flags & SNAKE_BOOST) !== 0,
+    isBot: (flags & SNAKE_BOT) !== 0,
+    invuln: (flags & SNAKE_INVULN) !== 0,
+    x: r.f32(),
+    y: r.f32(),
+    angle: r.angle(),
+    mass: r.f32(),
+  };
+  if (e.full) {
+    e.skin = r.u8();
+    e.name = r.str();
+    e.bands = readBands(r);
+    e.points = readPoints(r);
+  }
+  return e;
+}

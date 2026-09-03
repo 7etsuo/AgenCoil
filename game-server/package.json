@@ -1,0 +1,21 @@
+{
+  "name": "agencoil-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm run bundle && node dist/dev.mjs",
+    "bundle": "esbuild dev.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/dev.mjs",
+    "build:fn": "esbuild src/vercel-entry.ts --bundle --platform=node --format=esm --packages=external --outfile=api/ws.js",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "pg": "^8.16.3",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.16.5",
+    "@types/pg": "^8.11.10",
+    "@types/ws": "^8.5.12",
+    "esbuild": "^0.25.0"
+  }
+}

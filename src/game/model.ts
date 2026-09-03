@@ -11,9 +11,16 @@ export const NET_INTERVAL = 1000 / 18;
 export const INTERP_DELAY = 110;
 export const MAX_NET_POINTS = 56;
 export const MAX_BOTS = 22;
+/** Bots on the authoritative server, where CPU is cheaper than an empty arena. */
+export const SERVER_BOTS = 40;
 export const CHASE_ORBS = 14;
 export const MAGNET_SPEED = 420;
 export const BOT_RESPAWN_DELAY = 2.5;
+export const SERVER_TICK_HZ = 40;
+export const SNAPSHOT_HZ = 20;
+export const FOOD_SYNC_HZ = 10;
+export const DISCONNECT_GRACE_MS = 10_000;
+export const MAX_CUSTOM_BANDS = 6;
 
 export type Phase = "menu" | "play" | "dead";
 
@@ -33,6 +40,8 @@ export interface Food {
   c: number;
   r: number;
   k: number;
+  /** Server-assigned id; absent in the offline simulation. */
+  id?: number;
 }
 
 export interface Snake {
@@ -54,6 +63,12 @@ export interface Snake {
   avoidDir: number;
   boostLeft: number;
   dropped: number;
+  /** Custom skin colours (hex), overriding `skin` when present. */
+  bands?: string[];
+  /** Bot personality 0..1: timid to aggressive. */
+  temper: number;
+  /** Kills this life. */
+  kills: number;
 }
 
 export interface Camera {
@@ -233,6 +248,18 @@ export function turnRateOf(mass: number): number {
 export function zoomOf(mass: number): number {
   const r = radiusOf(mass);
   return clamp(0.9 / (0.85 + r / 30), 0.3, 1.0);
+}
+
+/** Resolve the colour bands a snake is drawn with. */
+export function bandsOf(s: { skin: number; bands?: string[] }): string[] {
+  if (s.bands && s.bands.length) return s.bands;
+  return SKINS[s.skin % SKINS.length]!.bands;
+}
+
+/** Representative colour for labels, minimap dots and remains. */
+export function fillOf(s: { skin: number; bands?: string[] }): string {
+  if (s.bands && s.bands.length) return s.bands[0]!;
+  return SKINS[s.skin % SKINS.length]!.fill;
 }
 
 /** Distance between recorded path points. */

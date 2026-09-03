@@ -1,0 +1,574 @@
+/**
+ * Authoritative arena server. One World per process; every connected player
+ * is a snake steered by the inputs it sends, bots are run here, and clients
+ * only receive what is near their camera.
+ *
+ * Runs unchanged as a Vercel Function (see ../api/ws.ts) or a plain Node
+ * process (see ../dev.ts). Nothing here depends on the host.
+ */
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import type { IncomingMessage, Server } from "node:http";
+import { WebSocketServer, type WebSocket, type RawData } from "ws";
+import {
+  ARENA_RADIUS,
+  DISCONNECT_GRACE_MS,
+  FOOD_SYNC_HZ,
+  SERVER_BOTS,
+  MAX_CUSTOM_BANDS,
+  MAX_NET_POINTS,
+  SERVER_TICK_HZ,
+  SNAPSHOT_HZ,
+  START_MASS,
+  lengthOf,
+  radiusOf,
+  type Snake,
+} from "../../src/game/model";
+import { CELL, World } from "../../src/game/world";
+import {
+  C2S,
+  Reader,
+  S2C,
+  Writer,
+  readBands,
+  writeBands,
+  writeFood,
+  writeSnakeEntry,
+} from "../../src/game/protocol";
+import { DailyBoard } from "./daily";
+
+interface View {
+  cx: number;
+  cy: number;
+  hw: number;
+  hh: number;
+}
+
+interface Client {
+  ws: WebSocket;
+  sid: string | null;
+  name: string;
+  skin: number;
+  bands?: string[];
+  view: View;
+  known: Set<string>;
+  sentFood: Set<number>;
+  lastPing: number;
+  alive: boolean;
+}
+
+interface Token {
+  sid: string;
+  mass: number;
+  x: number;
+  y: number;
+  angle: number;
+  skin: number;
+  name: string;
+  kills: number;
+  exp: number;
+}
+
+const VIEW_MARGIN = 220;
+const MAX_NAME = 16;
+const TOKEN_TTL_MS = 60_000;
+const IDLE_STOP_MS = 30_000;
+
+function sanitizeName(raw: string): string {
+  const s = raw
+    .replace(/[^\p{L}\p{N} _.\-']/gu, "")
+    .trim()
+    .slice(0, MAX_NAME);
+  return s || "anon";
+}
+
+function sanitizeBands(bands: string[] | undefined): string[] | undefined {
+  if (!bands) return undefined;
+  const ok = bands.filter((c) => /^#[0-9a-f]{6}$/i.test(c)).slice(0, MAX_CUSTOM_BANDS);
+  return ok.length ? ok : undefined;
+}
+
+export class GameServer {
+  readonly world = new World(true);
+  readonly instance = `${process.env.VERCEL_DEPLOYMENT_ID ?? "local"}-${randomBytes(3).toString("hex")}`;
+  private readonly secret = process.env.GAME_SECRET ?? randomBytes(32).toString("hex");
+  private readonly clients = new Set<Client>();
+  private readonly nids = new Map<string, number>();
+  private readonly grace = new Map<string, NodeJS.Timeout>();
+  private readonly daily = new DailyBoard();
+  private nextNid = 1;
+  private nextPlayer = 1;
+  private tick = 0;
+  private timer: NodeJS.Timeout | null = null;
+  private lastActivity = Date.now();
+  private startedAt = Date.now();
+  private stepMs = 0;
+  private wss: WebSocketServer | null = null;
+
+  constructor() {
+    this.world.host = true;
+    this.world.resetLocalBots(SERVER_BOTS);
+    for (const s of this.world.snakes) this.nidOf(s.id);
+  }
+
+  attach(server: Server): void {
+    this.wss = new WebSocketServer({ server, maxPayload: 4096 });
+    this.wss.on("connection", (ws, req) => this.onConnection(ws, req));
+    server.on("request", (req, res) => {
+      if (req.headers.upgrade) return;
+      res.setHeader("content-type", "application/json");
+      res.setHeader("access-control-allow-origin", "*");
+      res.end(JSON.stringify(this.status()));
+    });
+  }
+
+  status(): Record<string, unknown> {
+    const snakes = this.world.snakes;
+    return {
+      ok: true,
+      instance: this.instance,
+      players: snakes.filter((s) => !s.isBot).length,
+      bots: snakes.filter((s) => s.isBot).length,
+      clients: this.clients.size,
+      foods: this.world.foods.length,
+      uptimeSec: Math.round((Date.now() - this.startedAt) / 1000),
+      tick: this.tick,
+      stepMs: Math.round(this.stepMs * 100) / 100,
+    };
+  }
+
+  // ── lifecycle ──────────────────────────────────────────────────────────────
+
+  private ensureLoop(): void {
+    if (this.timer) return;
+    let last = Date.now();
+    let acc = 0;
+    const dt = 1 / SERVER_TICK_HZ;
+    this.timer = setInterval(() => {
+      const now = Date.now();
+      acc += Math.min(0.25, (now - last) / 1000);
+      last = now;
+      let steps = 0;
+      while (acc >= dt && steps < 4) {
+        this.step(dt);
+        acc -= dt;
+        steps++;
+      }
+      if (acc > dt * 2) acc = dt;
+      if (this.clients.size === 0 && now - this.lastActivity > IDLE_STOP_MS) this.stopLoop();
+    }, 1000 / SERVER_TICK_HZ);
+  }
+
+  private stopLoop(): void {
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  private nidOf(sid: string): number {
+    let n = this.nids.get(sid);
+    if (n === undefined) {
+      n = this.nextNid++;
+      if (this.nextNid > 65000) this.nextNid = 1;
+      this.nids.set(sid, n);
+    }
+    return n;
+  }
+
+  // ── connections ────────────────────────────────────────────────────────────
+
+  private onConnection(ws: WebSocket, _req: IncomingMessage): void {
+    const client: Client = {
+      ws,
+      sid: null,
+      name: "anon",
+      skin: 0,
+      view: { cx: 0, cy: 0, hw: 900, hh: 600 },
+      known: new Set(),
+      sentFood: new Set(),
+      lastPing: Date.now(),
+      alive: true,
+    };
+    this.clients.add(client);
+    this.lastActivity = Date.now();
+    this.ensureLoop();
+    ws.binaryType = "arraybuffer";
+    ws.on("message", (data) => this.onMessage(client, data));
+    ws.on("close", () => this.onClose(client));
+    ws.on("error", () => this.onClose(client));
+    ws.send(
+      new Writer().u8(S2C.WELCOME).str(this.instance).f32(ARENA_RADIUS).u8(SERVER_TICK_HZ).finish(),
+    );
+  }
+
+  private onClose(client: Client): void {
+    if (!client.alive) return;
+    client.alive = false;
+    this.clients.delete(client);
+    this.lastActivity = Date.now();
+    const sid = client.sid;
+    client.sid = null;
+    if (!sid) return;
+    // Hold the snake for a moment so a reconnect (forced by the platform's
+    // connection cap, or a flaky network) can pick it back up.
+    const input = this.world.inputs.get(sid);
+    if (input) input.boost = false;
+    this.grace.set(
+      sid,
+      setTimeout(() => {
+        this.grace.delete(sid);
+        this.world.killSnake(sid);
+      }, DISCONNECT_GRACE_MS),
+    );
+  }
+
+  private onMessage(client: Client, data: RawData): void {
+    if (!client.alive) return;
+    let buf: Uint8Array;
+    if (data instanceof ArrayBuffer) buf = new Uint8Array(data);
+    else if (Array.isArray(data)) buf = new Uint8Array(Buffer.concat(data));
+    else buf = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    if (!buf.byteLength) return;
+    const r = new Reader(buf);
+    try {
+      const type = r.u8();
+      if (type === C2S.HELLO || type === C2S.SPAWN) this.onHello(client, r, type === C2S.SPAWN);
+      else if (type === C2S.INPUT) this.onInput(client, r);
+      else if (type === C2S.PING) client.ws.send(new Writer().u8(S2C.PONG).u32(r.u32()).finish());
+    } catch {
+      client.ws.close(1003, "bad message");
+    }
+  }
+
+  private onHello(client: Client, r: Reader, respawn: boolean): void {
+    client.name = sanitizeName(r.str());
+    client.skin = r.u8() % 16;
+    client.bands = sanitizeBands(readBands(r));
+    const tokenText = r.remaining ? r.str() : "";
+    if (client.sid && this.world.snakes.some((s) => s.id === client.sid && s.alive)) {
+      // Already playing: a repeated hello just updates the look next spawn.
+      if (!respawn) return;
+    }
+    const token = tokenText && !respawn ? this.verifyToken(tokenText) : null;
+    let snake: Snake | null = null;
+    if (token) {
+      const held = this.world.snakes.find((s) => s.id === token.sid && s.alive);
+      const timer = this.grace.get(token.sid);
+      if (held && timer) {
+        clearTimeout(timer);
+        this.grace.delete(token.sid);
+        snake = held;
+        snake.name = client.name;
+      } else {
+        // The snake lived on another instance (or was lost): rebuild it with
+        // the same length near where it was.
+        const at = this.world.safeSpawnNear({ x: token.x, y: token.y });
+        snake = this.world.spawnSnake(
+          this.newSid(),
+          client.name,
+          client.skin,
+          false,
+          client.bands,
+          token.mass,
+        );
+        snake.x = at.x;
+        snake.y = at.y;
+        snake.points = [];
+        this.world.ensureTrail(snake);
+        snake.kills = token.kills;
+      }
+    } else {
+      snake = this.world.spawnSnake(this.newSid(), client.name, client.skin, false, client.bands);
+    }
+    client.sid = snake.id;
+    client.known.clear();
+    this.world.inputs.set(snake.id, { angle: snake.angle, boost: false });
+    const nid = this.nidOf(snake.id);
+    client.ws.send(
+      new Writer()
+        .u8(S2C.SPAWNED)
+        .u16(nid)
+        .f32(snake.x)
+        .f32(snake.y)
+        .angle(snake.angle)
+        .f32(snake.mass)
+        .finish(),
+    );
+    this.sendToken(client);
+  }
+
+  private newSid(): string {
+    return `p${this.nextPlayer++}`;
+  }
+
+  private onInput(client: Client, r: Reader): void {
+    const angle = r.angle();
+    const boost = r.u8() === 1;
+    client.view = {
+      cx: r.f32(),
+      cy: r.f32(),
+      hw: Math.min(4000, r.f32()),
+      hh: Math.min(3000, r.f32()),
+    };
+    if (!client.sid) return;
+    const input = this.world.inputs.get(client.sid);
+    if (input) {
+      input.angle = angle;
+      input.boost = boost;
+    }
+  }
+
+  // ── tokens ─────────────────────────────────────────────────────────────────
+
+  private sign(payload: string): string {
+    return createHmac("sha256", this.secret).update(payload).digest("base64url");
+  }
+
+  private makeToken(s: Snake): string {
+    const t: Token = {
+      sid: s.id,
+      mass: Math.round(s.mass * 10) / 10,
+      x: Math.round(s.x),
+      y: Math.round(s.y),
+      angle: Math.round(s.angle * 1000) / 1000,
+      skin: s.skin,
+      name: s.name,
+      kills: s.kills,
+      exp: Date.now() + TOKEN_TTL_MS,
+    };
+    const payload = Buffer.from(JSON.stringify(t)).toString("base64url");
+    return `${payload}.${this.sign(payload)}`;
+  }
+
+  private verifyToken(text: string): Token | null {
+    const dot = text.indexOf(".");
+    if (dot < 0) return null;
+    const payload = text.slice(0, dot);
+    const sig = text.slice(dot + 1);
+    const expect = this.sign(payload);
+    if (sig.length !== expect.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(expect)))
+      return null;
+    try {
+      const t = JSON.parse(Buffer.from(payload, "base64url").toString()) as Token;
+      if (typeof t.mass !== "number" || t.exp < Date.now()) return null;
+      t.mass = Math.min(t.mass, 100_000);
+      return t;
+    } catch {
+      return null;
+    }
+  }
+
+  private sendToken(client: Client): void {
+    if (!client.sid) return;
+    const s = this.world.snakes.find((x) => x.id === client.sid && x.alive);
+    if (!s) return;
+    client.ws.send(new Writer().u8(S2C.TOKEN).str(this.makeToken(s)).finish());
+  }
+
+  // ── simulation and broadcast ───────────────────────────────────────────────
+
+  private step(dt: number): void {
+    const t0 = performance.now();
+    this.tick++;
+    this.world.step(dt, 0, 0, false);
+    this.stepMs = this.stepMs * 0.95 + (performance.now() - t0) * 0.05;
+    for (const s of this.world.snakes) if (!this.nids.has(s.id)) this.nidOf(s.id);
+
+    if (this.world.deaths.length) this.onDeaths();
+    if (this.world.eats.length) this.onEats();
+
+    const snapEvery = Math.max(1, Math.round(SERVER_TICK_HZ / SNAPSHOT_HZ));
+    const foodEvery = Math.max(1, Math.round(SERVER_TICK_HZ / FOOD_SYNC_HZ));
+    if (this.tick % snapEvery === 0) for (const c of this.clients) this.sendSnapshot(c);
+    if (this.tick % foodEvery === 0) for (const c of this.clients) this.sendFood(c);
+    if (this.tick % Math.round(SERVER_TICK_HZ / 2) === 0)
+      for (const c of this.clients) this.sendStats(c);
+    if (this.tick % (SERVER_TICK_HZ * 5) === 0) for (const c of this.clients) this.sendToken(c);
+  }
+
+  private onDeaths(): void {
+    for (const d of this.world.deaths) {
+      const s = d.snake;
+      const nid = this.nidOf(s.id);
+      const killerNid = d.killerId ? this.nidOf(d.killerId) : 0;
+      const msg = new Writer()
+        .u8(S2C.DEATH)
+        .u16(nid)
+        .u16(killerNid)
+        .u8(d.reason === "wall" ? 0 : 1)
+        .str(d.killerName ?? "")
+        .str(s.name)
+        .u32(Math.floor(s.mass))
+        .u16(s.kills)
+        .finish();
+      for (const c of this.clients) {
+        if (c.known.has(s.id) || c.sid === s.id || (d.killerId && c.sid === d.killerId))
+          c.ws.send(msg);
+        c.known.delete(s.id);
+        if (c.sid === s.id) {
+          c.sid = null;
+          this.daily.record(s.name, Math.floor(s.mass));
+        }
+      }
+      if (!s.isBot) this.daily.record(s.name, Math.floor(s.mass));
+      this.world.inputs.delete(s.id);
+      const g = this.grace.get(s.id);
+      if (g) {
+        clearTimeout(g);
+        this.grace.delete(s.id);
+      }
+    }
+  }
+
+  private onEats(): void {
+    const bySid = new Map<string, Writer>();
+    const counts = new Map<string, number>();
+    for (const e of this.world.eats) {
+      let w = bySid.get(e.id);
+      if (!w) {
+        w = new Writer().u8(S2C.EAT).u16(0);
+        bySid.set(e.id, w);
+        counts.set(e.id, 0);
+      }
+      const n = counts.get(e.id)!;
+      if (n >= 48) continue;
+      w.f32(e.x)
+        .f32(e.y)
+        .u16(Math.round(e.v * 10))
+        .u8(e.c);
+      counts.set(e.id, n + 1);
+    }
+    for (const c of this.clients) {
+      if (!c.sid) continue;
+      const w = bySid.get(c.sid);
+      if (!w) continue;
+      const bytes = w.finish();
+      new DataView(bytes.buffer, bytes.byteOffset).setUint16(1, counts.get(c.sid)!);
+      c.ws.send(bytes);
+    }
+  }
+
+  private inView(v: View, x: number, y: number, pad: number): boolean {
+    return Math.abs(x - v.cx) <= v.hw + pad && Math.abs(y - v.cy) <= v.hh + pad;
+  }
+
+  private snakeVisible(c: Client, s: Snake): boolean {
+    if (s.id === c.sid) return true;
+    const r = radiusOf(s.mass);
+    if (this.inView(c.view, s.x, s.y, VIEW_MARGIN + r)) return true;
+    // A long body can be on screen while the head is far away.
+    if (!this.inView(c.view, s.x, s.y, VIEW_MARGIN + lengthOf(s.mass) + r)) return false;
+    const pts = s.points;
+    const stride = Math.max(1, (pts.length / 12) | 0);
+    for (let i = 0; i < pts.length; i += stride) {
+      const p = pts[i]!;
+      if (this.inView(c.view, p.x, p.y, VIEW_MARGIN + r)) return true;
+    }
+    return false;
+  }
+
+  private sendSnapshot(c: Client): void {
+    const w = new Writer()
+      .u8(S2C.SNAP)
+      .u32(this.tick)
+      .u32(Date.now() >>> 0);
+    const visible: Snake[] = [];
+    for (const s of this.world.snakes) if (s.alive && this.snakeVisible(c, s)) visible.push(s);
+    w.u16(visible.length);
+    const seen = new Set<string>();
+    for (const s of visible) {
+      const full = !c.known.has(s.id);
+      writeSnakeEntry(w, this.nidOf(s.id), s, full, MAX_NET_POINTS);
+      c.known.add(s.id);
+      seen.add(s.id);
+    }
+    const gone: number[] = [];
+    for (const sid of c.known) {
+      if (!seen.has(sid)) {
+        gone.push(this.nidOf(sid));
+        c.known.delete(sid);
+      }
+    }
+    w.u16(gone.length);
+    for (const nid of gone) w.u16(nid);
+    const chase = this.world.chaseOrbs;
+    w.u8(chase.length);
+    for (const f of chase)
+      w.u32(f.id ?? 0)
+        .f32(f.x)
+        .f32(f.y);
+    c.ws.send(w.finish());
+  }
+
+  private sendFood(c: Client): void {
+    const v = c.view;
+    const pad = VIEW_MARGIN + CELL;
+    const x0 = v.cx - v.hw - pad;
+    const y0 = v.cy - v.hh - pad;
+    const x1 = v.cx + v.hw + pad;
+    const y1 = v.cy + v.hh + pad;
+    const add = new Writer().u8(S2C.FOOD_ADD).u16(0);
+    let nAdd = 0;
+    const seen = new Set<number>();
+    this.world.forEachFoodIn(x0, y0, x1, y1, (f) => {
+      const id = f.id!;
+      seen.add(id);
+      if (c.sentFood.has(id) || nAdd >= 1500) return;
+      writeFood(add, f);
+      c.sentFood.add(id);
+      nAdd++;
+    });
+    const del = new Writer().u8(S2C.FOOD_DEL).u16(0);
+    let nDel = 0;
+    for (const id of c.sentFood) {
+      if (seen.has(id)) continue;
+      c.sentFood.delete(id);
+      if (nDel >= 4000) continue;
+      del.u32(id);
+      nDel++;
+    }
+    if (nAdd) {
+      const bytes = add.finish();
+      new DataView(bytes.buffer, bytes.byteOffset).setUint16(1, nAdd);
+      c.ws.send(bytes);
+    }
+    if (nDel) {
+      const bytes = del.finish();
+      new DataView(bytes.buffer, bytes.byteOffset).setUint16(1, nDel);
+      c.ws.send(bytes);
+    }
+  }
+
+  private sendStats(c: Client): void {
+    const alive = this.world.snakes.filter((s) => s.alive).sort((a, b) => b.mass - a.mass);
+    const me = c.sid ? alive.find((s) => s.id === c.sid) : undefined;
+    const rank = me ? alive.indexOf(me) + 1 : 0;
+    const w = new Writer()
+      .u8(S2C.STATS)
+      .f32(me?.mass ?? 0)
+      .u16(rank)
+      .u16(alive.length)
+      .u16(me?.kills ?? 0)
+      .u16(this.clients.size);
+    const board = alive.slice(0, 10);
+    w.u8(board.length);
+    for (const s of board) w.u16(this.nidOf(s.id)).str(s.name).u32(Math.floor(s.mass));
+    const daily = this.daily.top(10);
+    w.u8(daily.length);
+    for (const e of daily) w.str(e.name).u32(e.best);
+    c.ws.send(w.finish());
+  }
+}
+
+export function makeHelloPayload(
+  name: string,
+  skin: number,
+  bands: string[] | undefined,
+  token: string,
+): Uint8Array {
+  const w = new Writer().u8(C2S.HELLO).str(name).u8(skin);
+  writeBands(w, bands);
+  w.str(token);
+  return w.finish();
+}
+
+export { START_MASS };
