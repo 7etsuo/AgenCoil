@@ -1,12 +1,33 @@
 import { useEffect, useRef, useState } from "react";
-import { Share2, Volume2, VolumeX, Zap } from "lucide-react";
-import { CoilEngine, type HudState } from "@/game/engine";
+import { Eye, Lock, Share2, Volume2, VolumeX, Zap } from "lucide-react";
+import { CoilEngine, type Controls, type HudState } from "@/game/engine";
 import { MAX_CUSTOM_BANDS, SKINS } from "@/game/model";
 
 const NICK_KEY = "agencoil-nick";
 const SKIN_KEY = "agencoil-skin";
 const MUTE_KEY = "agencoil-mute";
 const CUSTOM_KEY = "agencoil-custom";
+const CONTROLS_KEY = "agencoil-controls";
+const BEST_KEY = "agencoil-best";
+
+/** Skins that unlock with your best length: index to required length. */
+const UNLOCKS: Record<number, number> = { 12: 120, 13: 300, 14: 600, 15: 1200 };
+
+function readBest(): number {
+  try {
+    return Number(localStorage.getItem(BEST_KEY) ?? localStorage.getItem("coil-best")) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function readControls(): Controls {
+  try {
+    return localStorage.getItem(CONTROLS_KEY) === "stick" ? "stick" : "point";
+  } catch {
+    return "point";
+  }
+}
 
 function readNick(): string {
   try {
@@ -70,6 +91,9 @@ export function CoilApp() {
   const [touch, setTouch] = useState(false);
   const [boardTab, setBoardTab] = useState<"arena" | "today">("arena");
   const [shared, setShared] = useState(false);
+  const [best, setBest] = useState(0);
+  const [controls, setControls] = useState<Controls>("point");
+  const [lockNote, setLockNote] = useState<string | null>(null);
 
   useEffect(() => {
     const n = readNick() || `coil${(Math.random() * 90 + 10) | 0}`;
@@ -82,7 +106,15 @@ export function CoilApp() {
       /* ignore */
     }
     setTouch(window.matchMedia("(pointer: coarse)").matches);
+    setBest(readBest());
+    setControls(readControls());
   }, []);
+
+  // The engine keeps `best` current; mirror it whenever the HUD updates so
+  // unlocks show up on the next visit to the menu.
+  useEffect(() => {
+    if (hud && hud.best > best) setBest(hud.best);
+  }, [hud, best]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -90,6 +122,7 @@ export function CoilApp() {
     const engine = new CoilEngine(canvas);
     engineRef.current = engine;
     engine.audio.muted = muted;
+    engine.setControls(readControls());
     engine.start();
     const unsub = engine.subscribe(setHud);
     return () => {
@@ -101,13 +134,16 @@ export function CoilApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const locked = (i: number) => (UNLOCKS[i] ?? 0) > best;
+
   const play = () => {
-    persist(nick, skin, custom);
+    const chosen = locked(skin) ? 0 : skin;
+    persist(nick, chosen, custom);
     setShared(false);
     engineRef.current?.play({
       name: nick,
-      skin: skin === CUSTOM ? 0 : skin,
-      bands: skin === CUSTOM ? custom : undefined,
+      skin: chosen === CUSTOM ? 0 : chosen,
+      bands: chosen === CUSTOM ? custom : undefined,
     });
     engineRef.current?.audio.unlock();
   };
@@ -117,6 +153,16 @@ export function CoilApp() {
     setMuted(next);
     try {
       localStorage.setItem(MUTE_KEY, next ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const chooseControls = (mode: Controls) => {
+    setControls(mode);
+    engineRef.current?.setControls(mode);
+    try {
+      localStorage.setItem(CONTROLS_KEY, mode);
     } catch {
       /* ignore */
     }
@@ -270,15 +316,31 @@ export function CoilApp() {
                 <button
                   key={`${s.fill}-${i}`}
                   type="button"
-                  aria-label={`Skin ${i + 1}`}
-                  onClick={() => setSkin(i)}
-                  className="h-9 w-full rounded-md border"
+                  aria-label={
+                    locked(i) ? `Skin ${i + 1}, unlocks at length ${UNLOCKS[i]}` : `Skin ${i + 1}`
+                  }
+                  onClick={() => {
+                    if (locked(i)) {
+                      setLockNote(`reach length ${UNLOCKS[i]} to unlock this skin (best ${best})`);
+                      return;
+                    }
+                    setLockNote(null);
+                    setSkin(i);
+                  }}
+                  className="relative h-9 w-full rounded-md border"
                   style={{
                     background: gradientOf(s.bands),
                     borderColor: i === skin ? "#e8eaee" : "transparent",
                     boxShadow: i === skin ? "0 0 0 1px #e8eaee" : "none",
+                    opacity: locked(i) ? 0.45 : 1,
                   }}
-                />
+                >
+                  {locked(i) && (
+                    <span className="absolute inset-0 flex items-center justify-center text-fg">
+                      <Lock size={14} />
+                    </span>
+                  )}
+                </button>
               ))}
               <button
                 type="button"
@@ -294,6 +356,7 @@ export function CoilApp() {
                 <span className="rounded bg-bg/70 px-2 py-0.5 text-fg">build your own</span>
               </button>
             </div>
+            {lockNote && <p className="mt-2 text-xs text-subtle">{lockNote}</p>}
             {skin === CUSTOM && (
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 {custom.map((c, i) => (
@@ -330,6 +393,22 @@ export function CoilApp() {
                     remove
                   </button>
                 )}
+              </div>
+            )}
+
+            {touch && (
+              <div className="mt-4 flex items-center gap-2 text-xs text-muted">
+                <span>Steering</span>
+                {(["point", "stick"] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => chooseControls(m)}
+                    className={`rounded-md border px-3 py-1.5 ${controls === m ? "border-accent text-fg" : "border-line hover:text-fg"}`}
+                  >
+                    {m === "point" ? "follow finger" : "joystick"}
+                  </button>
+                ))}
               </div>
             )}
 
@@ -379,6 +458,21 @@ export function CoilApp() {
             >
               Play again
             </button>
+            {hud.watchable.length > 0 && (
+              <div className="mt-3 flex flex-wrap items-center justify-center gap-2 text-xs text-muted">
+                <Eye size={14} />
+                {hud.watchable.map((w) => (
+                  <button
+                    key={w.nid}
+                    type="button"
+                    onClick={() => engineRef.current?.watch(hud.watching === w.nid ? null : w.nid)}
+                    className={`rounded-full border px-2.5 py-1 ${hud.watching === w.nid ? "border-accent text-fg" : "border-line hover:text-fg"}`}
+                  >
+                    {w.name}
+                  </button>
+                ))}
+              </div>
+            )}
             <button
               type="button"
               onClick={() => void share()}

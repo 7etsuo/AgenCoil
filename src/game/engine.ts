@@ -27,11 +27,23 @@ export interface HudState {
   board: { name: string; mass: number; you: boolean }[];
   daily: { name: string; best: number }[];
   killNotice: string | null;
+  /** Top snakes you can watch after dying. */
+  watchable: { nid: number; name: string }[];
+  watching: number | null;
   deathReason: string | null;
   killerName: string | null;
   players: number;
   mode: NetState;
   rtt: number;
+}
+
+export type Controls = "point" | "stick";
+
+export interface Stick {
+  ox: number;
+  oy: number;
+  x: number;
+  y: number;
 }
 
 export interface Look {
@@ -96,6 +108,10 @@ export class CoilEngine {
   private fps = 0;
   private zoomMul = 1;
   private stats: StatsInfo | null = null;
+  controls: Controls = "point";
+  private stick: Stick | null = null;
+  private stickId: number | null = null;
+  private watchNid: number | null = null;
   private spawnWait = 0;
   private dbgWall = 0;
   private dbgSnake = 0;
@@ -210,8 +226,21 @@ export class CoilEngine {
     this.syncBoost();
   }
 
+  /** After dying, follow one of the leaderboard snakes (null = your killer). */
+  watch(nid: number | null): void {
+    this.watchNid = nid;
+    this.emitHud();
+  }
+
+  setControls(mode: Controls): void {
+    this.controls = mode;
+    this.stick = null;
+    this.stickId = null;
+  }
+
   play(look: Look): void {
     this.audio.unlock();
+    this.audio.startMusic();
     this.look = { name: look.name.slice(0, 16) || "anon", skin: look.skin % 16, bands: look.bands };
     this.kills = 0;
     this.streak = 0;
@@ -222,6 +251,7 @@ export class CoilEngine {
     this.corpse = null;
     this.deathFx = null;
     this.boosting = false;
+    this.watchNid = null;
     if (this.net && this.net.state !== "offline") {
       // Online, or still connecting: ask the server and wait for SPAWNED.
       // If nothing arrives within SPAWN_TIMEOUT_MS the tick starts a local game.
@@ -292,6 +322,8 @@ export class CoilEngine {
       board,
       daily: st?.daily ?? [],
       killNotice: this.killNotice,
+      watchable: st ? st.board.slice(0, 3).map((b) => ({ nid: b.nid, name: b.name })) : [],
+      watching: this.watchNid,
       deathReason: this.deathReason,
       killerName: this.killerName,
       players: st?.clients ?? (this.online ? 1 : 0),
@@ -343,8 +375,28 @@ export class CoilEngine {
   private pointerDown = false;
   private onPointerMove = (e: PointerEvent): void => {
     if (e.pointerType === "touch" && !this.pointerDown) return;
+    if (e.pointerType === "touch" && this.controls === "stick") {
+      if (this.stick && e.pointerId === this.stickId) {
+        this.stick.x = e.clientX;
+        this.stick.y = e.clientY;
+        this.stickToAim();
+      }
+      return;
+    }
     this.clientToAim(e.clientX, e.clientY);
   };
+
+  private stickToAim(): void {
+    const st = this.stick;
+    const p = this.world.player;
+    if (!st || !p) return;
+    const dx = st.x - st.ox;
+    const dy = st.y - st.oy;
+    const d = Math.hypot(dx, dy);
+    if (d < 6) return;
+    this.pointer.x = p.x + (dx / d) * 240;
+    this.pointer.y = p.y + (dy / d) * 240;
+  }
   private onPointerDown = (e: PointerEvent): void => {
     if (e.button !== undefined && e.button !== 0) return;
     const t = e.target as HTMLElement | null;
@@ -357,11 +409,20 @@ export class CoilEngine {
     this.pointerDown = true;
     // A mouse click boosts; a finger only steers (the boost button boosts).
     if (e.pointerType !== "touch") this.holdBoost = true;
+    if (e.pointerType === "touch" && this.controls === "stick") {
+      this.stick = { ox: e.clientX, oy: e.clientY, x: e.clientX, y: e.clientY };
+      this.stickId = e.pointerId;
+      return;
+    }
     this.clientToAim(e.clientX, e.clientY);
     this.syncBoost();
   };
   private onPointerUp = (e: PointerEvent): void => {
     if (e.pointerType !== "touch") this.holdBoost = false;
+    if (e.pointerId === this.stickId) {
+      this.stick = null;
+      this.stickId = null;
+    }
     this.pointerDown = false;
     this.syncBoost();
   };
@@ -574,8 +635,16 @@ export class CoilEngine {
       this.cam.x = Math.cos(this.menuT) * 420;
       this.cam.y = Math.sin(this.menuT * 0.7) * 320;
     } else if (this.phase === "dead") {
-      const killer = this.killerId ? world.snakes.find((s) => s.id === this.killerId) : null;
-      const target = killer ?? this.corpse;
+      let target: Vec | null = null;
+      if (this.watchNid !== null) {
+        const live = world.snakes.find((s) => s.id === String(this.watchNid));
+        const listed = this.stats?.board.find((b) => b.nid === this.watchNid);
+        target = live ?? listed ?? null;
+      }
+      if (!target) {
+        const killer = this.killerId ? world.snakes.find((s) => s.id === this.killerId) : null;
+        target = killer ?? this.corpse;
+      }
       if (target) {
         this.deathCam.x = lerp(this.deathCam.x, target.x, 1 - Math.pow(0.04, dt));
         this.deathCam.y = lerp(this.deathCam.y, target.y, 1 - Math.pow(0.04, dt));
@@ -616,6 +685,15 @@ export class CoilEngine {
       this.phase,
       this.phase === "play" ? this.pointer : null,
     );
+    if (this.stick && this.phase === "play") {
+      const rect = this.canvas.getBoundingClientRect();
+      this.renderer.drawStick(this.ctx, this.dpr, {
+        ox: this.stick.ox - rect.left,
+        oy: this.stick.oy - rect.top,
+        x: this.stick.x - rect.left,
+        y: this.stick.y - rect.top,
+      });
+    }
   }
 
   private burst(x: number, y: number, color: string, n: number, speed: number): void {

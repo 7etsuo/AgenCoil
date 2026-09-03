@@ -1,0 +1,26 @@
+# Fly.io config for the arena server. From the repo root:
+#   fly launch --no-deploy --copy-config --name agencoil-server
+#   fly secrets set GAME_SECRET=$(openssl rand -hex 32)
+#   fly deploy
+# Then point the client at wss://agencoil-server.fly.dev/api/ws
+# (VITE_GAME_SERVER, or the default in src/game/net.ts).
+app = "agencoil-server"
+primary_region = "iad"
+
+[build]
+  dockerfile = "game-server/Dockerfile"
+
+[env]
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # One always-on machine keeps a single persistent world.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

@@ -26,7 +26,7 @@ export interface StatsInfo {
   count: number;
   kills: number;
   clients: number;
-  board: { nid: number; name: string; mass: number }[];
+  board: { nid: number; name: string; mass: number; x: number; y: number }[];
   daily: { name: string; best: number }[];
 }
 
@@ -65,6 +65,7 @@ const INPUT_HZ = 20;
 const OFFLINE_AFTER_MS = 6000;
 const SNAP_CORRECT_DIST = 140;
 const TOKEN_KEY = "agencoil-resume";
+const FREEZE_MAX_MS = 450;
 
 export function defaultServerUrl(): string {
   const env = (import.meta.env.VITE_GAME_SERVER as string | undefined)?.trim();
@@ -98,6 +99,8 @@ export class NetSession {
   } | null = null;
   private lastInput = 0;
   private pingSent = 0;
+  /** When the predicted head first touched a body; the server has the verdict. */
+  private frozenSince = 0;
 
   constructor(
     private readonly url: string,
@@ -258,6 +261,7 @@ export class NetSession {
         const angle = r.angle();
         const mass = r.f32();
         this.selfNid = nid;
+        this.frozenSince = 0;
         const id = String(nid);
         this.world.snakes = this.world.snakes.filter((s) => s.id !== id);
         const s = this.world.makeSnake(id, this.look?.name ?? "anon", this.look?.skin ?? 0, false);
@@ -302,7 +306,8 @@ export class NetSession {
           daily: [],
         };
         const nb = r.u8();
-        for (let i = 0; i < nb; i++) s.board.push({ nid: r.u16(), name: r.str(), mass: r.u32() });
+        for (let i = 0; i < nb; i++)
+          s.board.push({ nid: r.u16(), name: r.str(), mass: r.u32(), x: r.f32(), y: r.f32() });
         const nd = r.u8();
         for (let i = 0; i < nd; i++) s.daily.push({ name: r.str(), best: r.u32() });
         this.hooks.onStats(s);
@@ -469,7 +474,20 @@ export class NetSession {
     if (me) {
       this.world.steerToward(me, aim.x, aim.y, dt);
       me.boosting = wantBoost && me.mass > MIN_MASS + 0.4;
+      // Predict the move, but hold at the first touch of another body so the
+      // head does not visibly sink in while the server's verdict is in flight.
+      const px = me.x;
+      const py = me.y;
       this.world.moveHead(me, dt);
+      if (this.world.wouldCollide(me)) {
+        if (!this.frozenSince) this.frozenSince = now;
+        if (now - this.frozenSince < FREEZE_MAX_MS) {
+          me.x = px;
+          me.y = py;
+        }
+      } else {
+        this.frozenSince = 0;
+      }
       const srv = this.serverSelf;
       if (srv) {
         // Where the server thinks we are by now, then ease toward it.
@@ -484,6 +502,8 @@ export class NetSession {
           me.x = sx;
           me.y = sy;
           me.angle = srv.angle;
+        } else if (this.frozenSince) {
+          // hold still; the server will either kill us or move us on
         } else {
           const k = 1 - Math.pow(0.02, dt);
           me.x += ex * k;

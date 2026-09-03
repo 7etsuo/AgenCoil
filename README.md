@@ -27,7 +27,27 @@ npm run dev            # ws://localhost:8090/api/ws
 
 Point the client at it with `VITE_GAME_SERVER=ws://localhost:8090/api/ws npm run dev`. Without that variable the client uses the production server.
 
-The production server is a Vercel project (`agencoil-server`, root directory `game-server`) served from `/api/ws`. `vercel deploy --prod` from the repo root ships it. `GAME_SECRET` signs resume tokens so a reconnect keeps your snake and length even when it lands on a different instance. `DATABASE_URL` is optional and persists the daily leaderboard.
+The production server is a Vercel project (`agencoil-server`, root directory `game-server`) served from `/api/ws`. Both it and the frontend project (`agencoil`) are connected to this GitHub repo, so a push to `main` deploys them. `GAME_SECRET` signs resume tokens so a reconnect keeps your snake and length even when it lands on a different instance. `DATABASE_URL` (a Neon database from the Vercel Marketplace) persists the daily leaderboard.
+
+The server also runs anywhere Node runs. `game-server/Dockerfile` and `fly.toml` are ready for Fly.io, which gives one always-on world with no connection cap:
+
+```bash
+fly launch --no-deploy --copy-config --name agencoil-server
+fly secrets set GAME_SECRET=$(openssl rand -hex 32)
+fly deploy
+```
+
+Then set `VITE_GAME_SERVER=wss://agencoil-server.fly.dev/api/ws` for the client, or change the default in `src/game/net.ts`.
+
+Abuse controls live in the server: four connections per IP, twenty connects per minute, sixty messages per second, and a name filter. The Vercel project also carries a firewall rate limit on `/api/ws`.
+
+## Tests
+
+```bash
+npm run e2e
+```
+
+Boots a private server and dev server, then drives real browsers through the trail, shared world, reload resume, server-replacement hop, offline fallback, throttled phone frame rate, and server status.
 
 ## Stack
 

@@ -473,6 +473,29 @@ export class Renderer {
       ctx.stroke();
     }
   }
+
+  /** Touch joystick indicator, in CSS pixels. */
+  drawStick(
+    ctx: CanvasRenderingContext2D,
+    dpr: number,
+    st: { ox: number; oy: number; x: number; y: number },
+  ): void {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const R = 46;
+    const dx = st.x - st.ox;
+    const dy = st.y - st.oy;
+    const d = Math.hypot(dx, dy) || 1;
+    const k = Math.min(1, d / R);
+    ctx.beginPath();
+    ctx.arc(st.ox, st.oy, R, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(232,234,238,0.25)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(st.ox + (dx / d) * R * k, st.oy + (dy / d) * R * k, 18, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(232,234,238,0.45)";
+    ctx.fill();
+  }
 }
 
 export function desiredZoom(mass: number, phase: Phase): number {

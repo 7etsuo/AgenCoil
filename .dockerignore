@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+.git
+.output
+.vercel
+.nitro
+.tanstack
+dist
+game-server/dist
+game-server/api
+public
+scripts
+screenshots

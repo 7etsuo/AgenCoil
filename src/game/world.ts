@@ -58,6 +58,12 @@ export interface PlayerInput {
   boost: boolean;
 }
 
+/** 400-unit cells used for the death heat map. */
+export const HOT_CELL = 400;
+export function hotKey(x: number, y: number): number {
+  return (Math.floor(x / HOT_CELL) + 64) * 128 + (Math.floor(y / HOT_CELL) + 64);
+}
+
 export function cellKey(x: number, y: number): number {
   const gx = Math.floor(x / CELL) + GRID_OFF;
   const gy = Math.floor(y / CELL) + GRID_OFF;
@@ -83,6 +89,8 @@ export class World {
   eats: EatEvent[] = [];
   deaths: DeathEvent[] = [];
   foodById = new Map<number, Food>();
+  /** Coarse cells (see `hotKey`) to avoid when spawning: recent death sites. */
+  hot = new Set<number>();
   private grid = new Map<number, Food[]>();
   private foodIndex = new Map<Food, number>();
   private chasers: Food[] = [];
@@ -362,6 +370,7 @@ export class World {
           ? { x: near.x + randRange(-300, 300), y: near.y + randRange(-300, 300) }
           : randomInDisk(ARENA_RADIUS * 0.8);
       if (p.x * p.x + p.y * p.y > (ARENA_RADIUS * 0.85) ** 2) continue;
+      if (n < 16 && this.hot.has(hotKey(p.x, p.y))) continue;
       let ok = true;
       for (const s of this.snakes) {
         if (!s.alive) continue;
@@ -765,6 +774,29 @@ export class World {
         this.removeFood(f);
       }
     }
+  }
+
+  /** Would this head, where it is now, be touching any other snake? */
+  wouldCollide(s: Snake): boolean {
+    const hr = radiusOf(s.mass) * 0.8;
+    for (const o of this.snakes) {
+      if (o.id === s.id || !o.alive) continue;
+      const orad = radiusOf(o.mass);
+      const hitR = hr + orad * 0.88;
+      const hitR2 = hitR * hitR;
+      const reach = lengthOf(o.mass) + hitR + 24;
+      if (dist2(s.x, s.y, o.x, o.y) > reach * reach) continue;
+      if (dist2(s.x, s.y, o.x, o.y) <= hitR2) return true;
+      const pts = o.points;
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1]!;
+        const b = pts[i]!;
+        if (Math.abs(a.x - s.x) > hitR && Math.abs(b.x - s.x) > hitR) continue;
+        if (Math.abs(a.y - s.y) > hitR && Math.abs(b.y - s.y) > hitR) continue;
+        if (pointSegDist2(s.x, s.y, a.x, a.y, b.x, b.y) <= hitR2) return true;
+      }
+    }
+    return false;
   }
 
   private resolveKills(): void {

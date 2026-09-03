@@ -23,7 +23,8 @@ import {
   radiusOf,
   type Snake,
 } from "../../src/game/model";
-import { CELL, World } from "../../src/game/world";
+import { CELL, HOT_CELL, World, hotKey } from "../../src/game/world";
+import { cleanName } from "./names";
 import {
   C2S,
   Reader,
@@ -45,6 +46,9 @@ interface View {
 
 interface Client {
   ws: WebSocket;
+  ip: string;
+  msgWindow: number;
+  msgCount: number;
   sid: string | null;
   name: string;
   skin: number;
@@ -73,12 +77,24 @@ const MAX_NAME = 16;
 const TOKEN_TTL_MS = 60_000;
 const IDLE_STOP_MS = 30_000;
 
+const MAX_CONNS_PER_IP = 4;
+const CONNECTS_PER_MINUTE = 20;
+const MAX_MSGS_PER_SECOND = 60;
+const HEAT_DECAY_MS = 10 * 60_000;
+const HOT_THRESHOLD = 3;
+
 function sanitizeName(raw: string): string {
   const s = raw
     .replace(/[^\p{L}\p{N} _.\-']/gu, "")
     .trim()
     .slice(0, MAX_NAME);
-  return s || "anon";
+  return cleanName(s) || "anon";
+}
+
+function clientIp(req: IncomingMessage): string {
+  const fwd = req.headers["x-forwarded-for"];
+  const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(",")[0]?.trim();
+  return first || req.socket.remoteAddress || "unknown";
 }
 
 function sanitizeBands(bands: string[] | undefined): string[] | undefined {
@@ -95,6 +111,10 @@ export class GameServer {
   private readonly nids = new Map<string, number>();
   private readonly grace = new Map<string, NodeJS.Timeout>();
   private readonly daily = new DailyBoard();
+  private readonly connsByIp = new Map<string, number>();
+  private readonly connectLog = new Map<string, number[]>();
+  /** Death sites by coarse cell with timestamps, for spawn placement. */
+  private readonly heat = new Map<number, number[]>();
   private nextNid = 1;
   private nextPlayer = 1;
   private tick = 0;
@@ -133,7 +153,42 @@ export class GameServer {
       uptimeSec: Math.round((Date.now() - this.startedAt) / 1000),
       tick: this.tick,
       stepMs: Math.round(this.stepMs * 100) / 100,
+      hot: this.hotSpots(12),
+      daily: this.daily.top(3),
     };
+  }
+
+  /** The busiest death cells, as cell centres. */
+  private hotSpots(n: number): { x: number; y: number; deaths: number }[] {
+    const now = Date.now();
+    const out: { x: number; y: number; deaths: number }[] = [];
+    for (const [key, times] of this.heat) {
+      const recent = times.filter((t) => now - t < HEAT_DECAY_MS);
+      if (!recent.length) continue;
+      const gx = Math.floor(key / 128) - 64;
+      const gy = (key % 128) - 64;
+      out.push({ x: (gx + 0.5) * HOT_CELL, y: (gy + 0.5) * HOT_CELL, deaths: recent.length });
+    }
+    return out.sort((a, b) => b.deaths - a.deaths).slice(0, n);
+  }
+
+  private recordDeath(x: number, y: number): void {
+    const key = hotKey(x, y);
+    const now = Date.now();
+    const times = (this.heat.get(key) ?? []).filter((t) => now - t < HEAT_DECAY_MS);
+    times.push(now);
+    this.heat.set(key, times);
+    if (times.length >= HOT_THRESHOLD) this.world.hot.add(key);
+  }
+
+  private decayHeat(): void {
+    const now = Date.now();
+    for (const [key, times] of this.heat) {
+      const recent = times.filter((t) => now - t < HEAT_DECAY_MS);
+      if (recent.length) this.heat.set(key, recent);
+      else this.heat.delete(key);
+      if (recent.length < HOT_THRESHOLD) this.world.hot.delete(key);
+    }
   }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
@@ -176,9 +231,22 @@ export class GameServer {
 
   // ── connections ────────────────────────────────────────────────────────────
 
-  private onConnection(ws: WebSocket, _req: IncomingMessage): void {
+  private onConnection(ws: WebSocket, req: IncomingMessage): void {
+    const ip = clientIp(req);
+    const now = Date.now();
+    const recent = (this.connectLog.get(ip) ?? []).filter((t) => now - t < 60_000);
+    recent.push(now);
+    this.connectLog.set(ip, recent);
+    if (recent.length > CONNECTS_PER_MINUTE || (this.connsByIp.get(ip) ?? 0) >= MAX_CONNS_PER_IP) {
+      ws.close(1008, "too many connections");
+      return;
+    }
+    this.connsByIp.set(ip, (this.connsByIp.get(ip) ?? 0) + 1);
     const client: Client = {
       ws,
+      ip,
+      msgWindow: now,
+      msgCount: 0,
       sid: null,
       name: "anon",
       skin: 0,
@@ -204,6 +272,9 @@ export class GameServer {
     if (!client.alive) return;
     client.alive = false;
     this.clients.delete(client);
+    const n = (this.connsByIp.get(client.ip) ?? 1) - 1;
+    if (n <= 0) this.connsByIp.delete(client.ip);
+    else this.connsByIp.set(client.ip, n);
     this.lastActivity = Date.now();
     const sid = client.sid;
     client.sid = null;
@@ -223,6 +294,15 @@ export class GameServer {
 
   private onMessage(client: Client, data: RawData): void {
     if (!client.alive) return;
+    const now = Date.now();
+    if (now - client.msgWindow > 1000) {
+      client.msgWindow = now;
+      client.msgCount = 0;
+    }
+    if (++client.msgCount > MAX_MSGS_PER_SECOND) {
+      client.ws.close(1008, "too fast");
+      return;
+    }
     let buf: Uint8Array;
     if (data instanceof ArrayBuffer) buf = new Uint8Array(data);
     else if (Array.isArray(data)) buf = new Uint8Array(Buffer.concat(data));
@@ -382,7 +462,8 @@ export class GameServer {
     if (this.tick % foodEvery === 0) for (const c of this.clients) this.sendFood(c);
     if (this.tick % Math.round(SERVER_TICK_HZ / 2) === 0)
       for (const c of this.clients) this.sendStats(c);
-    if (this.tick % (SERVER_TICK_HZ * 5) === 0) for (const c of this.clients) this.sendToken(c);
+    if (this.tick % SERVER_TICK_HZ === 0) for (const c of this.clients) this.sendToken(c);
+    if (this.tick % (SERVER_TICK_HZ * 30) === 0) this.decayHeat();
   }
 
   private onDeaths(): void {
@@ -410,6 +491,7 @@ export class GameServer {
         }
       }
       if (!s.isBot) this.daily.record(s.name, Math.floor(s.mass));
+      if (d.reason === "snake") this.recordDeath(s.x, s.y);
       this.world.inputs.delete(s.id);
       const g = this.grace.get(s.id);
       if (g) {
@@ -551,7 +633,8 @@ export class GameServer {
       .u16(this.clients.size);
     const board = alive.slice(0, 10);
     w.u8(board.length);
-    for (const s of board) w.u16(this.nidOf(s.id)).str(s.name).u32(Math.floor(s.mass));
+    for (const s of board)
+      w.u16(this.nidOf(s.id)).str(s.name).u32(Math.floor(s.mass)).f32(s.x).f32(s.y);
     const daily = this.daily.top(10);
     w.u8(daily.length);
     for (const e of daily) w.str(e.name).u32(e.best);
