@@ -7,7 +7,6 @@ import {
   Share2,
   Trophy,
   Users,
-  Video,
   Volume2,
   VolumeX,
   Zap,
@@ -29,7 +28,6 @@ import {
   titleOf,
   weeklySkinFor,
 } from "@/game/challenges";
-import { ClipRecorder } from "@/game/engine";
 import { Link } from "@tanstack/react-router";
 import { Turnstile } from "@/components/turnstile";
 
@@ -156,7 +154,6 @@ export function CoilApp() {
   const [custom, setCustom] = useState<string[]>(["#3ee0c4", "#f0c14a", "#e45fa0"]);
   const [muted, setMuted] = useState(false);
   const [touch, setTouch] = useState(false);
-  const [clipsAvail, setClipsAvail] = useState(false);
   const [boardTab, setBoardTab] = useState<"arena" | "today">("arena");
   const [shared, setShared] = useState(false);
   const [best, setBest] = useState(0);
@@ -171,8 +168,6 @@ export function CoilApp() {
   const [deathFx, setDeathFx] = useState(0);
   const [party, setParty] = useState("");
   const [invited, setInvited] = useState(false);
-  const [clipsOn, setClipsOn] = useState(false);
-  const [clipSaved, setClipSaved] = useState(false);
   const [turnstileToken, setTurnstileToken] = useState("");
   const [turnstileReset, setTurnstileReset] = useState(0);
   const [verificationState, setVerificationState] = useState<
@@ -187,7 +182,6 @@ export function CoilApp() {
     setCustom(readCustom());
     setMuted(readMuted());
     setTouch(window.matchMedia("(pointer: coarse)").matches);
-    setClipsAvail(ClipRecorder.supported());
     setBest(readBest());
     setControls(readControls());
     setTrail(readInt(TRAIL_KEY, TRAILS.length - 1));
@@ -260,12 +254,6 @@ export function CoilApp() {
     // has not re-rendered yet when this runs.
     engine.audio.muted = readMuted();
     engine.setControls(readControls());
-    // Rolling clips: on by default where recording is cheap (desktop).
-    const wantClips = !window.matchMedia("(pointer: coarse)").matches && ClipRecorder.supported();
-    if (wantClips) {
-      engine.enableClips(true);
-      setClipsOn(true);
-    }
     engine.start();
     const unsub = engine.subscribe(setHud);
     return () => {
@@ -363,39 +351,6 @@ export function CoilApp() {
       localStorage.setItem(CONTROLS_KEY, mode);
     } catch {
       /* ignore */
-    }
-  };
-
-  const toggleClips = () => {
-    const engine = engineRef.current;
-    if (!engine) return;
-    const next = !clipsOn;
-    engine.enableClips(next);
-    setClipsOn(next);
-  };
-
-  const saveClip = async () => {
-    const clip = engineRef.current?.clips?.clip;
-    if (!clip) return;
-    const file = new File([clip], `agencoil-${Date.now()}.webm`, {
-      type: clip.type || "video/webm",
-    });
-    try {
-      if (navigator.canShare?.({ files: [file] })) {
-        await navigator.share({ files: [file], title: "AgenCoil clip" });
-      } else {
-        const url = URL.createObjectURL(clip);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = file.name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 10_000);
-      }
-      setClipSaved(true);
-    } catch {
-      /* dismissed */
     }
   };
 
@@ -993,15 +948,6 @@ export function CoilApp() {
                   : ""}
               </p>
             )}
-            {hud.clipReady && (
-              <button
-                type="button"
-                onClick={() => void saveClip()}
-                className="mt-3 h-9 w-full rounded-lg border border-line text-xs text-muted hover:text-fg"
-              >
-                {clipSaved ? "clip saved" : "save the last seconds as a clip"}
-              </button>
-            )}
             <div className="mt-5 grid grid-cols-3 gap-2 text-center tabular-nums">
               <div className="rounded-lg border border-line bg-elevated/70 px-2 py-2">
                 <div className="text-xs text-muted">length</div>
@@ -1090,17 +1036,6 @@ export function CoilApp() {
         >
           {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
         </button>
-        {!touch && clipsAvail && (
-          <button
-            type="button"
-            onClick={toggleClips}
-            aria-label={clipsOn ? "Stop recording clips" : "Record clips"}
-            title={clipsOn ? "recording rolling clips" : "record clips"}
-            className={`flex h-11 w-11 items-center justify-center rounded-full border border-line bg-bg/70 ${clipsOn ? "text-[#ff6b8a]" : "text-fg"}`}
-          >
-            <Video size={18} />
-          </button>
-        )}
         {touch && canFullscreen && (
           <button
             type="button"
