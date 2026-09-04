@@ -130,8 +130,6 @@ export interface Look {
   identity?: { origin: string; ticket: string };
 }
 
-const ZOOM_MIN = 0.55;
-const ZOOM_MAX = 1.7;
 /** How far ahead of the head the aim point sits, in world units. */
 const AIM_REACH = 240;
 /** A cursor this close (CSS px) to the drawn wisp is "straight on", not a turn. */
@@ -192,7 +190,6 @@ export class CoilEngine {
   private frames = 0;
   private fpsT = 0;
   private fps = 0;
-  private zoomMul = 1;
   private stats: StatsInfo | null = null;
   controls: Controls = "point";
   private stick: Stick | null = null;
@@ -421,7 +418,6 @@ export class CoilEngine {
     window.removeEventListener("pointerdown", this.onPointerDown);
     window.removeEventListener("pointerup", this.onPointerUp);
     window.removeEventListener("pointercancel", this.onPointerUp);
-    window.removeEventListener("wheel", this.onWheel);
     document.removeEventListener("visibilitychange", this.onVisibility);
   }
 
@@ -694,7 +690,6 @@ export class CoilEngine {
     window.addEventListener("pointerdown", this.onPointerDown);
     window.addEventListener("pointerup", this.onPointerUp);
     window.addEventListener("pointercancel", this.onPointerUp);
-    window.addEventListener("wheel", this.onWheel, { passive: true });
     document.addEventListener("visibilitychange", this.onVisibility);
   }
 
@@ -798,10 +793,6 @@ export class CoilEngine {
     if (e.pointerId === this.steerId) this.steerId = null;
     this.pointerDown = false;
     this.syncBoost();
-  };
-  private onWheel = (e: WheelEvent): void => {
-    const k = Math.exp(-e.deltaY * 0.0012);
-    this.zoomMul = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, this.zoomMul * k));
   };
 
   private syncBoost(): void {
@@ -1509,7 +1500,6 @@ export class CoilEngine {
     let z = this.phase === "wisp" ? desiredZoom(40, "play") * 1.05 : desiredZoom(mass, this.phase);
     if (this.phase === "dead" && performance.now() < this.deathBeatUntil) z *= 1.25;
     if (this.phase === "play") {
-      z *= this.zoomMul;
       if (world.player?.boosting) z *= 0.965;
       if (performance.now() < this.hitStopUntil) z *= 1.05;
     }

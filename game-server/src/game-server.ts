@@ -196,9 +196,14 @@ const HOT_THRESHOLD = 3;
 /** How long a redeemed identity ticket is trusted without asking the site again. */
 const IDENTITY_TTL_MS = 10 * 60_000;
 const IDENTITY_CACHE_MAX = 5000;
-/** The view rectangle a client may ask for, in world units from its centre. */
-const VIEW_MAX_HW = 4000;
-const VIEW_MAX_HH = 3000;
+/**
+ * The view rectangle a client may ask for, in world units from its centre.
+ * There is no player zoom; the camera follows snake size down to a scale of
+ * 0.48, so an honest client on the widest common screens (3440 by 1440, or
+ * 4K at device pixel ratio 1) asks for at most about 3600 by 2300.
+ */
+const VIEW_MAX_HW = 3800;
+const VIEW_MAX_HH = 2400;
 
 /** A finite number from the wire, or the fallback for NaN and infinities. */
 function finite(v: number, fallback: number): number {

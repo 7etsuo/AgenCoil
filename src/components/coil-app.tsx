@@ -1301,12 +1301,12 @@ export function CoilApp() {
                 <p className="mt-4 text-xs leading-relaxed text-muted">
                   {touch
                     ? "Drag to steer. Hold the lightning button, or a second finger anywhere, to boost. Boosting sheds length behind you."
-                    : "Mouse or WASD to steer. Hold click, space or shift to boost. Scroll to zoom."}{" "}
+                    : "Mouse or WASD to steer. Hold click, space or shift to boost."}{" "}
                   Your head touching any other body pops you. Coil around smaller snakes and eat
                   what they leave behind.
                 </p>
                 <p className="mt-2 text-xs text-muted">
-                  Keys 1 to 4 send an emote. Scroll to zoom.
+                  Keys 1 to 4 send an emote. The view zooms out on its own as you grow.
                 </p>
               </>
             )}
