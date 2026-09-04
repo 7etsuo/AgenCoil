@@ -90,6 +90,12 @@ export interface ProfileInfo {
   linked: boolean;
   /** Achievement ids earned so far. */
   achv: string[];
+  /** League stakes: banked tier this week, lives, runs per tier, best banked this season, history. */
+  bankedTier: number;
+  weekLives: number;
+  weekRuns: number[];
+  seasonTier: number;
+  seasons: [number, number][];
 }
 
 export interface ChallengeInfo {
@@ -157,10 +163,10 @@ interface Look {
 /**
  * Wire protocol this client speaks, announced on the socket URL. 2 added a
  * level byte to full snake entries; 3 adds league and might bytes there and
- * a league byte per leaderboard row. The server answers with what it
- * honours in WELCOME.
+ * a league byte per leaderboard row; 4 adds last week's banked tier (the
+ * aura). The server answers with what it honours in WELCOME.
  */
-const PROTO = 3;
+const PROTO = 4;
 const INPUT_HZ = 30;
 /** A predicted eat the server has not confirmed by then is put back. */
 const EAT_CONFIRM_MS = 700;
@@ -789,6 +795,11 @@ export class NetSession {
           handle: "",
           linked: false,
           achv: [],
+          bankedTier: 0,
+          weekLives: 0,
+          weekRuns: [0, 0, 0, 0, 0],
+          seasonTier: 0,
+          seasons: [],
         };
         if (r.remaining >= 14) {
           p.bestX = r.f32();
@@ -818,6 +829,19 @@ export class NetSession {
           p.linked = r.u8() === 1;
           const ids = r.str();
           p.achv = ids ? ids.split(",") : [];
+        }
+        if (r.remaining >= 9) {
+          p.bankedTier = r.u8();
+          p.weekLives = r.u8();
+          p.weekRuns = [r.u8(), r.u8(), r.u8(), r.u8(), r.u8()];
+          p.seasonTier = r.u8();
+          const seasons = r.str();
+          p.seasons = seasons
+            ? seasons.split(",").map((x) => {
+                const [season, tier] = x.split(":");
+                return [Number(season) || 0, Number(tier) || 0] as [number, number];
+              })
+            : [];
         }
         this.hooks.onProfile(p);
         break;
@@ -907,6 +931,7 @@ export class NetSession {
       const level = e.full && this.serverVersion >= 2 ? r.u8() : 0;
       const league = e.full && this.serverVersion >= 3 ? r.u8() : 0;
       const might = e.full && this.serverVersion >= 3 ? r.u8() : 0;
+      const finish = e.full && this.serverVersion >= 4 ? r.u8() : 0;
       const id = String(e.nid);
       if (e.nid === this.selfNid) {
         this.serverSelf = {
@@ -924,6 +949,7 @@ export class NetSession {
           // Our own standing, as the server dressed the snake at spawn.
           me.league = league;
           me.might = might;
+          me.finish = finish;
         }
         if (me && e.full && e.points && e.points.length > 1 && this.awaitingBody) {
           // A reattached snake gets its real body back instead of the
@@ -946,6 +972,7 @@ export class NetSession {
           level,
           league,
           might,
+          finish,
           bands: e.bands,
           x: e.x,
           y: e.y,
@@ -978,6 +1005,7 @@ export class NetSession {
       if (e.full) {
         s.league = league;
         s.might = might;
+        s.finish = finish;
       }
       const buf = this.buffers.get(id) ?? [];
       buf.push({

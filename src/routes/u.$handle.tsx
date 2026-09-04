@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { ArrowLeft, Share2 } from "lucide-react";
 import { SKINS } from "@/game/model";
-import { LEAGUES, leagueOf, levelOf, titleOf } from "@/game/challenges";
+import { LEAGUES, LEAGUE_COLORS, leagueOf, levelOf, titleOf } from "@/game/challenges";
 import { ACHIEVEMENTS } from "@/game/achievements";
 import { serverHttpUrl } from "@/game/net";
 
@@ -24,6 +24,11 @@ interface PublicProfile {
   weekBest: number;
   seasonBest: number;
   prevTier: number;
+  bankedTier: number;
+  weekRuns: number[];
+  weekLives: number;
+  seasonTier: number;
+  seasons: [number, number][];
   rank: number;
   skin: number;
   bands: string[];
@@ -179,6 +184,43 @@ function ProfilePage() {
                 {" · "}
                 {p.bountyTotal} bounties · {p.nearTotal} near misses · {p.chests} chests
               </p>
+              <p className="mt-1 text-xs text-muted">
+                this week:{" "}
+                {p.bankedTier > 0 ? (
+                  <span style={{ color: LEAGUE_COLORS[p.bankedTier - 1] }}>
+                    {LEAGUES[p.bankedTier - 1]?.name} banked
+                  </span>
+                ) : (
+                  "nothing banked yet"
+                )}
+                {" · "}
+                {p.weekLives} {p.weekLives === 1 ? "life" : "lives"}
+                {p.seasonTier > 0 && (
+                  <>
+                    {" · "}season best banked{" "}
+                    <span style={{ color: LEAGUE_COLORS[p.seasonTier - 1] }}>
+                      {LEAGUES[p.seasonTier - 1]?.name}
+                    </span>
+                  </>
+                )}
+              </p>
+              {p.seasons.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {p.seasons.map(([season, tier]) => (
+                    <span
+                      key={season}
+                      className="rounded-md border px-2 py-0.5 text-[11px]"
+                      style={{
+                        color: LEAGUE_COLORS[tier - 1],
+                        borderColor: `${LEAGUE_COLORS[tier - 1]}80`,
+                      }}
+                      title={`finished season ${season} in ${LEAGUES[tier - 1]?.name}`}
+                    >
+                      S{season} {LEAGUES[tier - 1]?.name}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="mt-6 flex items-baseline justify-between">

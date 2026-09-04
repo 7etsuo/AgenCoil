@@ -149,6 +149,8 @@ export interface Snake {
   league?: number;
   /** Might: achievements unlocked, drawn as pips over the name. */
   might?: number;
+  /** Last week's banked tier (1 to 5, 0 none): Gold and up wear an aura this week. */
+  finish?: number;
   /** Server side: last tick each attacker landed a boss hit. */
   bossHitAt?: Map<string, number>;
   /** Server side, refreshed every step: derived geometry and a box around the body. */

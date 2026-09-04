@@ -16,7 +16,9 @@ import { MAX_CUSTOM_BANDS, SKINS } from "@/game/model";
 import {
   DEATH_FX,
   LEAGUES,
+  LEAGUE_BANK_RUNS,
   LEAGUE_COLORS,
+  rewardText,
   MODES,
   STREAK_MILESTONES,
   TRAILS,
@@ -832,7 +834,30 @@ export function CoilApp() {
                 <Chip tone={hud.profile.streak > 0 ? "fire" : undefined}>
                   🔥 {hud.profile.streak > 0 ? `${hud.profile.streak}d` : "start a streak"}
                 </Chip>
-                <Chip tone="violet">{LEAGUES[leagueOf(hud.profile.weekBest)]!.name}</Chip>
+                <Chip color={LEAGUE_COLORS[leagueOf(hud.profile.weekBest)]}>
+                  {LEAGUES[leagueOf(hud.profile.weekBest)]!.name}
+                  {hud.profile.bankedTier > 0
+                    ? ` · banked ${LEAGUES[hud.profile.bankedTier - 1]?.name}`
+                    : " · nothing banked"}
+                </Chip>
+                {hud.profile.prevTier > 0 && (
+                  <Chip color={LEAGUE_COLORS[hud.profile.prevTier - 1]}>
+                    last week {LEAGUES[hud.profile.prevTier - 1]?.name}
+                  </Chip>
+                )}
+                {hud.profile.seasons.length > 0 &&
+                  (() => {
+                    const best = [...hud.profile.seasons].sort((a, b) => b[1] - a[1])[0]!;
+                    return (
+                      <Chip color={LEAGUE_COLORS[best[1] - 1]}>
+                        S{best[0]} {LEAGUES[best[1] - 1]?.name}
+                      </Chip>
+                    );
+                  })()}
+                <Chip>
+                  Season {hud.season} ·{" "}
+                  {Math.max(1, Math.ceil((hud.seasonEnds - Date.now()) / 86_400_000))}d left
+                </Chip>
                 {hud.profile.crew && <Chip>[{hud.profile.crew}]</Chip>}
                 {!hud.profile.linked && !signedIn && <Chip>guest</Chip>}
                 <Chip tone={hud.profile.achv.length > 0 ? "gold" : undefined}>
@@ -1238,6 +1263,30 @@ export function CoilApp() {
                     {Math.ceil(hud.arenaMode.secsLeft / 60)} min left
                   </p>
                 )}
+                {hud?.profile && (
+                  <div className="mt-4 rounded-lg border border-line bg-bg/40 px-3 py-2 text-xs">
+                    <div className="text-fg">
+                      League stakes · {LEAGUE_BANK_RUNS} lives at a tier&apos;s length bank it for
+                      the week
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-subtle">
+                      {LEAGUES.map((l, i) => (
+                        <span key={l.name}>
+                          <span style={{ color: LEAGUE_COLORS[i] }}>{l.name}</span>{" "}
+                          {i > 0 ? `${l.min}+` : "any"} · {hud.profile!.weekRuns[i] ?? 0}/
+                          {LEAGUE_BANK_RUNS}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="mt-1 text-subtle">
+                      Pays on the roll:{" "}
+                      {LEAGUES.slice(1)
+                        .map((l, i) => `${l.name} ${rewardText(i + 2)}`)
+                        .join("; ")}
+                      . The best banked tier of the season stays on your profile as a title.
+                    </div>
+                  </div>
+                )}
                 {hud?.challenges && hud.challenges.length > 0 && (
                   <div className="mt-4">
                     <div className="text-xs text-muted">
@@ -1370,6 +1419,20 @@ export function CoilApp() {
                 your wisp banked +{hud.banked} starting length for this life
               </p>
             )}
+            {hud.profile &&
+              (() => {
+                const tier = leagueOf(hud.score);
+                if (tier <= 0) return null;
+                const runs = hud.profile.weekRuns[tier] ?? 0;
+                const name = LEAGUES[tier]!.name;
+                return (
+                  <p className="mt-1 text-xs" style={{ color: LEAGUE_COLORS[tier] }}>
+                    {runs >= LEAGUE_BANK_RUNS
+                      ? `${name} is banked for the week`
+                      : `a ${name} run · ${runs}/${LEAGUE_BANK_RUNS} to bank it`}
+                  </p>
+                );
+              })()}
             {hud.replay && hud.replay.length > 1 && (
               <div className="mt-4 overflow-hidden rounded-lg border border-line">
                 <ReplayView frames={hud.replay} at={hud.deathAt} />
@@ -1616,9 +1679,12 @@ async function renderShareCard(hud: HudState, nick: string, bands: string[]): Pr
 function Chip({
   children,
   tone,
+  color,
 }: {
   children: React.ReactNode;
   tone?: "gold" | "fire" | "violet";
+  /** An explicit colour (a league's), which wins over the tone. */
+  color?: string;
 }) {
   const cls =
     tone === "gold"
@@ -1628,7 +1694,14 @@ function Chip({
         : tone === "violet"
           ? "border-[#9b8cff]/50 text-[#c9bfff]"
           : "border-line text-muted";
-  return <span className={`rounded-full border px-2 py-0.5 leading-tight ${cls}`}>{children}</span>;
+  return (
+    <span
+      className={`rounded-full border px-2 py-0.5 leading-tight ${color ? "" : cls}`}
+      style={color ? { color, borderColor: `${color}80` } : undefined}
+    >
+      {children}
+    </span>
+  );
 }
 
 /** The snek mark: a coiled S in the chosen skin's first two colours. */

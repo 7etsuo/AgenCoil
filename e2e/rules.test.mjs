@@ -309,3 +309,25 @@ test("static arenas are placed on, never rolled or forgotten, and absorb a stale
     globalThis.fetch = realFetch;
   }
 });
+
+test("league stakes: three runs bank a tier, and each tier's payout is fixed", () => {
+  assert.equal(rules.bankedTierOf([0, 0, 0, 0, 0]), 0);
+  assert.equal(rules.bankedTierOf([3, 2, 0, 0, 0]), 1, "Bronze after three lives of any length");
+  assert.equal(rules.bankedTierOf([5, 3, 3, 1, 0]), 3, "Gold with three Gold-length lives");
+  assert.equal(rules.bankedTierOf([3, 3, 3, 3, 3]), 5);
+  assert.equal(rules.LEAGUE_BANK_RUNS, 3);
+  assert.equal(rules.LEAGUE_REWARDS.length, rules.LEAGUES.length);
+  assert.equal(rules.rewardText(1), "nothing", "Bronze pays nothing");
+  assert.match(rules.rewardText(3), /chest/);
+  assert.match(rules.rewardText(3), /gold aura/);
+  assert.match(rules.rewardText(5), /2 chests/);
+  assert.equal(
+    rules.titleOf({ kills: 0, survive: 0, nearTotal: 0, bountyTotal: 0, seasons: [[2, 4]] }),
+    "Platinum S2",
+  );
+  assert.equal(
+    rules.titleOf({ kills: 0, survive: 0, nearTotal: 0, bountyTotal: 0, seasons: [[2, 3]] }),
+    "",
+    "Gold and below do not title",
+  );
+});

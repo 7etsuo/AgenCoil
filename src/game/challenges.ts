@@ -46,6 +46,42 @@ export const LEAGUES = [
 /** One colour per league, in LEAGUES order: the ring around a head and the chip in a tag. */
 export const LEAGUE_COLORS = ["#cd7f32", "#c0c8d4", "#f0c14a", "#9fe3e0", "#7fd4ff"] as const;
 
+/** Lives finishing at or above a tier's length needed in one week to bank that tier. */
+export const LEAGUE_BANK_RUNS = 3;
+
+/**
+ * What a banked weekly finish pays when the week rolls, by tier index
+ * (Bronze first). Everything paid is permanent; the aura is drawn around the
+ * head for the following week.
+ */
+export const LEAGUE_REWARDS: readonly { shards: number; chests: number; aura: boolean }[] = [
+  { shards: 0, chests: 0, aura: false },
+  { shards: 1, chests: 0, aura: false },
+  { shards: 0, chests: 1, aura: true },
+  { shards: 1, chests: 1, aura: true },
+  { shards: 0, chests: 2, aura: true },
+];
+
+/** The highest tier (1 Bronze to 5 Diamond, 0 none) with enough runs this week. */
+export function bankedTierOf(weekRuns: readonly number[]): number {
+  let tier = 0;
+  for (let i = 0; i < LEAGUES.length; i++) {
+    if ((weekRuns[i] ?? 0) >= LEAGUE_BANK_RUNS) tier = i + 1;
+  }
+  return tier;
+}
+
+/** A plain description of a tier's weekly payout, for the goals tab and notices. */
+export function rewardText(tier: number): string {
+  const r = LEAGUE_REWARDS[tier - 1];
+  if (!r) return "nothing";
+  const parts: string[] = [];
+  if (r.chests) parts.push(r.chests === 1 ? "a chest" : `${r.chests} chests`);
+  if (r.shards) parts.push(r.shards === 1 ? "a shard" : `${r.shards} shards`);
+  if (r.aura) parts.push(`the ${LEAGUES[tier - 1]!.name.toLowerCase()} aura next week`);
+  return parts.length ? parts.join(", ") : "nothing";
+}
+
 export function leagueOf(weekBest: number): number {
   let tier = 0;
   LEAGUES.forEach((l, i) => {
@@ -65,7 +101,12 @@ export function titleOf(p: {
   survive: number;
   nearTotal: number;
   bountyTotal: number;
+  /** Season finishes as [season, tier]; a Platinum or Diamond season names you first. */
+  seasons?: readonly (readonly [number, number])[];
 }): string {
+  let best: readonly [number, number] | null = null;
+  for (const s of p.seasons ?? []) if (s[1] >= 4 && (!best || s[1] > best[1])) best = s;
+  if (best) return `${LEAGUES[best[1] - 1]!.name} S${best[0]}`;
   if (p.bountyTotal >= 3) return "Bounty Hunter";
   if (p.nearTotal >= 200) return "Untouchable";
   if (p.kills >= 50) return "Hunter";

@@ -23,7 +23,7 @@ import { moveWisp, slideAlongRim, steerWisp } from "./wisp";
 import { Renderer, desiredZoom } from "./render";
 import { GameAudio } from "./audio";
 import { ACHIEVEMENT_BY_ID } from "./achievements";
-import { leagueOf } from "./challenges";
+import { LEAGUES, LEAGUE_BANK_RUNS, leagueOf, seasonEndsAt, seasonOf } from "./challenges";
 import {
   NetSession,
   defaultServerUrl,
@@ -51,6 +51,15 @@ export interface HudState {
   /** Your weekly league (1 Bronze to 5 Diamond, 0 unknown) and might (achievements unlocked). */
   league: number;
   might: number;
+  /** League stakes: last week's finish, this week's banked tier and runs, the season's best and end. */
+  finish: number;
+  bankedTier: number;
+  weekRuns: number[];
+  weekLives: number;
+  seasonTier: number;
+  seasons: [number, number][];
+  season: number;
+  seasonEnds: number;
   daily: { name: string; best: number }[];
   profile: ProfileInfo | null;
   challenges: ChallengeInfo[];
@@ -513,6 +522,7 @@ export class CoilEngine {
     // The standing the server last told us about, so the tag looks the same offline.
     s.league = this.profile ? leagueOf(this.profile.weekBest) + 1 : 0;
     s.might = this.profile?.achv.length ?? 0;
+    s.finish = this.profile?.prevTier ?? 0;
     this.phase = "play";
     this.spawnedAt = performance.now();
     this.snapCamTo(s);
@@ -638,6 +648,14 @@ export class CoilEngine {
       hint: this.hint(),
       league: this.profile ? leagueOf(this.profile.weekBest) + 1 : 0,
       might: this.profile?.achv.length ?? 0,
+      finish: this.profile?.prevTier ?? 0,
+      bankedTier: this.profile?.bankedTier ?? 0,
+      weekRuns: this.profile?.weekRuns ?? [0, 0, 0, 0, 0],
+      weekLives: this.profile?.weekLives ?? 0,
+      seasonTier: this.profile?.seasonTier ?? 0,
+      seasons: this.profile?.seasons ?? [],
+      season: seasonOf(),
+      seasonEnds: seasonEndsAt(),
       firstLife: this.isFirstLife(),
       party: this.stats?.party ?? [],
       arenaMode: this.stats?.mode ?? { id: 0, secsLeft: 0, secsToNext: 0 },
@@ -948,6 +966,23 @@ export class CoilEngine {
         text: `beat ${this.beat.by} · ${score}/${this.beat.target}`,
         frac: score / this.beat.target,
       });
+    // League stakes: the next tier by length, and the runs still needed to bank the one reached.
+    if (this.profile) {
+      const weekBest = Math.max(this.profile.weekBest, score);
+      const next = LEAGUES.find((l) => l.min > weekBest);
+      if (next)
+        cands.push({
+          text: `${next.name} at ${next.min} · ${next.min - weekBest} to go`,
+          frac: weekBest / next.min,
+        });
+      const reached = leagueOf(this.profile.weekBest);
+      const runs = this.profile.weekRuns[reached] ?? 0;
+      if (reached > 0 && reached + 1 > this.profile.bankedTier && runs < LEAGUE_BANK_RUNS)
+        cands.push({
+          text: `bank ${LEAGUES[reached]!.name} · ${runs}/${LEAGUE_BANK_RUNS} runs`,
+          frac: runs / LEAGUE_BANK_RUNS,
+        });
+    }
     if (!cands.length) return null;
     return cands.sort((a, b) => b.frac - a.frac)[0]!;
   }

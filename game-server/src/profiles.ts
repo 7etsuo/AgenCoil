@@ -11,18 +11,25 @@ import {
   COSMETIC_ORDER,
   cosmeticName,
   FREEZE_EVERY_GAMES,
+  LEAGUES,
+  LEAGUE_REWARDS,
   STREAK_MILESTONES,
   WEEKLY_GOAL,
+  bankedTierOf,
   dailyChallenges,
   isoWeek,
-  leagueOf,
   lifeValue,
   seasonOf,
   todayUtc,
   type Challenge,
   type LifeStats,
 } from "../../src/game/challenges";
-import { totalsUnlocked, type Totals } from "../../src/game/achievements";
+import {
+  LEAGUE_FEATS,
+  seasonFeats,
+  totalsUnlocked,
+  type Totals,
+} from "../../src/game/achievements";
 import type { Identity } from "./identity";
 
 export interface Profile {
@@ -74,6 +81,20 @@ export interface Profile {
   avatar: string;
   /** Achievement id to the unix second it was earned. */
   achv: Record<string, number>;
+  /**
+   * League stakes. `weekRuns[i]` counts this week's lives finishing at or
+   * above tier i's length; `bankedTier` is the highest with enough of them;
+   * `seasonTier` the best banked this season; `seasons` the finished
+   * seasons as [season, tier]; `pending` reward notices not yet shown.
+   */
+  weekRuns: number[];
+  weekLives: number;
+  bankedTier: number;
+  seasonTier: number;
+  seasons: [number, number][];
+  pending: string[];
+  /** Achievements awarded by a roll, to toast on the next connection (not persisted). */
+  pendingAchv: string[];
 }
 
 /** What the public profile page shows. */
@@ -93,12 +114,38 @@ export interface PublicProfile {
   weekBest: number;
   seasonBest: number;
   prevTier: number;
+  bankedTier: number;
+  weekRuns: number[];
+  weekLives: number;
+  seasonTier: number;
+  seasons: [number, number][];
   rank: number;
   skin: number;
   bands: string[];
   crew: string;
   crowned: boolean;
   achv: Record<string, number>;
+}
+
+function parseRuns(v: unknown): number[] {
+  const list = Array.isArray(v) ? v : [];
+  return [0, 1, 2, 3, 4].map((i) => Math.max(0, Math.floor(Number(list[i]) || 0)));
+}
+
+function parseSeasons(v: unknown): [number, number][] {
+  if (!Array.isArray(v)) return [];
+  const out: [number, number][] = [];
+  for (const e of v) {
+    if (!Array.isArray(e) || e.length < 2) continue;
+    const season = Number(e[0]);
+    const tier = Number(e[1]);
+    if (season > 0 && tier >= 1 && tier <= LEAGUES.length) out.push([season, tier]);
+  }
+  return out;
+}
+
+function parseStrings(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, 20) : [];
 }
 
 function parseAchv(v: unknown): Record<string, number> {
@@ -201,7 +248,13 @@ export class ProfileStore {
              ADD COLUMN IF NOT EXISTS sub TEXT NOT NULL DEFAULT '',
              ADD COLUMN IF NOT EXISTS handle TEXT NOT NULL DEFAULT '',
              ADD COLUMN IF NOT EXISTS avatar TEXT NOT NULL DEFAULT '',
-             ADD COLUMN IF NOT EXISTS achv JSONB NOT NULL DEFAULT '{}'`,
+             ADD COLUMN IF NOT EXISTS achv JSONB NOT NULL DEFAULT '{}',
+             ADD COLUMN IF NOT EXISTS week_runs JSONB NOT NULL DEFAULT '[]',
+             ADD COLUMN IF NOT EXISTS week_lives INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS banked_tier INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS season_tier INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS seasons JSONB NOT NULL DEFAULT '[]',
+             ADD COLUMN IF NOT EXISTS pending JSONB NOT NULL DEFAULT '[]'`,
         );
         await this.pool!.query(
           `CREATE INDEX IF NOT EXISTS agencoil_profiles_handle ON agencoil_profiles (handle) WHERE handle <> ''`,
@@ -277,6 +330,13 @@ export class ProfileStore {
       handle: "",
       avatar: "",
       achv: {},
+      weekRuns: [0, 0, 0, 0, 0],
+      weekLives: 0,
+      bankedTier: 0,
+      seasonTier: 0,
+      seasons: [],
+      pending: [],
+      pendingAchv: [],
     };
   }
 
@@ -340,11 +400,18 @@ export class ProfileStore {
             handle: string;
             avatar: string;
             achv: unknown;
+            week_runs: unknown;
+            week_lives: number;
+            banked_tier: number;
+            season_tier: number;
+            seasons: unknown;
+            pending: unknown;
           }>(
             `SELECT name, best, kills, games, survive, unlocks, day, progress, skin, bands, best_x, best_y,
                   week, week_best, week_done, earned, flagged, streak, streak_last, freezes, eaten,
                   near_total, bounty_total, prev_tier, season, season_best, shards, chests, crew,
-                  crown_until, sub, handle, avatar, achv
+                  crown_until, sub, handle, avatar, achv, week_runs, week_lives, banked_tier,
+                  season_tier, seasons, pending
            FROM agencoil_profiles WHERE key = $1`,
             [key],
           ),
@@ -393,6 +460,13 @@ export class ProfileStore {
             handle: r.handle || "",
             avatar: r.avatar || "",
             achv: parseAchv(r.achv),
+            weekRuns: parseRuns(r.week_runs),
+            weekLives: Number(r.week_lives) || 0,
+            bankedTier: Number(r.banked_tier) || 0,
+            seasonTier: Number(r.season_tier) || 0,
+            seasons: parseSeasons(r.seasons),
+            pending: parseStrings(r.pending),
+            pendingAchv: [],
           };
         }
       } catch (err) {
@@ -409,17 +483,45 @@ export class ProfileStore {
     const today = todayUtc();
     const week = isoWeek();
     if (p.week !== week) {
-      // Remember the league finished last week before the weekly reset.
-      p.prevTier = p.weekBest > 0 ? leagueOf(p.weekBest) + 1 : 0;
+      // The week ends: what was banked is the finish, and it pays now. One
+      // lucky run banks nothing; three lives at a tier's length do.
+      const finish = p.bankedTier;
+      p.prevTier = finish;
+      if (finish > 0) {
+        const name = LEAGUES[finish - 1]!.name;
+        const reward = LEAGUE_REWARDS[finish - 1]!;
+        const got: string[] = [];
+        for (let i = 0; i < reward.chests; i++) got.push(this.openChest(p));
+        if (reward.shards) got.push(this.addShards(p, reward.shards));
+        if (reward.aura) got.push(`the ${name.toLowerCase()} aura around your head this week`);
+        p.pending.push(`last week you banked ${name}: ${got.join("; ")}`);
+      } else if (p.weekLives > 0) {
+        p.pending.push(
+          "last week banked no tier: three lives at a tier's length bank it for rewards",
+        );
+      }
+      p.seasonTier = Math.max(p.seasonTier, finish);
       p.week = week;
       p.weekBest = 0;
       p.weekDone = 0;
+      p.weekRuns = [0, 0, 0, 0, 0];
+      p.weekLives = 0;
+      p.bankedTier = 0;
       this.markDirty(p.key);
     }
     const season = seasonOf();
     if (p.season !== season) {
+      // The season ends: the best banked tier goes on the profile for good.
+      if (p.seasonTier > 0) {
+        p.seasons.push([p.season, p.seasonTier]);
+        if (p.seasons.length > 50) p.seasons.splice(0, p.seasons.length - 50);
+        const name = LEAGUES[p.seasonTier - 1]!.name;
+        p.pending.push(`season ${p.season} finished in ${name}: it stays on your profile`);
+        for (const id of seasonFeats(p.seasonTier)) if (this.award(p, id)) p.pendingAchv.push(id);
+      }
       p.season = season;
       p.seasonBest = 0;
+      p.seasonTier = 0;
       this.markDirty(p.key);
     }
     if (p.day === today) return;
@@ -489,7 +591,14 @@ export class ProfileStore {
     p: Profile,
     life: LifeStats,
     at?: { x: number; y: number },
-  ): { completed: Challenge[]; milestones: string[]; freezeEarned: boolean; chest: boolean } {
+  ): {
+    completed: Challenge[];
+    milestones: string[];
+    freezeEarned: boolean;
+    chest: boolean;
+    /** A tier newly banked by this life (1 Bronze to 5 Diamond), else 0. */
+    banked: number;
+  } {
     this.rollDay(p);
     const milestones = this.touchStreak(p);
     p.games++;
@@ -512,6 +621,15 @@ export class ProfileStore {
     }
     if (life.length > p.weekBest) p.weekBest = life.length;
     if (life.survive > p.survive) p.survive = Math.floor(life.survive);
+    // League stakes: this life counts for every tier its length reaches.
+    p.weekLives++;
+    for (let i = 0; i < LEAGUES.length; i++) {
+      if (life.length >= LEAGUES[i]!.min) p.weekRuns[i] = (p.weekRuns[i] ?? 0) + 1;
+    }
+    const bankedBefore = p.bankedTier;
+    p.bankedTier = Math.max(p.bankedTier, bankedTierOf(p.weekRuns));
+    const banked = p.bankedTier > bankedBefore ? p.bankedTier : 0;
+    if (banked) p.seasonTier = Math.max(p.seasonTier, banked);
     const completed: Challenge[] = [];
     // Quests are a chain: only the first unfinished step takes this life's
     // numbers, so each step is a goal you play toward on purpose.
@@ -532,7 +650,40 @@ export class ProfileStore {
     }
     if (p.weekDone >= WEEKLY_GOAL && !p.earned.includes(p.week)) p.earned.push(p.week);
     this.markDirty(p.key);
-    return { completed, milestones, freezeEarned, chest };
+    return { completed, milestones, freezeEarned, chest, banked };
+  }
+
+  /** The feat a newly banked tier earns, if it is new to this profile. */
+  bankFeat(p: Profile, tier: number): string | null {
+    const id = LEAGUE_FEATS[tier - 1];
+    return id && this.award(p, id) ? id : null;
+  }
+
+  /** Reward notices and toasts queued by a week or season roll; cleared once taken. */
+  drainPending(p: Profile): { lines: string[]; achv: string[] } {
+    const lines = p.pending;
+    const achv = p.pendingAchv;
+    if (!lines.length && !achv.length) return { lines: [], achv: [] };
+    p.pending = [];
+    p.pendingAchv = [];
+    if (lines.length) this.markDirty(p.key);
+    return { lines, achv };
+  }
+
+  /** Add shards, unlocking a cosmetic for every full set. Returns what to tell the player. */
+  private addShards(p: Profile, n: number): string {
+    p.shards += n;
+    const unlocked: string[] = [];
+    while (p.shards >= CHEST_SHARDS) {
+      p.shards -= CHEST_SHARDS;
+      const next = COSMETIC_ORDER.find((bit) => !(p.unlocks & bit));
+      if (next === undefined) break;
+      p.unlocks |= next;
+      unlocked.push(cosmeticName(next));
+    }
+    this.markDirty(p.key);
+    const shards = `${n} shard${n === 1 ? "" : "s"} (${p.shards}/${CHEST_SHARDS})`;
+    return unlocked.length ? `${shards}, ${unlocked.join(" and ")} unlocked` : shards;
   }
 
   /**
@@ -833,6 +984,11 @@ export class ProfileStore {
       weekBest: p.week === isoWeek() ? p.weekBest : 0,
       seasonBest: p.season === seasonOf() ? p.seasonBest : 0,
       prevTier: p.prevTier,
+      bankedTier: p.bankedTier,
+      weekRuns: p.weekRuns,
+      weekLives: p.weekLives,
+      seasonTier: p.seasonTier,
+      seasons: p.seasons,
       rank,
       skin: p.skin,
       bands: p.bands,
@@ -924,9 +1080,11 @@ export class ProfileStore {
             `INSERT INTO agencoil_profiles (key, name, best, kills, games, survive, unlocks, day, progress,
              skin, bands, best_x, best_y, week, week_best, week_done, earned, flagged,
              streak, streak_last, freezes, eaten, near_total, bounty_total, prev_tier, season, season_best,
-             shards, chests, crew, crown_until, sub, handle, avatar, achv, updated)
+             shards, chests, crew, crown_until, sub, handle, avatar, achv,
+             week_runs, week_lives, banked_tier, season_tier, seasons, pending, updated)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-             $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, now())
+             $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35,
+             $36, $37, $38, $39, $40, $41, now())
            ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, best = GREATEST(agencoil_profiles.best, EXCLUDED.best),
              kills = GREATEST(agencoil_profiles.kills, EXCLUDED.kills),
              games = GREATEST(agencoil_profiles.games, EXCLUDED.games),
@@ -940,7 +1098,10 @@ export class ProfileStore {
              prev_tier = EXCLUDED.prev_tier, season = EXCLUDED.season, season_best = EXCLUDED.season_best,
              shards = EXCLUDED.shards, chests = EXCLUDED.chests, crew = EXCLUDED.crew,
              crown_until = EXCLUDED.crown_until, sub = EXCLUDED.sub, handle = EXCLUDED.handle,
-             avatar = EXCLUDED.avatar, achv = agencoil_profiles.achv || EXCLUDED.achv, updated = now()`,
+             avatar = EXCLUDED.avatar, achv = agencoil_profiles.achv || EXCLUDED.achv,
+             week_runs = EXCLUDED.week_runs, week_lives = EXCLUDED.week_lives,
+             banked_tier = EXCLUDED.banked_tier, season_tier = EXCLUDED.season_tier,
+             seasons = EXCLUDED.seasons, pending = EXCLUDED.pending, updated = now()`,
             [
               p.key,
               p.name,
@@ -977,6 +1138,12 @@ export class ProfileStore {
               p.handle,
               p.avatar,
               JSON.stringify(p.achv),
+              JSON.stringify(p.weekRuns),
+              p.weekLives,
+              p.bankedTier,
+              p.seasonTier,
+              JSON.stringify(p.seasons),
+              JSON.stringify(p.pending),
             ],
           ),
         );

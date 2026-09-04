@@ -391,14 +391,21 @@ function parseSnap(r: InstanceType<typeof Reader>, proto: number) {
   r.u32();
   r.u32();
   const n = r.u16();
-  const entries: { nid: number; full: boolean; level: number; league: number; might: number }[] =
-    [];
+  const entries: {
+    nid: number;
+    full: boolean;
+    level: number;
+    league: number;
+    might: number;
+    finish: number;
+  }[] = [];
   for (let i = 0; i < n; i++) {
     const e = protocol.readSnakeEntry(r);
     const level = e.full && proto >= 2 ? r.u8() : 0;
     const league = e.full && proto >= 3 ? r.u8() : 0;
     const might = e.full && proto >= 3 ? r.u8() : 0;
-    entries.push({ nid: e.nid, full: e.full, level, league, might });
+    const finish = e.full && proto >= 4 ? r.u8() : 0;
+    entries.push({ nid: e.nid, full: e.full, level, league, might, finish });
   }
   const gone = r.u16();
   for (let i = 0; i < gone; i++) r.u16();
@@ -412,10 +419,49 @@ function parseSnap(r: InstanceType<typeof Reader>, proto: number) {
   return entries;
 }
 
-test("protocol 3 full entries carry league and might; protocol 2 keeps its layout", async () => {
+/** Parse a PROFILE message the way the client does; leaves nothing over on a matching layout. */
+function parseProfile(r: InstanceType<typeof Reader>) {
+  const out: Record<string, unknown> = {};
+  out.best = r.u32();
+  r.u32();
+  r.u32();
+  r.u32();
+  r.u32();
+  r.u32();
+  r.u8();
+  r.f32();
+  r.f32();
+  r.u8();
+  r.u8();
+  out.weekBest = r.u32();
+  r.u16();
+  r.u8();
+  out.prevTier = r.u8();
+  r.u32();
+  r.u32();
+  r.u16();
+  r.u32();
+  r.u16();
+  r.u8();
+  r.str();
+  r.u16();
+  r.u16();
+  r.str();
+  r.u8();
+  r.str();
+  out.bankedTier = r.u8();
+  out.weekLives = r.u8();
+  out.weekRuns = [r.u8(), r.u8(), r.u8(), r.u8(), r.u8()];
+  out.seasonTier = r.u8();
+  out.seasons = r.str();
+  assert.equal(r.remaining, 0, "profile fully consumed");
+  return out;
+}
+
+test("protocol 4 full entries carry league, might and finish; older protocols keep their layouts", async () => {
   const arena = await startArena();
   try {
-    for (const proto of [2, 3]) {
+    for (const proto of [2, 3, 4]) {
       const url = arena.url.replace(/v=2$/, `v=${proto}`);
       const p = new Player(url);
       await p.open();
@@ -427,9 +473,10 @@ test("protocol 3 full entries carry league and might; protocol 2 keeps its layou
       const entries = parseSnap(await p.next(S2C.SNAP), proto);
       const me = entries.find((e) => e.nid === nid);
       assert.ok(me && me.full, "the first snapshot carries our own full entry");
-      if (proto === 3) {
+      if (proto >= 3) {
         assert.equal(me.league, 1, "a fresh profile is Bronze");
         assert.equal(me.might, 0, "and has unlocked nothing yet");
+        assert.equal(me.finish, 0, "and no finish from last week");
         const bot = entries.find((e) => e.nid !== nid && e.full);
         if (bot) assert.equal(bot.league, 0, "bots have no league");
       }
@@ -467,8 +514,63 @@ test("protocol 3 full entries carry league and might; protocol 2 keeps its layou
       stats.f32();
       stats.f32();
       assert.equal(stats.remaining, 0, `protocol ${proto}: stats fully consumed`);
+      const profile = parseProfile(await p.next(S2C.PROFILE));
+      assert.equal(profile.bankedTier, 0);
+      assert.deepEqual(profile.weekRuns, [0, 0, 0, 0, 0]);
       await p.close();
     }
+  } finally {
+    await arena.stop();
+  }
+});
+
+test("crossing a league length mid-life is announced and changes the ring for everyone", async () => {
+  const arena = await startArena();
+  try {
+    const url4 = arena.url.replace(/v=2$/, "v=4");
+    const watcher = await joinArena(url4, "dev-watch", "watcher");
+    const p = await joinArena(url4, "dev-climb", "climber");
+    const me = arena.game.world.snakes.find((s) => s.name === "climber");
+    assert.ok(me);
+    // Point the watcher's view at the climber so it holds the climber's entry.
+    watcher.send(
+      new Writer()
+        .u8(C2S.INPUT)
+        .u16(1)
+        .angle(0)
+        .u8(0)
+        .f32(me.x)
+        .f32(me.y)
+        .f32(900)
+        .f32(600)
+        .u8(0)
+        .finish(),
+    );
+    await sleep(300);
+    me.mass = 350;
+    const notice = await (async () => {
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline) {
+        const r = await p.next(S2C.NOTICE, 1500);
+        r.u8();
+        const text = r.str();
+        if (/reached Silver/.test(text)) return text;
+      }
+      throw new Error("no promotion notice");
+    })();
+    assert.match(notice, /1\/3 to bank Silver/);
+    assert.equal(me.league, 2, "the snake's league byte rose");
+    // The watcher gets a fresh full entry for the climber with the new league.
+    const deadline = Date.now() + 3000;
+    let seen = false;
+    while (!seen && Date.now() < deadline) {
+      const entries = parseSnap(await watcher.next(S2C.SNAP, 1500), 4);
+      const e = entries.find((x) => x.full && x.league === 2);
+      if (e) seen = true;
+    }
+    assert.ok(seen, "a full entry with league 2 reached the other client");
+    await p.close();
+    await watcher.close();
   } finally {
     await arena.stop();
   }

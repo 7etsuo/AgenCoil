@@ -103,7 +103,30 @@ export const ACHIEVEMENTS: readonly Achievement[] = [
   feat("comeback", "Comeback Kid", "take the comeback respawn", "💪"),
   feat("boss_slayer", "Boss Slayer", "land the final cut on the boss", "👑"),
   feat("linked", "Signed In", "link your X account", "✕"),
+  feat("league_silver", "Silver Week", "bank a Silver finish in one week", "🥈"),
+  feat("league_gold", "Gold Week", "bank a Gold finish in one week", "🥇"),
+  feat("league_platinum", "Platinum Week", "bank a Platinum finish in one week", "💠"),
+  feat("league_diamond", "Diamond Week", "bank a Diamond finish in one week", "💎"),
+  feat("season_gold", "Season Gold", "finish a season in Gold or better", "🏅"),
+  feat("season_diamond", "Season Diamond", "finish a season in Diamond", "👑"),
 ];
+
+/** The feat for banking a weekly tier, by tier (1 Bronze to 5 Diamond); Bronze has none. */
+export const LEAGUE_FEATS: readonly string[] = [
+  "",
+  "league_silver",
+  "league_gold",
+  "league_platinum",
+  "league_diamond",
+];
+
+/** Feats for a season finish at or above a tier. */
+export function seasonFeats(tier: number): string[] {
+  const out: string[] = [];
+  if (tier >= 3) out.push("season_gold");
+  if (tier >= 5) out.push("season_diamond");
+  return out;
+}
 
 export const ACHIEVEMENT_BY_ID: ReadonlyMap<string, Achievement> = new Map(
   ACHIEVEMENTS.map((a) => [a.id, a]),

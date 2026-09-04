@@ -315,6 +315,30 @@ export class Renderer {
     ctx.stroke();
   }
 
+  /**
+   * Last week's banked finish, Gold and up: a wide soft aura outside the
+   * league ring, so this week's standing sits inside last week's reward.
+   */
+  private drawFinishAura(ctx: CanvasRenderingContext2D, s: Snake, r: number): void {
+    const color = LEAGUE_COLORS[(s.finish ?? 3) - 1] ?? LEAGUE_COLORS[2];
+    // Two passes: a wide soft wash and a thinner bright band, so it reads at
+    // a fresh snake's size as well as a giant's.
+    ctx.globalCompositeOperation = "lighter";
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.18 + Math.sin(this.time * 1.6) * 0.05;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, r * 1.9, 0, Math.PI * 2);
+    ctx.lineWidth = Math.max(6, r * 0.9);
+    ctx.stroke();
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, r * 1.75, 0, Math.PI * 2);
+    ctx.lineWidth = Math.max(1.5, r * 0.12);
+    ctx.stroke();
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
+  }
+
   /** A gold crown floating above a crowned head. */
   private drawCrown(ctx: CanvasRenderingContext2D, s: Snake, r: number): void {
     const cx = s.x;
@@ -708,6 +732,7 @@ export class Renderer {
         ctx.drawImage(sprites[0]!.canvas, s.x - hs / 2, s.y - hs / 2, hs, hs);
       }
       if ((s.level ?? 0) >= 20) this.drawShimmer(ctx, s, r);
+      if ((s.finish ?? 0) >= 3) this.drawFinishAura(ctx, s, r);
       if (s.league) this.drawLeagueRing(ctx, s, r);
       if (s.crown) this.drawCrown(ctx, s, r);
       if (s.boss) this.drawBossMarks(ctx, s, r);

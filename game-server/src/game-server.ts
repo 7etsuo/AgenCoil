@@ -63,9 +63,12 @@ import {
   MODE_TINY,
   UNLOCK_DEATH,
   UNLOCK_TRAIL,
+  LEAGUES,
+  LEAGUE_BANK_RUNS,
   isoWeek,
   leagueOf,
   levelOf,
+  rewardText,
   modeNow,
   seasonOf,
   type LifeStats,
@@ -157,6 +160,8 @@ interface Life {
   boosted: boolean;
   noboostLength: number;
   bounty: number;
+  /** League tier index the snake has reached this life (from the week best at spawn). */
+  tier: number;
 }
 
 interface Token {
@@ -607,7 +612,7 @@ export class GameServer {
     // Wire protocol the client speaks: 2 adds a level byte to full entries,
     // 3 adds league and might bytes and a league byte per board row.
     const asked = Number(new URL(req.url ?? "/", "http://x").searchParams.get("v"));
-    const proto = asked >= 3 ? 3 : asked === 2 ? 2 : 1;
+    const proto = Number.isFinite(asked) ? Math.max(1, Math.min(4, Math.floor(asked))) : 1;
     const now = Date.now();
     const recent = (this.connectLog.get(ip) ?? []).filter((t) => now - t < 60_000);
     recent.push(now);
@@ -987,6 +992,7 @@ export class GameServer {
     snake.level = client.profile ? levelOf(client.profile.eaten) : 0;
     snake.league = client.profile ? leagueOf(client.profile.weekBest) + 1 : 0;
     snake.might = client.profile ? Object.keys(client.profile.achv).length : 0;
+    snake.finish = client.profile?.prevTier ?? 0;
     client.sid = snake.id;
     client.known.clear();
     client.life = {
@@ -996,6 +1002,7 @@ export class GameServer {
       boosted: false,
       noboostLength: snake.mass,
       bounty: 0,
+      tier: leagueOf(client.profile?.weekBest ?? 0),
     };
     client.combo = { n: 0, last: 0 };
     client.bountied = false;
@@ -1188,6 +1195,15 @@ export class GameServer {
         .str(p.handle)
         .u8(p.sub ? 1 : 0)
         .str(Object.keys(p.achv).join(","))
+        .u8(p.bankedTier)
+        .u8(Math.min(255, p.weekLives))
+        .u8(Math.min(255, p.weekRuns[0] ?? 0))
+        .u8(Math.min(255, p.weekRuns[1] ?? 0))
+        .u8(Math.min(255, p.weekRuns[2] ?? 0))
+        .u8(Math.min(255, p.weekRuns[3] ?? 0))
+        .u8(Math.min(255, p.weekRuns[4] ?? 0))
+        .u8(p.seasonTier)
+        .str(p.seasons.map(([season, tier]) => `${season}:${tier}`).join(","))
         .finish(),
     );
     const list = this.profiles.challenges(p);
@@ -1199,6 +1215,13 @@ export class GameServer {
         .u32(c.progress)
         .u8(c.done ? 1 : 0);
     client.ws.send(w.finish());
+    // Rewards a week or season roll queued are told now, while the player is looking.
+    const pending = this.profiles.drainPending(p);
+    for (const line of pending.lines) {
+      this.notice(client, 2, line);
+      this.events.log("reward", { key: client.key, s: line.slice(0, 80) });
+    }
+    for (const id of pending.achv) this.achieve(client, id);
   }
 
   private sendWisp(c: Client, secsLeft: number): void {
@@ -1532,6 +1555,7 @@ export class GameServer {
       const players = this.clients.size;
       this.world.desiredBots = Math.max(SERVER_BOTS_MIN, SERVER_BOTS - Math.floor(players * 0.6));
       this.retireSurplusBot();
+      this.checkPromotions();
       const mode = modeNow().id;
       this.world.remainsMult = mode === MODE_DOUBLE_REMAINS ? 2 : 1;
       this.world.hunger = mode === MODE_HUNGER ? HUNGER_RATE : 0;
@@ -1563,6 +1587,32 @@ export class GameServer {
       if (s.mass >= HELPER_BOT_MASS && (!victim || s.mass < victim.mass)) victim = s;
     }
     if (bots > this.world.desiredBots && victim) this.world.killSnake(victim.id);
+  }
+
+  /**
+   * A live snake crossing a league length is told so at once, and its ring
+   * changes for everyone: every client forgets the snake so the next
+   * snapshot resends its full entry with the new league byte.
+   */
+  private checkPromotions(): void {
+    for (const c of this.clients) {
+      if (!c.sid || !c.life) continue;
+      const s = this.world.snakes.find((x) => x.id === c.sid);
+      if (!s || !s.alive) continue;
+      const tier = leagueOf(s.mass);
+      if (tier <= c.life.tier) continue;
+      c.life.tier = tier;
+      s.league = tier + 1;
+      for (const o of this.clients) o.known.delete(s.id);
+      const name = LEAGUES[tier]!.name;
+      const runs = Math.min(LEAGUE_BANK_RUNS, (c.profile?.weekRuns[tier] ?? 0) + 1);
+      this.notice(
+        c,
+        2,
+        `reached ${name} · finish this life to count it (${runs}/${LEAGUE_BANK_RUNS} to bank ${name})`,
+      );
+      this.events.log("promoted", { key: c.key, s: name, n: Math.floor(s.mass) });
+    }
   }
 
   private trackLives(): void {
@@ -1738,11 +1788,18 @@ export class GameServer {
       noboostLength: Math.floor(life.noboostLength),
       bounty: life.bounty,
     };
-    const { completed, milestones, freezeEarned, chest } = this.profiles.recordLife(
+    const { completed, milestones, freezeEarned, chest, banked } = this.profiles.recordLife(
       c.profile,
       stats,
       { x: s.x, y: s.y },
     );
+    if (banked) {
+      const name = LEAGUES[banked - 1]!.name;
+      this.notice(c, 2, `${name} banked for the week: ${rewardText(banked)} when it rolls`);
+      const feat = this.profiles.bankFeat(c.profile, banked);
+      if (feat) this.achieve(c, feat);
+      this.events.log("banked", { key: c.key, s: name, n: stats.length });
+    }
     for (const ch of completed) this.notice(c, 2, `quest step done: ${ch.text}`);
     if (chest) {
       this.notice(c, 2, this.profiles.openChest(c.profile));
@@ -1848,6 +1905,7 @@ export class GameServer {
       writeSnakeEntry(w, this.nidOf(s.id), s, full, MAX_NET_POINTS, packSkin(s.skin, s.trail ?? 0));
       if (full && c.proto >= 2) w.u8(Math.min(255, s.level ?? 0));
       if (full && c.proto >= 3) w.u8(s.league ?? 0).u8(Math.min(255, s.might ?? 0));
+      if (full && c.proto >= 4) w.u8(s.finish ?? 0);
       c.known.add(s.id);
     }
     const gone: number[] = [];
