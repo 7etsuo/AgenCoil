@@ -841,7 +841,7 @@ export class Renderer {
       const r = radiusOf(s.mass) * z;
       const label = s.boss
         ? `BOSS · ${s.name}`
-        : `${s.crown ? "👑 " : ""}${s.level ? `Lv${s.level} ` : ""}${s.name} · ${Math.floor(s.mass)}`;
+        : `${s.crown ? "👑 " : ""}${s.linked ? "✓ " : ""}${s.level ? `Lv${s.level} ` : ""}${s.name} · ${Math.floor(s.mass)}`;
       const tw = ctx.measureText(label).width;
       const pad = 6;
       const y = sy - r - 10;

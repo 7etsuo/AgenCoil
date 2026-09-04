@@ -144,6 +144,8 @@ export interface Snake {
   hpMax?: number;
   /** Wears the crown from the last boss kill. */
   crown?: boolean;
+  /** Signed in with an account: drawn with a badge. */
+  linked?: boolean;
   /** Server side: last tick each attacker landed a boss hit. */
   bossHitAt?: Map<string, number>;
 }

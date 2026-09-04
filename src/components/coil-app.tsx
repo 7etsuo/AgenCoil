@@ -33,6 +33,31 @@ import { Turnstile } from "@/components/turnstile";
 import { SkinPreview } from "@/components/skin-preview";
 import { ReplayView } from "@/components/replay-view";
 import { replayToGif } from "@/lib/replay";
+import { useCurrentUserState } from "@/lib/auth/use-current-user";
+import { authEnabled, signIn, signOut } from "@/lib/auth/client";
+import { authStatus, mintIdentity } from "@/lib/identity";
+import {
+  ACHIEVEMENTS,
+  ACHIEVEMENT_BY_ID,
+  groupSummary,
+  nextSteps,
+  type Totals,
+} from "@/game/achievements";
+
+/** Lifetime totals from the profile the server streams, for achievement progress. */
+function totalsOf(p: NonNullable<HudState["profile"]>): Totals {
+  return {
+    best: p.best,
+    kills: p.kills,
+    games: p.games,
+    survive: p.survive,
+    eaten: p.eaten,
+    nearTotal: p.nearTotal,
+    bountyTotal: p.bountyTotal,
+    streak: p.streak,
+    chests: p.chests,
+  };
+}
 
 const NICK_KEY = "agencoil-nick";
 const SKIN_KEY = "agencoil-skin";
@@ -182,6 +207,15 @@ export function CoilApp() {
     "loading" | "ready" | "verifying" | "error"
   >(TURNSTILE_SITE_KEY ? "loading" : "ready");
   const [verificationError, setVerificationError] = useState<string | null>(null);
+  const { user: authUser } = useCurrentUserState();
+  const signedIn = Boolean(authUser && !authUser.isDevFallback);
+  const [signInReady, setSignInReady] = useState(false);
+  const [identity, setIdentity] = useState<{
+    ticket: string;
+    handle: string;
+    name: string;
+    avatar: string;
+  } | null>(null);
 
   useEffect(() => {
     const n = readNick() || `coil${(Math.random() * 90 + 10) | 0}`;
@@ -201,6 +235,35 @@ export function CoilApp() {
   useEffect(() => {
     engineRef.current?.setParty(party);
   }, [party, engineReady]);
+
+  // Sign-in is only real where the auth broker knows this deployment.
+  useEffect(() => {
+    if (!authEnabled) return;
+    authStatus()
+      .then((s) => setSignInReady(s.configured))
+      .catch(() => setSignInReady(false));
+  }, []);
+
+  // A signed-in player gets an arena ticket; their account name becomes the
+  // default nickname unless they already picked one.
+  useEffect(() => {
+    if (!signedIn) {
+      setIdentity(null);
+      return;
+    }
+    let cancelled = false;
+    mintIdentity()
+      .then((t) => {
+        if (cancelled) return;
+        setIdentity(t);
+        const saved = readNick();
+        if (t.name && (!saved || /^coil\d\d$/.test(saved))) setNick(t.name.slice(0, 16));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [signedIn]);
 
   // The engine keeps `best` current; mirror it whenever the HUD updates so
   // unlocks show up on the next visit to the menu.
@@ -290,6 +353,7 @@ export function CoilApp() {
       bands: chosen === CUSTOM ? custom : chosen === WEEKLY ? weekly.bands : undefined,
       trail: trailOpen(trail) ? trail : 0,
       deathFx: deathOpen(deathFx) ? deathFx : 0,
+      identity: identity ? { origin: window.location.origin, ticket: identity.ticket } : undefined,
     };
   };
 
@@ -724,6 +788,9 @@ export function CoilApp() {
                 </Chip>
                 <Chip tone="violet">{LEAGUES[leagueOf(hud.profile.weekBest)]!.name}</Chip>
                 {hud.profile.crew && <Chip>[{hud.profile.crew}]</Chip>}
+                <Chip tone={hud.profile.achv.length > 0 ? "gold" : undefined}>
+                  🏆 {hud.profile.achv.length}/{ACHIEVEMENTS.length}
+                </Chip>
                 {hud.profile.crownSecs > 0 && (
                   <Chip tone="gold">👑 crown · {Math.ceil(hud.profile.crownSecs / 60)}m</Chip>
                 )}
@@ -732,6 +799,64 @@ export function CoilApp() {
                     {MODES.find((m) => m.id === hud.arenaMode.id)?.name} ·{" "}
                     {Math.ceil(hud.arenaMode.secsLeft / 60)}m
                   </Chip>
+                )}
+              </div>
+            )}
+
+            {authEnabled && (signInReady || signedIn) && (
+              <div className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-line bg-elevated/60 px-3 py-2 text-xs">
+                {signedIn ? (
+                  <>
+                    <div className="flex min-w-0 items-center gap-2">
+                      {authUser?.profileImageUrl ? (
+                        <img
+                          src={authUser.profileImageUrl}
+                          alt=""
+                          className="h-6 w-6 rounded-full object-cover"
+                        />
+                      ) : (
+                        <span className="grid h-6 w-6 place-items-center rounded-full bg-bg text-[10px]">
+                          ✓
+                        </span>
+                      )}
+                      <span className="truncate text-fg">
+                        {authUser?.displayName ?? "signed in"}
+                      </span>
+                      {(hud?.profile?.handle || identity?.handle) && (
+                        <Link
+                          to="/u/$handle"
+                          params={{ handle: hud?.profile?.handle || identity?.handle || "" }}
+                          className="shrink-0 text-muted underline-offset-2 hover:text-fg hover:underline"
+                        >
+                          profile
+                        </Link>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void signOut(window.location.pathname)}
+                      className="shrink-0 text-muted hover:text-fg"
+                    >
+                      sign out
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-muted">
+                      keep your stats, badge and achievements on every device
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void signIn("grok-x", {
+                          callbackURL: window.location.pathname + window.location.search,
+                        })
+                      }
+                      className="shrink-0 rounded-md border border-line bg-bg px-3 py-1.5 font-medium text-fg hover:border-accent"
+                    >
+                      Sign in with X
+                    </button>
+                  </>
                 )}
               </div>
             )}
@@ -987,6 +1112,49 @@ export function CoilApp() {
             {tab === "goals" && (
               <>
                 {hud?.profile && (
+                  <div className="mt-4">
+                    <div className="flex items-baseline justify-between text-xs">
+                      <span className="text-fg">achievements</span>
+                      <span className="text-subtle">
+                        {hud.profile.achv.length}/{ACHIEVEMENTS.length}
+                        {hud.profile.handle ? " · " : ""}
+                        {hud.profile.handle && (
+                          <Link
+                            to="/u/$handle"
+                            params={{ handle: hud.profile.handle }}
+                            className="hover:text-fg"
+                          >
+                            view profile
+                          </Link>
+                        )}
+                      </span>
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {groupSummary(new Set(hud.profile.achv)).map(({ a, done }) => (
+                        <span
+                          key={a.group}
+                          title={`${a.name}: ${a.desc}`}
+                          className={`rounded-md border px-1.5 py-0.5 text-[11px] ${done ? "border-[#f0c14a]/50 bg-[#f0c14a]/10 text-[#f0c14a]" : "border-line text-subtle opacity-70"}`}
+                        >
+                          {done ? a.icon : "🔒"} {a.name}
+                        </span>
+                      ))}
+                    </div>
+                    <ul className="mt-2 space-y-0.5 text-[11px] text-muted">
+                      {nextSteps(totalsOf(hud.profile), new Set(hud.profile.achv), 3).map((s) => (
+                        <li key={s.a.id} className="flex justify-between">
+                          <span>
+                            {s.a.icon} {s.a.name} · {s.a.desc}
+                          </span>
+                          <span className="tabular-nums text-subtle">
+                            {Math.min(s.have, s.a.target ?? 0)}/{s.a.target}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {hud?.profile && (
                   <p className="mt-4 text-xs text-subtle">
                     {hud.profile.streak > 0
                       ? `🔥 ${hud.profile.streak}-day streak`
@@ -1180,6 +1348,53 @@ export function CoilApp() {
                 <div className="text-xl font-semibold">{hud.best}</div>
               </div>
             </div>
+            {hud.unlocked.length > 0 && (
+              <div className="mt-3 rounded-lg border border-[#f0c14a]/50 bg-[#f0c14a]/10 px-3 py-2 text-left text-xs">
+                <div className="text-[10px] tracking-[0.2em] text-[#f0c14a] uppercase">
+                  unlocked
+                </div>
+                {hud.unlocked.map((id) => {
+                  const a = ACHIEVEMENT_BY_ID.get(id);
+                  return a ? (
+                    <div key={id} className="text-[#f0c14a]">
+                      {a.icon} {a.name} <span className="text-muted">· {a.desc}</span>
+                    </div>
+                  ) : null;
+                })}
+              </div>
+            )}
+            {hud.profile &&
+              (() => {
+                const steps = nextSteps(totalsOf(hud.profile), new Set(hud.profile.achv), 2);
+                return steps.length ? (
+                  <ul className="mt-2 space-y-0.5 text-left text-xs text-muted">
+                    {steps.map((s) => (
+                      <li key={s.a.id} className="flex justify-between">
+                        <span>
+                          {s.a.icon} {(s.a.target ?? 0) - Math.min(s.have, s.a.target ?? 0)} more to{" "}
+                          {s.a.name}
+                        </span>
+                        <span className="tabular-nums text-subtle">
+                          {Math.min(s.have, s.a.target ?? 0)}/{s.a.target}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null;
+              })()}
+            {authEnabled && signInReady && !signedIn && (
+              <button
+                type="button"
+                onClick={() =>
+                  void signIn("grok-x", {
+                    callbackURL: window.location.pathname + window.location.search,
+                  })
+                }
+                className="mt-3 h-10 w-full rounded-lg border border-line text-sm text-muted hover:text-fg"
+              >
+                Sign in with X to keep your stats
+              </button>
+            )}
             {hud.rematch && (
               <button
                 type="button"

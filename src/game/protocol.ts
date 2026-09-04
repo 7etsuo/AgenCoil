@@ -49,6 +49,8 @@ export const S2C = {
   WISP: 21,
   /** The server refused a spawn because no valid human-verification session exists. */
   GATE_REQUIRED: 18,
+  /** An achievement this client just earned: id. */
+  ACHIEVE: 22,
 } as const;
 
 const enc = new TextEncoder();
@@ -260,6 +262,8 @@ export const SNAKE_BOT = 4;
 export const SNAKE_INVULN = 8;
 export const SNAKE_CROWN = 16;
 export const SNAKE_BOSS = 32;
+/** The player behind this snake signed in with an account. */
+export const SNAKE_LINKED = 64;
 
 /** One snake entry inside a snapshot. `full` includes identity and body. */
 export function writeSnakeEntry(
@@ -276,6 +280,7 @@ export function writeSnakeEntry(
   if (s.invuln > 0) flags |= SNAKE_INVULN;
   if (s.crown) flags |= SNAKE_CROWN;
   if (s.boss) flags |= SNAKE_BOSS;
+  if (s.linked) flags |= SNAKE_LINKED;
   w.u16(nid).u8(flags).f32(s.x).f32(s.y).angle(s.angle).f32(s.mass);
   if (full) {
     w.u8(s.skin).str(s.name);
@@ -292,6 +297,7 @@ export interface SnakeEntry {
   invuln: boolean;
   crown: boolean;
   boss: boolean;
+  linked: boolean;
   x: number;
   y: number;
   angle: number;
@@ -313,6 +319,7 @@ export function readSnakeEntry(r: Reader): SnakeEntry {
     invuln: (flags & SNAKE_INVULN) !== 0,
     crown: (flags & SNAKE_CROWN) !== 0,
     boss: (flags & SNAKE_BOSS) !== 0,
+    linked: (flags & SNAKE_LINKED) !== 0,
     x: r.f32(),
     y: r.f32(),
     angle: r.angle(),

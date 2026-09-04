@@ -9,6 +9,7 @@ export const Route = createFileRoute("/top")({ component: TopPage });
 
 interface Row {
   name: string;
+  handle?: string;
   best: number;
   kills: number;
   games: number;
@@ -100,7 +101,17 @@ function TopPage() {
                   }}
                 />
                 <span className="flex-1 truncate font-medium">
-                  {r.name}
+                  {r.handle ? (
+                    <Link
+                      to="/u/$handle"
+                      params={{ handle: r.handle }}
+                      className="underline-offset-2 hover:underline"
+                    >
+                      ✓ {r.name}
+                    </Link>
+                  ) : (
+                    r.name
+                  )}
                   {kind === "weekly" && (
                     <span className="ml-2 text-xs text-subtle">
                       {LEAGUES[leagueOf(r.best)]!.name}

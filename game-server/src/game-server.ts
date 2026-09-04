@@ -68,6 +68,8 @@ import {
   type LifeStats,
 } from "../../src/game/challenges";
 import { playGateFromEnv } from "./play-gate";
+import { cleanHandle, identityGateFromEnv, type Identity } from "./identity";
+import { lifeFeats } from "../../src/game/achievements";
 import { ArenaHost } from "./arena-host";
 
 interface View {
@@ -125,6 +127,8 @@ interface Client {
   alive: boolean;
   /** A successful Turnstile redemption authorizes respawns until this time. */
   verifiedUntil: number;
+  /** The linked account behind this socket, once a ticket has been redeemed. */
+  account: Identity | null;
 }
 
 /** What the current life has done so far, for challenges and the profile. */
@@ -223,6 +227,9 @@ export class GameServer {
   private draining = false;
   private readonly secret = process.env.GAME_SECRET ?? randomBytes(32).toString("hex");
   private readonly playGate = playGateFromEnv(this.secret);
+  private readonly identity = identityGateFromEnv();
+  /** Redeemed tickets, so a reconnect or an arena hop does not call the site again. */
+  private readonly identities = new Map<string, { id: Identity; at: number }>();
   private readonly clients = new Set<Client>();
   private readonly nids = new Map<string, number>();
   private readonly grace = new Map<string, NodeJS.Timeout>();
@@ -302,6 +309,19 @@ export class GameServer {
       }
       this.drain();
       res.end(JSON.stringify({ ok: true, drained: this.clients.size }));
+      return;
+    }
+    const handle = url.searchParams.get("profile");
+    if (handle !== null) {
+      res.setHeader("cache-control", "public, max-age=15");
+      const p = await this.profiles.byHandle(cleanHandle(handle));
+      if (!p) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ ok: false }));
+        return;
+      }
+      const [rank, rarity] = await Promise.all([this.profiles.rank(p), this.profiles.rarity()]);
+      res.end(JSON.stringify({ ok: true, profile: this.profiles.publicProfile(p, rank), rarity }));
       return;
     }
     const top = url.searchParams.get("top");
@@ -531,6 +551,7 @@ export class GameServer {
       lastPing: Date.now(),
       alive: true,
       verifiedUntil: 0,
+      account: null,
     };
     this.clients.add(client);
     this.lastActivity = Date.now();
@@ -654,6 +675,20 @@ export class GameServer {
       playTicket = r.remaining ? r.str() : "";
       // Rematch: spawn near this snake if it is still alive.
       nearNid = r.remaining >= 2 ? r.u16() : 0;
+      // Account link: the site's origin and a ticket it minted for this player.
+      const idOrigin = r.remaining ? r.str().slice(0, 200) : "";
+      const idTicket = r.remaining ? r.str().slice(0, 128) : "";
+      if (idOrigin && idTicket && !respawn && !client.account) {
+        const id = await this.redeemIdentity(idOrigin, idTicket);
+        if (!client.alive) return;
+        if (id) {
+          client.account = id;
+          client.profile = await this.profiles.link(client.profile, id, client.name);
+          if (!client.alive) return;
+          client.key = client.profile.key;
+          if (this.profiles.award(client.profile, "linked")) this.achieve(client, "linked");
+        }
+      }
     }
     if (client.sid && this.world.snakes.some((s) => s.id === client.sid && s.alive)) {
       // Already playing: a repeated hello just updates the look next spawn,
@@ -736,6 +771,8 @@ export class GameServer {
       ) {
         mass = Math.max(START_MASS + 1, Math.floor(client.deathMass * COMEBACK_KEEP));
         client.comebackUsed = true;
+        if (client.profile && this.profiles.award(client.profile, "comeback"))
+          this.achieve(client, "comeback");
       }
       snake = this.world.spawnSnake(
         this.newSid(),
@@ -756,6 +793,7 @@ export class GameServer {
       snake.rookie = (client.profile?.best ?? 0) < 100 || client.rough >= 2;
       if (client.profile?.crew) snake.name = `[${client.profile.crew}] ${client.name}`;
       if (client.profile && client.profile.crownUntil > now) snake.crown = true;
+      if (client.account) snake.linked = true;
       // Skill-based placement: veterans start out where the big snakes roam,
       // newcomers in the quietest corner the arena has. A party overrides it.
       const best = client.profile?.best ?? 0;
@@ -969,6 +1007,10 @@ export class GameServer {
         .u8(Math.min(255, p.shards))
         .str(p.crew)
         .u16(Math.max(0, Math.min(65535, Math.ceil((p.crownUntil - Date.now()) / 1000))))
+        .u16(Math.min(65535, p.chests))
+        .str(p.handle)
+        .u8(p.sub ? 1 : 0)
+        .str(Object.keys(p.achv).join(","))
         .finish(),
     );
     const list = this.profiles.challenges(p);
@@ -1012,6 +1054,8 @@ export class GameServer {
       if (!w) continue;
       // Out of time, or the bank is full: the wisp ends at once either way.
       if (now >= w.until || w.bank >= WISP_BANK_MAX) {
+        if (w.bank >= WISP_BANK_MAX && c.profile && this.profiles.award(c.profile, "afterlife"))
+          this.achieve(c, "afterlife");
         this.endWisp(c);
         continue;
       }
@@ -1073,6 +1117,7 @@ export class GameServer {
       // The final cut wears the crown until the next boss; everyone who hit it gets a chest.
       if (c.profile) {
         this.profiles.setCrown(c.profile, Date.now() + 3600_000);
+        if (this.profiles.award(c.profile, "boss_slayer")) this.achieve(c, "boss_slayer");
         void this.sendProfile(c);
       }
       const me = this.world.snakes.find((s) => s.id === c.sid);
@@ -1100,6 +1145,28 @@ export class GameServer {
         /* already gone */
       }
     }
+  }
+
+  /** Tell a v2 client it just earned an achievement. */
+  private achieve(client: Client, id: string): void {
+    if (!client.v2 || !client.alive) return;
+    client.ws.send(new Writer().u8(S2C.ACHIEVE).str(id).finish());
+  }
+
+  /** Redeem a site ticket, remembering the answer for a while. */
+  private async redeemIdentity(origin: string, ticket: string): Promise<Identity | null> {
+    const k = `${origin}|${ticket}`;
+    const hit = this.identities.get(k);
+    if (hit && Date.now() - hit.at < 600_000) return hit.id;
+    const id = await this.identity.redeem(origin, ticket);
+    if (id) {
+      this.identities.set(k, { id, at: Date.now() });
+      if (this.identities.size > 5000) {
+        const oldest = [...this.identities.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+        if (oldest) this.identities.delete(oldest[0]);
+      }
+    }
+    return id;
   }
 
   private notice(client: Client, kind: number, text: string): void {
@@ -1441,6 +1508,9 @@ export class GameServer {
     for (const m of milestones) this.notice(c, 2, `streak milestone: ${m} unlocked`);
     if (freezeEarned)
       this.notice(c, 0, "streak freeze banked: one missed day will not break your streak");
+    const earned = this.profiles.awardTotals(c.profile);
+    for (const id of lifeFeats(stats)) if (this.profiles.award(c.profile, id)) earned.push(id);
+    for (const id of earned) this.achieve(c, id);
     void this.sendProfile(c);
   }
 

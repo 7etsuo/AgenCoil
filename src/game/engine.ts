@@ -18,6 +18,7 @@ import {
 import { World } from "./world";
 import { Renderer, desiredZoom } from "./render";
 import { GameAudio } from "./audio";
+import { ACHIEVEMENT_BY_ID } from "./achievements";
 import {
   NetSession,
   defaultServerUrl,
@@ -73,6 +74,8 @@ export interface HudState {
   goal: { text: string; frac: number } | null;
   /** "40 short of your best" style line for a near miss of a record or the top. */
   nearWin: string | null;
+  /** Achievement ids earned during this life, oldest first. */
+  unlocked: string[];
   /** A "beat my run" target from the link that opened the game. */
   beat: { by: string; target: number; done: boolean } | null;
   /** Tutorial hint for a first life, if any. */
@@ -114,6 +117,8 @@ export interface Look {
   bands?: string[];
   trail?: number;
   deathFx?: number;
+  /** A one-time account ticket from the site; the server links the profile. */
+  identity?: { origin: string; ticket: string };
 }
 
 const ZOOM_MIN = 0.55;
@@ -203,6 +208,7 @@ export class CoilEngine {
   private wispBank = 0;
   private wispSecs = 0;
   private wispWanted = false;
+  private unlocked: string[] = [];
   private banked = 0;
   private nearWin: string | null = null;
   private beat: { by: string; target: number; done: boolean } | null = null;
@@ -309,6 +315,13 @@ export class CoilEngine {
           if (kind === 2) this.audio.kill();
         },
         onGateRequired: (message) => this.onGateRequired(message),
+        onAchieve: (id) => {
+          const a = ACHIEVEMENT_BY_ID.get(id);
+          this.unlocked = [...this.unlocked, id];
+          this.pushFeed(`achievement: ${a ? `${a.icon} ${a.name}` : id}`);
+          this.audio.kill();
+          this.emitHud();
+        },
       });
       this.net.connect();
     } else {
@@ -448,7 +461,9 @@ export class CoilEngine {
       bands: look.bands,
       trail: look.trail ?? 0,
       deathFx: look.deathFx ?? 0,
+      identity: look.identity,
     };
+    this.unlocked = [];
     this.comebackOffer = 0;
     this.near = { combo: 0, bonus: 0, t: 0 };
     this.kills = 0;
@@ -592,6 +607,7 @@ export class CoilEngine {
       rematch: this.rematchTarget(),
       wisp: this.phase === "wisp" ? { bank: this.wispBank, secsLeft: this.wispSecs } : null,
       banked: this.banked,
+      unlocked: this.unlocked,
       boss: st?.boss ? { hp: st.boss.hp, dir: this.compass(st.boss.x, st.boss.y) } : null,
       goal: this.goalNow(),
       nearWin: this.phase === "dead" ? this.nearWin : null,

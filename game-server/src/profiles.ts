@@ -22,6 +22,8 @@ import {
   type Challenge,
   type LifeStats,
 } from "../../src/game/challenges";
+import { totalsUnlocked, type Totals } from "../../src/game/achievements";
+import type { Identity } from "./identity";
 
 export interface Profile {
   key: string;
@@ -66,6 +68,45 @@ export interface Profile {
   chests: number;
   crew: string;
   crownUntil: number;
+  /** Linked account: stable id, public handle and avatar; "" for a device profile. */
+  sub: string;
+  handle: string;
+  avatar: string;
+  /** Achievement id to the unix second it was earned. */
+  achv: Record<string, number>;
+}
+
+/** What the public profile page shows. */
+export interface PublicProfile {
+  handle: string;
+  name: string;
+  avatar: string;
+  best: number;
+  kills: number;
+  games: number;
+  survive: number;
+  eaten: number;
+  nearTotal: number;
+  bountyTotal: number;
+  streak: number;
+  chests: number;
+  weekBest: number;
+  seasonBest: number;
+  prevTier: number;
+  rank: number;
+  skin: number;
+  bands: string[];
+  crew: string;
+  crowned: boolean;
+  achv: Record<string, number>;
+}
+
+function parseAchv(v: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (v && typeof v === "object" && !Array.isArray(v))
+    for (const [k, t] of Object.entries(v as Record<string, unknown>))
+      if (/^[a-z0-9_]{1,32}$/.test(k) && typeof t === "number") out[k] = t;
+  return out;
 }
 
 export interface TopEntry {
@@ -75,6 +116,9 @@ export interface TopEntry {
   games: number;
   skin: number;
   bands: string[];
+  /** Linked account handle for a profile link, "" otherwise. */
+  handle: string;
+  avatar: string;
 }
 
 export interface ChallengeView {
@@ -147,7 +191,14 @@ export class ProfileStore {
              ADD COLUMN IF NOT EXISTS shards INTEGER NOT NULL DEFAULT 1,
              ADD COLUMN IF NOT EXISTS chests INTEGER NOT NULL DEFAULT 0,
              ADD COLUMN IF NOT EXISTS crew TEXT NOT NULL DEFAULT '',
-             ADD COLUMN IF NOT EXISTS crown_until BIGINT NOT NULL DEFAULT 0`,
+             ADD COLUMN IF NOT EXISTS crown_until BIGINT NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS sub TEXT NOT NULL DEFAULT '',
+             ADD COLUMN IF NOT EXISTS handle TEXT NOT NULL DEFAULT '',
+             ADD COLUMN IF NOT EXISTS avatar TEXT NOT NULL DEFAULT '',
+             ADD COLUMN IF NOT EXISTS achv JSONB NOT NULL DEFAULT '{}'`,
+        );
+        await this.pool!.query(
+          `CREATE INDEX IF NOT EXISTS agencoil_profiles_handle ON agencoil_profiles (handle) WHERE handle <> ''`,
         );
       })
         .then(() => {
@@ -205,6 +256,10 @@ export class ProfileStore {
       chests: 0,
       crew: "",
       crownUntil: 0,
+      sub: "",
+      handle: "",
+      avatar: "",
+      achv: {},
     };
   }
 
@@ -251,11 +306,15 @@ export class ProfileStore {
             chests: number;
             crew: string;
             crown_until: string | number;
+            sub: string;
+            handle: string;
+            avatar: string;
+            achv: unknown;
           }>(
             `SELECT name, best, kills, games, survive, unlocks, day, progress, skin, bands, best_x, best_y,
                   week, week_best, week_done, earned, flagged, streak, streak_last, freezes, eaten,
                   near_total, bounty_total, prev_tier, season, season_best, shards, chests, crew,
-                  crown_until
+                  crown_until, sub, handle, avatar, achv
            FROM agencoil_profiles WHERE key = $1`,
             [key],
           ),
@@ -300,6 +359,10 @@ export class ProfileStore {
             chests: Number(r.chests) || 0,
             crew: r.crew || "",
             crownUntil: Number(r.crown_until) || 0,
+            sub: r.sub || "",
+            handle: r.handle || "",
+            avatar: r.avatar || "",
+            achv: parseAchv(r.achv),
           };
         }
       } catch (err) {
@@ -489,6 +552,8 @@ export class ProfileStore {
           games: Number(r.members) || 0,
           skin: 0,
           bands: [],
+          handle: "",
+          avatar: "",
         }));
       } catch {
         /* fall through to memory */
@@ -503,7 +568,16 @@ export class ProfileStore {
       sums.set(p.crew, e);
     }
     return [...sums.entries()]
-      .map(([name, e]) => ({ name, best: e.best, kills: 0, games: e.members, skin: 0, bands: [] }))
+      .map(([name, e]) => ({
+        name,
+        best: e.best,
+        kills: 0,
+        games: e.members,
+        skin: 0,
+        bands: [],
+        handle: "",
+        avatar: "",
+      }))
       .sort((a, b) => b.best - a.best)
       .slice(0, n);
   }
@@ -532,8 +606,10 @@ export class ProfileStore {
             games: number;
             skin: number;
             bands: unknown;
+            handle: string;
+            avatar: string;
           }>(
-            `SELECT name, ${col} AS score, kills, games, skin, bands FROM agencoil_profiles
+            `SELECT name, ${col} AS score, kills, games, skin, bands, handle, avatar FROM agencoil_profiles
            WHERE flagged = false ${where} ORDER BY ${col} DESC, updated DESC LIMIT $1`,
             params,
           ),
@@ -545,6 +621,8 @@ export class ProfileStore {
           games: Number(r.games),
           skin: Number(r.skin) || 0,
           bands: Array.isArray(r.bands) ? (r.bands as string[]) : [],
+          handle: r.handle || "",
+          avatar: r.avatar || "",
         }));
       } catch (err) {
         console.error("[profiles] top failed:", (err as Error)?.message ?? err);
@@ -568,10 +646,210 @@ export class ProfileStore {
         games: p.games,
         skin: p.skin,
         bands: p.bands,
+        handle: p.handle,
+        avatar: p.avatar,
       }))
       .filter((e) => e.best > 0)
       .sort((a, b) => b.best - a.best)
       .slice(0, n);
+  }
+
+  /** Lifetime totals the achievement milestones are measured against. */
+  totals(p: Profile): Totals {
+    return {
+      best: p.best,
+      kills: p.kills,
+      games: p.games,
+      survive: p.survive,
+      eaten: p.eaten,
+      nearTotal: p.nearTotal,
+      bountyTotal: p.bountyTotal,
+      streak: p.streak,
+      chests: p.chests,
+    };
+  }
+
+  /** Give an achievement once. True when it is new. */
+  award(p: Profile, id: string): boolean {
+    if (p.achv[id]) return false;
+    p.achv[id] = Math.floor(Date.now() / 1000);
+    this.markDirty(p.key);
+    return true;
+  }
+
+  /** Award every lifetime milestone the totals now satisfy; returns the new ones. */
+  awardTotals(p: Profile): string[] {
+    const out: string[] = [];
+    for (const id of totalsUnlocked(this.totals(p))) if (this.award(p, id)) out.push(id);
+    return out;
+  }
+
+  /**
+   * Attach an account to a player. The account's profile lives under
+   * `acct:<sub>`; the first sign-in adopts the device profile the player has
+   * been building (renamed in place, so nothing is lost), later sign-ins
+   * from any device land on the account profile.
+   */
+  async link(device: Profile | null, id: Identity, name: string): Promise<Profile> {
+    const key = `acct:${id.sub}`;
+    let p = this.cache.get(key) ?? null;
+    if (!p && this.pool) {
+      try {
+        await this.ensureReady();
+        const r = await retryDb(() =>
+          this.pool!.query<{ n: string }>(
+            `SELECT count(*)::text AS n FROM agencoil_profiles WHERE key = $1`,
+            [key],
+          ),
+        );
+        if (Number(r.rows[0]?.n ?? 0) > 0) p = await this.load(key, name);
+      } catch (err) {
+        console.error("[profiles] link lookup failed:", (err as Error)?.message ?? err);
+      }
+    }
+    if (!p && device && !device.sub && (device.games > 0 || device.best > 0)) {
+      // Adopt the device profile: rename it so its history becomes the account's.
+      if (this.pool) {
+        try {
+          await this.ensureReady();
+          await retryDb(() =>
+            this.pool!.query(
+              `UPDATE agencoil_profiles SET key = $1 WHERE key = $2
+                 AND NOT EXISTS (SELECT 1 FROM agencoil_profiles WHERE key = $1)`,
+              [key, device.key],
+            ),
+          );
+        } catch (err) {
+          console.error("[profiles] adopt failed:", (err as Error)?.message ?? err);
+        }
+      }
+      this.cache.delete(device.key);
+      this.dirty.delete(device.key);
+      this.versions.delete(device.key);
+      device.key = key;
+      p = device;
+      this.cache.set(key, p);
+    }
+    if (!p) p = await this.load(key, name);
+    p.sub = id.sub;
+    p.avatar = id.avatar;
+    p.handle = await this.freeHandle(id.handle, key);
+    this.setName(p, name);
+    this.markDirty(key);
+    return p;
+  }
+
+  /** The handle itself, or a suffixed one when another account already holds it. */
+  private async freeHandle(handle: string, key: string): Promise<string> {
+    const taken = async (h: string): Promise<boolean> => {
+      for (const o of this.cache.values()) if (o.handle === h && o.key !== key) return true;
+      if (!this.pool) return false;
+      const r = await retryDb(() =>
+        this.pool!.query<{ n: string }>(
+          `SELECT count(*)::text AS n FROM agencoil_profiles WHERE handle = $1 AND key <> $2`,
+          [h, key],
+        ),
+      );
+      return Number(r.rows[0]?.n ?? 0) > 0;
+    };
+    try {
+      if (!(await taken(handle))) return handle;
+      for (let i = 2; i < 100; i++) {
+        const h = `${handle.slice(0, 20)}_${i}`;
+        if (!(await taken(h))) return h;
+      }
+    } catch (err) {
+      console.error("[profiles] handle check failed:", (err as Error)?.message ?? err);
+    }
+    return `${handle.slice(0, 16)}_${key.slice(-6)}`;
+  }
+
+  /** The profile behind a public handle, or null. */
+  async byHandle(handle: string): Promise<Profile | null> {
+    if (!handle) return null;
+    for (const p of this.cache.values()) if (p.handle === handle) return p;
+    if (!this.pool) return null;
+    try {
+      await this.ensureReady();
+      const r = await retryDb(() =>
+        this.pool!.query<{ key: string; name: string }>(
+          `SELECT key, name FROM agencoil_profiles WHERE handle = $1 LIMIT 1`,
+          [handle],
+        ),
+      );
+      const row = r.rows[0];
+      if (!row) return null;
+      return await this.load(row.key, row.name);
+    } catch (err) {
+      console.error("[profiles] byHandle failed:", (err as Error)?.message ?? err);
+      return null;
+    }
+  }
+
+  publicProfile(p: Profile, rank: number): PublicProfile {
+    return {
+      handle: p.handle,
+      name: p.name,
+      avatar: p.avatar,
+      best: p.best,
+      kills: p.kills,
+      games: p.games,
+      survive: p.survive,
+      eaten: p.eaten,
+      nearTotal: p.nearTotal,
+      bountyTotal: p.bountyTotal,
+      streak: p.streak,
+      chests: p.chests,
+      weekBest: p.week === isoWeek() ? p.weekBest : 0,
+      seasonBest: p.season === seasonOf() ? p.seasonBest : 0,
+      prevTier: p.prevTier,
+      rank,
+      skin: p.skin,
+      bands: p.bands,
+      crew: p.crew,
+      crowned: p.crownUntil > Date.now(),
+      achv: p.achv,
+    };
+  }
+
+  private rarityCache: {
+    at: number;
+    value: { players: number; counts: Record<string, number> };
+  } | null = null;
+
+  /** How many players hold each achievement, for "2% of players have this". */
+  async rarity(): Promise<{ players: number; counts: Record<string, number> }> {
+    if (this.rarityCache && Date.now() - this.rarityCache.at < 300_000)
+      return this.rarityCache.value;
+    let value = { players: 0, counts: {} as Record<string, number> };
+    if (this.pool) {
+      try {
+        await this.ensureReady();
+        const [tot, per] = await Promise.all([
+          retryDb(() =>
+            this.pool!.query<{ n: string }>(
+              `SELECT count(*)::text AS n FROM agencoil_profiles WHERE games > 0`,
+            ),
+          ),
+          retryDb(() =>
+            this.pool!.query<{ k: string; n: string }>(
+              `SELECT k, count(*)::text AS n FROM agencoil_profiles, jsonb_object_keys(achv) AS k GROUP BY k`,
+            ),
+          ),
+        ]);
+        value = { players: Number(tot.rows[0]?.n ?? 0), counts: {} };
+        for (const r of per.rows) value.counts[r.k] = Number(r.n);
+      } catch (err) {
+        console.error("[profiles] rarity failed:", (err as Error)?.message ?? err);
+      }
+    } else {
+      for (const p of this.cache.values()) {
+        if (p.games > 0) value.players++;
+        for (const k of Object.keys(p.achv)) value.counts[k] = (value.counts[k] ?? 0) + 1;
+      }
+    }
+    this.rarityCache = { at: Date.now(), value };
+    return value;
   }
 
   /** All-time rank by best length (1 = longest ever). */
@@ -615,9 +893,9 @@ export class ProfileStore {
             `INSERT INTO agencoil_profiles (key, name, best, kills, games, survive, unlocks, day, progress,
              skin, bands, best_x, best_y, week, week_best, week_done, earned, flagged,
              streak, streak_last, freezes, eaten, near_total, bounty_total, prev_tier, season, season_best,
-             shards, chests, crew, crown_until, updated)
+             shards, chests, crew, crown_until, sub, handle, avatar, achv, updated)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-             $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, now())
+             $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, now())
            ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, best = GREATEST(agencoil_profiles.best, EXCLUDED.best),
              kills = GREATEST(agencoil_profiles.kills, EXCLUDED.kills),
              games = GREATEST(agencoil_profiles.games, EXCLUDED.games),
@@ -630,7 +908,8 @@ export class ProfileStore {
              eaten = EXCLUDED.eaten, near_total = EXCLUDED.near_total, bounty_total = EXCLUDED.bounty_total,
              prev_tier = EXCLUDED.prev_tier, season = EXCLUDED.season, season_best = EXCLUDED.season_best,
              shards = EXCLUDED.shards, chests = EXCLUDED.chests, crew = EXCLUDED.crew,
-             crown_until = EXCLUDED.crown_until, updated = now()`,
+             crown_until = EXCLUDED.crown_until, sub = EXCLUDED.sub, handle = EXCLUDED.handle,
+             avatar = EXCLUDED.avatar, achv = agencoil_profiles.achv || EXCLUDED.achv, updated = now()`,
             [
               p.key,
               p.name,
@@ -663,6 +942,10 @@ export class ProfileStore {
               p.chests,
               p.crew,
               p.crownUntil,
+              p.sub,
+              p.handle,
+              p.avatar,
+              JSON.stringify(p.achv),
             ],
           ),
         );

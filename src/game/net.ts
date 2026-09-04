@@ -75,6 +75,12 @@ export interface ProfileInfo {
   shards: number;
   crew: string;
   crownSecs: number;
+  chests: number;
+  /** Public handle of the linked account ("" when playing as a device). */
+  handle: string;
+  linked: boolean;
+  /** Achievement ids earned so far. */
+  achv: string[];
 }
 
 export interface ChallengeInfo {
@@ -112,6 +118,8 @@ export interface NetHooks {
   onEvent: (e: EventInfo) => void;
   onNotice: (kind: number, text: string) => void;
   onGateRequired: (message: string) => void;
+  /** An achievement was just earned. */
+  onAchieve: (id: string) => void;
   onEmote: (nid: number, id: number) => void;
   /** Afterlife position and bank; secsLeft 0 ends the wisp. */
   onWisp: (x: number, y: number, bank: number, secsLeft: number) => void;
@@ -133,6 +141,8 @@ interface Look {
   bands?: string[];
   trail?: number;
   deathFx?: number;
+  /** A one-time account ticket minted by the site, redeemed by the server on HELLO. */
+  identity?: { origin: string; ticket: string };
 }
 
 const INPUT_HZ = 30;
@@ -451,7 +461,10 @@ export class NetSession {
       .str(this.party)
       .u8(respawn && this.comebackNext ? 1 : 0)
       .str(respawn ? "" : this.playTicket)
-      .u16(respawn ? this.nearNext & 0xffff : 0);
+      .u16(respawn ? this.nearNext & 0xffff : 0)
+      // Account link: origin and one-time ticket, first hello only.
+      .str(respawn ? "" : (this.look.identity?.origin ?? ""))
+      .str(respawn ? "" : (this.look.identity?.ticket ?? ""));
     this.comebackNext = false;
     this.nearNext = 0;
     this.ws.send(w.finish());
@@ -721,6 +734,10 @@ export class NetSession {
           shards: 0,
           crew: "",
           crownSecs: 0,
+          chests: 0,
+          handle: "",
+          linked: false,
+          achv: [],
         };
         if (r.remaining >= 14) {
           p.bestX = r.f32();
@@ -743,6 +760,13 @@ export class NetSession {
           p.shards = r.u8();
           p.crew = r.str();
           p.crownSecs = r.u16();
+        }
+        if (r.remaining >= 6) {
+          p.chests = r.u16();
+          p.handle = r.str();
+          p.linked = r.u8() === 1;
+          const ids = r.str();
+          p.achv = ids ? ids.split(",") : [];
         }
         this.hooks.onProfile(p);
         break;
@@ -785,6 +809,10 @@ export class NetSession {
       case S2C.NOTICE: {
         const kind = r.u8();
         this.hooks.onNotice(kind, r.str());
+        break;
+      }
+      case S2C.ACHIEVE: {
+        this.hooks.onAchieve(r.str());
         break;
       }
       case S2C.PONG: {
@@ -878,6 +906,7 @@ export class NetSession {
           kills: 0,
           crown: e.crown,
           boss: e.boss,
+          linked: e.linked,
         };
         if (!s.points.length) this.world.ensureTrail(s);
         this.world.upsertRemote(s);
@@ -885,6 +914,7 @@ export class NetSession {
       }
       s.crown = e.crown;
       s.boss = e.boss;
+      s.linked = e.linked;
       const buf = this.buffers.get(id) ?? [];
       buf.push({
         t: now,
