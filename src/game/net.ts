@@ -237,6 +237,8 @@ export class NetSession {
   private pendingEats = new Map<number, { food: Food; t: number }>();
   /** Predicted eats the server never confirmed (diagnostic). */
   eatMisses = 0;
+  /** Server messages that failed to decode (diagnostic). */
+  badFrames = 0;
   /** Diagnostics for the netcode: snapshot timing and prediction error. */
   get delayMs(): number {
     return Math.round(this.interpDelay);
@@ -386,7 +388,14 @@ export class NetSession {
       this.pingTimer = setInterval(() => this.ping(), 2000);
     };
     ws.onmessage = (ev) => {
-      if (ev.data instanceof ArrayBuffer) this.onMessage(new Reader(ev.data));
+      if (!(ev.data instanceof ArrayBuffer)) return;
+      try {
+        this.onMessage(new Reader(ev.data));
+      } catch (err) {
+        // A truncated or unknown frame must not take the handler down with
+        // it: log the first few and keep the session running.
+        if (this.badFrames++ < 3) console.warn("[net] dropped a malformed message", err);
+      }
     };
     ws.onclose = () => {
       if (this.pingTimer) clearInterval(this.pingTimer);
@@ -406,6 +415,8 @@ export class NetSession {
     this.closed = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.pingTimer) clearInterval(this.pingTimer);
+    this.retryTimer = null;
+    this.pingTimer = null;
     this.ws?.close();
     this.ws = null;
   }

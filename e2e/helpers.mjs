@@ -78,8 +78,10 @@ export async function openPlayer(browser, name, opts = {}) {
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto(opts.url ?? WEB, { waitUntil: "load" });
-  // The first page after a fresh bundle compiles for a moment; give it room.
-  await page.waitForTimeout(1500);
+  // The first page after a fresh bundle compiles for a moment. Play is a
+  // no-op until the engine has mounted, and `__coil` appears on its first
+  // tick, so wait for that rather than a fixed delay.
+  await page.waitForFunction(() => Boolean(window.__coil), null, { timeout: 30_000 });
   await page.fill("#nick", name);
   await page.getByRole("button", { name: "Play", exact: true }).click();
   await page.waitForTimeout(1200);

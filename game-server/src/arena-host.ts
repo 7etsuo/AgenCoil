@@ -28,7 +28,14 @@ export interface ArenaRow {
 export interface ArenaHealth {
   ok: boolean;
   players: number;
+  /** Players the arena admits, as it reports; absent from older arenas. */
+  capacity?: number;
   at: number;
+}
+
+/** Room left on an arena, by its own reported capacity. */
+export function hasRoom(h: ArenaHealth, max = MAX_PLAYERS_PER_INSTANCE): boolean {
+  return h.players < (h.capacity ?? max);
 }
 
 /** Session length asked of the Sandbox, and how long before expiry to roll. */
@@ -59,7 +66,7 @@ export function pickArena(
     const p = live.find((a) => a.name === partyArena);
     if (p) return p;
   }
-  return live.find((a) => a.health.players < max) ?? live[live.length - 1]!;
+  return live.find((a) => hasRoom(a.health, max)) ?? live[live.length - 1]!;
 }
 
 export class ArenaHost {
@@ -124,7 +131,7 @@ export class ArenaHost {
     let arenas = await this.liveArenas();
     if (
       !arenas.some((a) => a.health.ok) ||
-      arenas.every((a) => !a.health.ok || a.health.players >= MAX_PLAYERS_PER_INSTANCE)
+      arenas.every((a) => !a.health.ok || !hasRoom(a.health))
     ) {
       const made = await this.createArena();
       if (made) arenas = await this.liveArenas();
@@ -353,8 +360,19 @@ async function probe(domain: string): Promise<ArenaHealth> {
   try {
     const res = await fetch(`${domain}/api/ws`, { signal: AbortSignal.timeout(1500) });
     if (!res.ok) return { ok: false, players: 0, at: Date.now() };
-    const j = (await res.json()) as { ok?: boolean; players?: number; draining?: boolean };
-    return { ok: Boolean(j.ok) && !j.draining, players: Number(j.players) || 0, at: Date.now() };
+    const j = (await res.json()) as {
+      ok?: boolean;
+      players?: number;
+      capacity?: number;
+      draining?: boolean;
+    };
+    const capacity = Number(j.capacity);
+    return {
+      ok: Boolean(j.ok) && !j.draining,
+      players: Number(j.players) || 0,
+      ...(Number.isFinite(capacity) && capacity >= 1 ? { capacity } : {}),
+      at: Date.now(),
+    };
   } catch {
     return { ok: false, players: 0, at: Date.now() };
   }

@@ -104,17 +104,21 @@ export class DailyBoard {
     try {
       await this.ensureReady();
       if (!this.pool) return;
-      const names = [...this.dirty];
-      for (const name of names) {
+      const day = this.day;
+      const jobs = [...this.dirty].map(async (name) => {
         const best = this.best.get(name) ?? 0;
         await retryDb(() =>
           this.pool!.query(
             `INSERT INTO agencoil_daily (day, name, best) VALUES ($1, $2, $3)
              ON CONFLICT (day, name) DO UPDATE SET best = GREATEST(agencoil_daily.best, EXCLUDED.best)`,
-            [this.day, name, best],
+            [day, name, best],
           ),
         );
-        if ((this.best.get(name) ?? 0) === best) this.dirty.delete(name);
+        if (this.day === day && (this.best.get(name) ?? 0) === best) this.dirty.delete(name);
+      });
+      for (const r of await Promise.allSettled(jobs)) {
+        if (r.status === "rejected")
+          console.error("[daily] flush failed:", (r.reason as Error)?.message ?? r.reason);
       }
     } catch (err) {
       console.error("[daily] flush failed:", (err as Error)?.message ?? err);

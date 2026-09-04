@@ -20,7 +20,7 @@ import {
   spacingOf,
   zoomOf,
 } from "./model";
-import type { World } from "./world";
+import { pathLength, type World } from "./world";
 
 const HEX = 44;
 const SPRITE = 64;
@@ -57,21 +57,29 @@ export class Renderer {
   stepFx(dt: number, particles: Particle[], floaters: Floater[], cam: Camera): void {
     this.time += dt;
     cam.trauma = Math.max(0, cam.trauma - dt * 1.8);
-    for (let i = particles.length - 1; i >= 0; i--) {
+    // Compact in place: a death burst retires hundreds of particles in the
+    // same few frames, and a splice per particle made that quadratic.
+    let keep = 0;
+    for (let i = 0; i < particles.length; i++) {
       const p = particles[i]!;
       p.life -= dt;
+      if (p.life <= 0) continue;
       p.x += p.vx * dt;
       p.y += p.vy * dt;
       p.vx *= 0.96;
       p.vy *= 0.96;
-      if (p.life <= 0) particles.splice(i, 1);
+      particles[keep++] = p;
     }
-    for (let i = floaters.length - 1; i >= 0; i--) {
+    particles.length = keep;
+    keep = 0;
+    for (let i = 0; i < floaters.length; i++) {
       const f = floaters[i]!;
       f.life -= dt;
+      if (f.life <= 0) continue;
       f.y -= 28 * dt;
-      if (f.life <= 0) floaters.splice(i, 1);
+      floaters[keep++] = f;
     }
+    floaters.length = keep;
   }
 
   draw(
@@ -628,10 +636,10 @@ export class Renderer {
     const style = s.bands && s.bands.length ? undefined : SKINS[s.skin % SKINS.length]!.style;
     const sprites = bands.map((c) => this.segmentSprite(c, style));
 
-    // Total path length so bands can be counted from the head.
-    let total = 0;
-    for (let i = 1; i < len; i++)
-      total += Math.hypot(pts[i]!.x - pts[i - 1]!.x, pts[i]!.y - pts[i - 1]!.y);
+    // Total path length so bands can be counted from the head. The trail
+    // helpers keep it running; only a body edited elsewhere is re-walked.
+    const cached = s.path;
+    let total = cached && cached.pts === pts && cached.n === len ? cached.len : pathLength(pts);
     total += Math.hypot(s.x - pts[len - 1]!.x, s.y - pts[len - 1]!.y);
     const bandUnits = bandLen * step;
 

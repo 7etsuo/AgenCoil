@@ -4,6 +4,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { buildSync } from "esbuild";
+import type pg from "pg";
 import { ACHIEVEMENTS, lifeFeats, nextSteps, totalsUnlocked } from "../../src/game/achievements.ts";
 import type { ProfileStore as ProfileStoreT } from "./profiles.ts";
 
@@ -44,6 +45,17 @@ test("signing in adopts the device profile and keeps its history", async () => {
   const again = await store.link(other, id, "Tetsuo");
   assert.equal(again, p);
   assert.equal(await store.byHandle("tetsuo"), p);
+});
+
+test("concurrent loads of one key share a single profile object", async () => {
+  // A database that answers a moment later, so two loads overlap in flight.
+  const pool = {
+    query: () => new Promise((resolve) => setTimeout(() => resolve({ rows: [], rowCount: 0 }), 5)),
+  } as unknown as pg.Pool;
+  const store = new ProfileStore(pool);
+  const [a, b] = await Promise.all([store.load("same-key", "a"), store.load("same-key", "b")]);
+  assert.equal(a, b, "two sockets asking at once must not get two copies");
+  assert.equal(await store.load("same-key", "c"), a);
 });
 
 test("a fresh device with no history does not take over an account", async () => {

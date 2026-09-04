@@ -167,6 +167,13 @@ export class PlayGate {
 
   private rateLimit(ip: string): number | null {
     const now = this.now();
+    // Addresses that stopped trying a minute ago are forgotten, so the map
+    // does not grow with every visitor an arena ever saw.
+    if (this.attempts.size >= 2000) {
+      for (const [seen, at] of this.attempts) {
+        if (at.every((t) => now - t >= 60_000)) this.attempts.delete(seen);
+      }
+    }
     const recent = (this.attempts.get(ip) ?? []).filter((at) => now - at < 60_000);
     if (recent.length >= this.attemptsPerMinute) {
       const waitMs = 60_000 - (now - recent[0]!);

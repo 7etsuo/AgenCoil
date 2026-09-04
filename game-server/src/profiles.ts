@@ -129,6 +129,8 @@ export interface ChallengeView {
 
 export class ProfileStore {
   private readonly cache = new Map<string, Profile>();
+  /** Loads in progress, so two sockets asking for one key share a single Profile object. */
+  private readonly loading = new Map<string, Promise<Profile>>();
   private readonly dirty = new Set<string>();
   private readonly versions = new Map<string, number>();
   private pool: pg.Pool | null = null;
@@ -141,14 +143,18 @@ export class ProfileStore {
   private initialized = false;
   private flushing = false;
 
-  constructor() {
+  /** Without an argument the pool comes from DATABASE_URL; tests pass a stub (or null). */
+  constructor(pool?: pg.Pool | null) {
     const url = process.env.DATABASE_URL?.trim();
-    if (url) {
+    if (pool !== undefined) this.pool = pool;
+    else if (url) {
       this.pool = new pg.Pool({
         connectionString: url,
         max: 2,
         ssl: /sslmode=(require|verify)/.test(url) ? { rejectUnauthorized: true } : undefined,
       });
+    }
+    if (this.pool) {
       void this.ensureReady().catch((err) => {
         console.error("[profiles] init failed:", (err as Error)?.message ?? err);
       });
@@ -199,6 +205,17 @@ export class ProfileStore {
         );
         await this.pool!.query(
           `CREATE INDEX IF NOT EXISTS agencoil_profiles_handle ON agencoil_profiles (handle) WHERE handle <> ''`,
+        );
+        // Rank is a count of better bests after every death, and the boards
+        // sort by these; without indexes each is a full table scan.
+        await this.pool!.query(
+          `CREATE INDEX IF NOT EXISTS agencoil_profiles_best ON agencoil_profiles (best DESC)`,
+        );
+        await this.pool!.query(
+          `CREATE INDEX IF NOT EXISTS agencoil_profiles_week ON agencoil_profiles (week, week_best DESC)`,
+        );
+        await this.pool!.query(
+          `CREATE INDEX IF NOT EXISTS agencoil_profiles_season ON agencoil_profiles (season, season_best DESC)`,
         );
       })
         .then(() => {
@@ -270,6 +287,19 @@ export class ProfileStore {
       this.rollDay(cached);
       return cached;
     }
+    const inFlight = this.loading.get(key);
+    if (inFlight) {
+      const p = await inFlight;
+      this.setName(p, name);
+      return p;
+    }
+    const task = this.fetch(key, name).finally(() => this.loading.delete(key));
+    this.loading.set(key, task);
+    return task;
+  }
+
+  /** Read one profile from the database (or start a fresh one) and cache it. */
+  private async fetch(key: string, name: string): Promise<Profile> {
     let p = this.fresh(key, name);
     if (this.pool) {
       try {
@@ -402,7 +432,7 @@ export class ProfileStore {
   setName(p: Profile, name: string): void {
     if (!name || name === "anon" || p.name === name) return;
     p.name = name;
-    this.dirty.add(p.key);
+    this.markDirty(p.key);
   }
 
   /** Remember the look used for a life. */
@@ -531,13 +561,12 @@ export class ProfileStore {
     this.markDirty(p.key);
   }
 
-  /** Leaderboard rows, all-time or this week, flagged accounts excluded. */
-  /** Crew board: members' week bests summed, this ISO week. */
+  /** Crew board: members' week bests summed, this ISO week, flagged accounts excluded. */
   async topCrews(n: number): Promise<TopEntry[]> {
     const week = isoWeek();
     if (this.pool) {
       try {
-        await this.ready;
+        await this.ensureReady();
         const res = await this.pool.query<{ crew: string; best: number; members: number }>(
           `SELECT crew, sum(week_best)::int AS best, count(*)::int AS members
            FROM agencoil_profiles
@@ -555,8 +584,8 @@ export class ProfileStore {
           handle: "",
           avatar: "",
         }));
-      } catch {
-        /* fall through to memory */
+      } catch (err) {
+        console.error("[profiles] topCrews failed:", (err as Error)?.message ?? err);
       }
     }
     const sums = new Map<string, { best: number; members: number }>();
@@ -881,12 +910,13 @@ export class ProfileStore {
     try {
       await this.ensureReady();
       if (!this.pool) return;
-      const keys = [...this.dirty];
-      for (const key of keys) {
+      // Upserts go out together; the pool serialises them over its
+      // connections, instead of one round trip waiting on the last.
+      const jobs = [...this.dirty].map(async (key) => {
         const p = this.cache.get(key);
         if (!p) {
           this.dirty.delete(key);
-          continue;
+          return;
         }
         const version = this.versions.get(key) ?? 0;
         await retryDb(() =>
@@ -951,6 +981,10 @@ export class ProfileStore {
           ),
         );
         if ((this.versions.get(key) ?? 0) === version) this.dirty.delete(key);
+      });
+      for (const r of await Promise.allSettled(jobs)) {
+        if (r.status === "rejected")
+          console.error("[profiles] flush failed:", (r.reason as Error)?.message ?? r.reason);
       }
     } catch (err) {
       console.error("[profiles] flush failed:", (err as Error)?.message ?? err);

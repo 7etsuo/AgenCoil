@@ -1,13 +1,16 @@
 import {
+  COMEBACK_WINDOW_MS,
   FOOD_COLORS,
   MAX_BOTS,
+  SKINS,
   START_MASS,
+  WISP_BANK_MAX,
+  WISP_SECS,
+  dist2,
   fillOf,
   lengthOf,
-  WISP_BANK_MAX,
-  WISP_BOOST,
-  WISP_SPEED,
   lerp,
+  radiusOf,
   type Camera,
   type Floater,
   type Particle,
@@ -16,6 +19,7 @@ import {
   type Vec,
 } from "./model";
 import { World } from "./world";
+import { moveWisp, slideAlongRim, steerWisp } from "./wisp";
 import { Renderer, desiredZoom } from "./render";
 import { GameAudio } from "./audio";
 import { ACHIEVEMENT_BY_ID } from "./achievements";
@@ -29,7 +33,6 @@ import {
   type ProfileInfo,
   type StatsInfo,
 } from "./net";
-import { COMEBACK_WINDOW_MS, dist2, radiusOf } from "./model";
 
 export interface ReplayFrame {
   t: number;
@@ -127,8 +130,12 @@ const ZOOM_MIN = 0.55;
 const ZOOM_MAX = 1.7;
 /** How far ahead of the head the aim point sits, in world units. */
 const AIM_REACH = 240;
-/** Aim closer than this to the wisp keeps its current heading (units). */
-const WISP_AIM_DEAD = 12;
+/** A cursor this close (CSS px) to the drawn wisp is "straight on", not a turn. */
+const WISP_AIM_DEAD_PX = 14;
+/** The camera eases onto the wisp for this long, then sits on it exactly. */
+const WISP_CAM_EASE_MS = 500;
+/** The client ends a wisp itself if the server's end never arrives. */
+const WISP_TIMEOUT_MS = (WISP_SECS + 3) * 1000;
 const SPAWN_TIMEOUT_MS = 4000;
 
 interface DeathFx {
@@ -212,6 +219,9 @@ export class CoilEngine {
   private wispBank = 0;
   private wispSecs = 0;
   private wispWanted = false;
+  private wispStartedAt = 0;
+  /** A steering key was held this tick, so the aim point is live, not a leftover. */
+  private keyAim = false;
   private unlocked: string[] = [];
   private banked = 0;
   private nearWin: string | null = null;
@@ -284,9 +294,14 @@ export class CoilEngine {
           }
           this.wispBank = bank;
           this.wispSecs = secsLeft;
-          if (secsLeft === 0 && this.phase === "wisp") {
+          if (secsLeft === 0) {
             const full = bank >= WISP_BANK_MAX;
-            this.endWisp();
+            if (this.phase === "wisp") this.endWisp();
+            else {
+              // Ended before the death beat let it begin: there is no wisp to fly.
+              this.wispWanted = false;
+              this.banked = bank;
+            }
             // The card still shows: comeback, rematch and play again stay on offer.
             if (full) this.pushFeed(`wisp full: +${bank} banked for your next life`);
           }
@@ -460,7 +475,7 @@ export class CoilEngine {
     this.audio.startMusic();
     this.look = {
       name: look.name.slice(0, 16) || "anon",
-      skin: look.skin % 16,
+      skin: look.skin % SKINS.length,
       bands: look.bands,
       trail: look.trail ?? 0,
       deathFx: look.deathFx ?? 0,
@@ -645,6 +660,8 @@ export class CoilEngine {
   }
 
   private onNetState(s: NetState): void {
+    // A wisp lives on the server; without the connection there is nothing to fly.
+    if (s !== "online" && this.phase === "wisp") this.endWisp();
     if (s === "offline" && this.spawnWait) {
       this.spawnWait = 0;
       this.net?.idle();
@@ -812,7 +829,8 @@ export class CoilEngine {
     const dx = a.x - hx;
     const dy = a.y - hy;
     const d = Math.hypot(dx, dy);
-    if (d < 4) return;
+    // Right on the head (or the wisp) means keep going, not turn around.
+    if (d < (p === this.wisp ? WISP_AIM_DEAD_PX : 4)) return;
     this.pointer.x = p.x + (dx / d) * AIM_REACH;
     this.pointer.y = p.y + (dy / d) * AIM_REACH;
   }
@@ -881,14 +899,18 @@ export class CoilEngine {
   private stepWisp(dt: number): void {
     const w = this.wisp;
     if (!w || this.phase !== "wisp") return;
-    // A released key leaves the aim at a fixed point; once the wisp is on it
-    // the direction is undefined, so keep flying the way it was going.
-    const ax = this.pointer.x - w.x;
-    const ay = this.pointer.y - w.y;
-    if (Math.hypot(ax, ay) > WISP_AIM_DEAD) w.angle = Math.atan2(ay, ax);
-    const sp = this.boosting ? WISP_BOOST : WISP_SPEED;
-    w.x += Math.cos(w.angle) * sp * dt;
-    w.y += Math.sin(w.angle) * sp * dt;
+    if (this.aimScreen !== null || this.keyAim) {
+      // A live aim (cursor, finger, or a held key) is a direction from the wisp.
+      steerWisp(w, this.pointer, dt);
+    } else {
+      // No input: fly on. A released key leaves its aim point behind, so it
+      // is carried along ahead of the wisp; it can never be passed and turned
+      // back toward, which is what used to leave the wisp jittering in place.
+      this.pointer.x = w.x + Math.cos(w.angle) * AIM_REACH;
+      this.pointer.y = w.y + Math.sin(w.angle) * AIM_REACH;
+    }
+    moveWisp(w, this.boosting, dt);
+    slideAlongRim(w);
     if (this.wispSrv) {
       const k = 1 - Math.pow(0.05, dt);
       w.x += (this.wispSrv.x - w.x) * k;
@@ -947,9 +969,15 @@ export class CoilEngine {
 
   private tick(dt: number): void {
     this.refreshAim();
-    this.applyKeyboardAim();
+    this.keyAim = this.applyKeyboardAim();
     const boost = (this.phase === "play" || this.phase === "wisp") && this.boosting;
     const localLife = this.local?.player != null;
+    // The server did not answer Play in time: start a local game instead.
+    if (this.spawnWait && performance.now() - this.spawnWait > SPAWN_TIMEOUT_MS) {
+      this.spawnWait = 0;
+      this.net?.idle();
+      this.spawnLocal();
+    }
     if (this.online && !localLife) {
       const net = this.net!;
       net.update(dt, this.pointer, boost);
@@ -966,17 +994,7 @@ export class CoilEngine {
         hw: cssW / (2 * this.cam.z) + 40,
         hh: cssH / (2 * this.cam.z) + 40,
       });
-      if (this.spawnWait && performance.now() - this.spawnWait > SPAWN_TIMEOUT_MS) {
-        this.spawnWait = 0;
-        net.idle();
-        this.spawnLocal();
-      }
     } else {
-      if (this.spawnWait && performance.now() - this.spawnWait > SPAWN_TIMEOUT_MS) {
-        this.spawnWait = 0;
-        this.net?.idle();
-        this.spawnLocal();
-      }
       const w = this.localWorld();
       w.step(dt, this.pointer.x, this.pointer.y, boost);
       this.handleLocalEvents(w);
@@ -1003,14 +1021,20 @@ export class CoilEngine {
     }
     if (this.phase === "dead" && this.wispWanted && this.wispSrv && nowMs > this.deathBeatUntil) {
       this.phase = "wisp";
+      this.wispStartedAt = nowMs;
       this.wisp = {
         x: this.wispSrv.x,
         y: this.wispSrv.y,
         angle: this.corpse?.angle ?? 0,
         trail: [],
       };
+      // Whatever the cursor was doing to the snake, the wisp starts straight.
+      this.pointer.x = this.wisp.x + Math.cos(this.wisp.angle) * AIM_REACH;
+      this.pointer.y = this.wisp.y + Math.sin(this.wisp.angle) * AIM_REACH;
       this.emitHud();
     }
+    // The server ends the wisp; if that word never arrives, the card must still come.
+    if (this.phase === "wisp" && nowMs - this.wispStartedAt > WISP_TIMEOUT_MS) this.endWisp();
     this.renderer.stepFx(fxDt, this.particles, this.floaters, this.cam);
     this.audioCues();
     if (this.killTimer > 0) {
@@ -1028,20 +1052,22 @@ export class CoilEngine {
     this.exposeDebug();
   }
 
-  private applyKeyboardAim(): void {
+  /** Point the aim along the held steering keys; true when any are held. */
+  private applyKeyboardAim(): boolean {
     let dx = 0;
     let dy = 0;
     if (this.keys.has("KeyA") || this.keys.has("ArrowLeft")) dx -= 1;
     if (this.keys.has("KeyD") || this.keys.has("ArrowRight")) dx += 1;
     if (this.keys.has("KeyW")) dy -= 1;
     if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) dy += 1;
-    if (!dx && !dy) return;
+    if (!dx && !dy) return false;
     const p = this.world.player;
     const origin = p ??
       (this.phase === "wisp" ? this.wisp : null) ?? { x: this.cam.x, y: this.cam.y };
     this.aimScreen = null;
     this.pointer.x = origin.x + dx * AIM_REACH;
     this.pointer.y = origin.y + dy * AIM_REACH;
+    return true;
   }
 
   private eatFx(x: number, y: number, v: number, c: number): void {
@@ -1264,70 +1290,76 @@ export class CoilEngine {
     const color = fillOf(s);
     this.cam.trauma = Math.min(1, this.cam.trauma + (s.id === this.world.playerId ? 0.7 : 0.28));
     const r = radiusOf(s.mass);
-    if (s.deathFx === 1) {
-      // Ring: a fast expanding circle of sparks from the head.
-      for (let i = 0; i < 40; i++) {
-        const a = (i / 40) * Math.PI * 2;
-        this.particles.push({
-          x: s.x,
-          y: s.y,
-          vx: Math.cos(a) * (220 + r * 3),
-          vy: Math.sin(a) * (220 + r * 3),
-          life: 0.7,
-          color: "#ffffff",
-          r: 2.5,
-        });
-      }
-    } else if (s.deathFx === 2) {
-      // Shatter: heavy shards in the skin colour.
-      for (let i = 0; i < 26; i++) {
-        const a = Math.random() * Math.PI * 2;
-        const sp = 80 + Math.random() * 260;
-        this.particles.push({
-          x: s.x,
-          y: s.y,
-          vx: Math.cos(a) * sp,
-          vy: Math.sin(a) * sp,
-          life: 0.9 + Math.random() * 0.5,
-          color,
-          r: 3 + Math.random() * 5,
-        });
-      }
-    }
-    if (s.deathFx === 3) {
-      // Nova: two rings, white then skin colour.
-      for (const [ring, col, sp] of [
-        [0, "#ffffff", 300],
-        [1, color, 180],
-      ] as const) {
-        for (let i = 0; i < 36; i++) {
-          const a = (i / 36) * Math.PI * 2 + ring * 0.09;
+    switch (s.deathFx) {
+      case 1:
+        // Ring: a fast expanding circle of sparks from the head.
+        for (let i = 0; i < 40; i++) {
+          const a = (i / 40) * Math.PI * 2;
+          this.particles.push({
+            x: s.x,
+            y: s.y,
+            vx: Math.cos(a) * (220 + r * 3),
+            vy: Math.sin(a) * (220 + r * 3),
+            life: 0.7,
+            color: "#ffffff",
+            r: 2.5,
+          });
+        }
+        break;
+      case 2:
+        // Shatter: heavy shards in the skin colour.
+        for (let i = 0; i < 26; i++) {
+          const a = Math.random() * Math.PI * 2;
+          const sp = 80 + Math.random() * 260;
           this.particles.push({
             x: s.x,
             y: s.y,
             vx: Math.cos(a) * sp,
             vy: Math.sin(a) * sp,
-            life: 0.8,
-            color: col,
-            r: 3,
+            life: 0.9 + Math.random() * 0.5,
+            color,
+            r: 3 + Math.random() * 5,
           });
         }
-      }
-    } else if (s.deathFx === 4) {
-      // Confetti: many small bright flecks in random colours.
-      for (let i = 0; i < 60; i++) {
-        const a = Math.random() * Math.PI * 2;
-        const sp = 60 + Math.random() * 300;
-        this.particles.push({
-          x: s.x,
-          y: s.y,
-          vx: Math.cos(a) * sp,
-          vy: Math.sin(a) * sp - 60,
-          life: 1 + Math.random() * 0.8,
-          color: `hsl(${Math.floor(Math.random() * 360)} 90% 60%)`,
-          r: 2 + Math.random() * 2.5,
-        });
-      }
+        break;
+      case 3:
+        // Nova: two rings, white then skin colour.
+        for (const [ring, col, sp] of [
+          [0, "#ffffff", 300],
+          [1, color, 180],
+        ] as const) {
+          for (let i = 0; i < 36; i++) {
+            const a = (i / 36) * Math.PI * 2 + ring * 0.09;
+            this.particles.push({
+              x: s.x,
+              y: s.y,
+              vx: Math.cos(a) * sp,
+              vy: Math.sin(a) * sp,
+              life: 0.8,
+              color: col,
+              r: 3,
+            });
+          }
+        }
+        break;
+      case 4:
+        // Confetti: many small bright flecks in random colours.
+        for (let i = 0; i < 60; i++) {
+          const a = Math.random() * Math.PI * 2;
+          const sp = 60 + Math.random() * 300;
+          this.particles.push({
+            x: s.x,
+            y: s.y,
+            vx: Math.cos(a) * sp,
+            vy: Math.sin(a) * sp - 60,
+            life: 1 + Math.random() * 0.8,
+            color: `hsl(${Math.floor(Math.random() * 360)} 90% 60%)`,
+            r: 2 + Math.random() * 2.5,
+          });
+        }
+        break;
+      default:
+        break;
     }
     const pts = s.points.length ? s.points.slice().reverse() : [{ x: s.x, y: s.y }];
     const fx: DeathFx = {
@@ -1384,7 +1416,7 @@ export class CoilEngine {
     }
     // The server's first WISP message can arrive before or after DEATH, so
     // only flag the wish here; the wisp state itself resets on spawn.
-    this.wispWanted = this.online && reason !== undefined;
+    this.wispWanted = this.online;
     this.phase = "dead";
     this.boosting = false;
     this.holdBoost = false;
@@ -1430,8 +1462,13 @@ export class CoilEngine {
         this.cam.y = Math.sin(this.menuT * 0.7) * 320;
       }
     } else if (this.phase === "wisp" && this.wisp) {
-      this.cam.x = lerp(this.cam.x, this.wisp.x, 1 - Math.pow(0.0008, dt));
-      this.cam.y = lerp(this.cam.y, this.wisp.y, 1 - Math.pow(0.0008, dt));
+      // Ease onto the wisp, then sit on it: a lagging camera drew the wisp
+      // 45 to 70 units ahead of centre, so a cursor resting near centre was
+      // behind it and turned it around every frame.
+      const easing = performance.now() - this.wispStartedAt < WISP_CAM_EASE_MS;
+      const k = easing ? 1 - Math.pow(0.0008, dt) : 1;
+      this.cam.x = lerp(this.cam.x, this.wisp.x, k);
+      this.cam.y = lerp(this.cam.y, this.wisp.y, k);
     } else if (this.phase === "dead") {
       let target: Vec | null = null;
       if (this.watchNid !== null) {

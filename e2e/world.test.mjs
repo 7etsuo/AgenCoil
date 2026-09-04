@@ -14,12 +14,14 @@ const root = new URL("..", import.meta.url).pathname;
 
 let World;
 let model;
+let wisp;
+let mod;
 before(async () => {
   const dir = mkdtempSync(join(tmpdir(), "agencoil-world-"));
   const entry = join(dir, "entry.ts");
   writeFileSync(
     entry,
-    `export * from "${root}src/game/world.ts"; export * as model from "${root}src/game/model.ts";`,
+    `export * from "${root}src/game/world.ts"; export * as model from "${root}src/game/model.ts"; export * as wisp from "${root}src/game/wisp.ts";`,
   );
   const out = join(dir, "world.mjs");
   await esbuild.build({
@@ -30,9 +32,10 @@ before(async () => {
     outfile: out,
     logLevel: "silent",
   });
-  const mod = await import(pathToFileURL(out).href);
+  mod = await import(pathToFileURL(out).href);
   World = mod.World;
   model = mod.model;
+  wisp = mod.wisp;
 });
 
 function place(world, id, x, y, angle, mass = 60) {
@@ -311,4 +314,114 @@ test("the boss takes a hit point when a player's head touches its body, and only
   b2.y = 0;
   const died = stepUntil(world2, () => !p.alive, 120);
   assert.ok(died >= 0, "the boss head kills");
+});
+
+test("the wisp turns at a bounded rate and never flips onto an aim point", () => {
+  const dt = 1 / 60;
+  // Aim directly behind: the old code snapped the heading around at once,
+  // and with the aim point then ahead again it flipped back every frame.
+  const w = { x: 0, y: 0, angle: 0 };
+  wisp.steerWisp(w, { x: -240, y: 0 }, dt);
+  assert.ok(Math.abs(w.angle) <= wisp.WISP_TURN * dt + 1e-9, `turned ${w.angle} in one frame`);
+  assert.ok(Math.abs(w.angle) > 0, "it does start turning");
+  // An aim point right on the wisp is no direction: the heading holds.
+  const held = { x: 100, y: 100, angle: 1.3 };
+  wisp.steerWisp(held, { x: 104, y: 97 }, dt);
+  assert.equal(held.angle, 1.3);
+  // Flying straight for a second covers a second of speed, no jitter.
+  const flyer = { x: 0, y: 0, angle: 0 };
+  for (let i = 0; i < 60; i++) wisp.moveWisp(flyer, false, dt);
+  assert.ok(Math.abs(flyer.x - model.WISP_SPEED) < 1e-6 && Math.abs(flyer.y) < 1e-9);
+});
+
+test("the rim turns the wisp along the wall instead of pinning it", () => {
+  const lim = model.ARENA_RADIUS - model.WISP_RIM_MARGIN;
+  // Heading straight out through the rim at 3 o'clock.
+  const w = { x: lim + 30, y: 0, angle: 0.2 };
+  wisp.slideAlongRim(w);
+  assert.ok(Math.abs(Math.hypot(w.x, w.y) - lim) < 1e-6, "back on the rim");
+  const out = Math.atan2(w.y, w.x);
+  const rel = model.wrapAngle(w.angle - out);
+  assert.ok(Math.abs(Math.abs(rel) - Math.PI / 2) < 1e-9, `tangent, not outward (${rel})`);
+  assert.ok(rel > 0, "turned toward the nearer tangent");
+  // Sliding along it for a while keeps it inside and moving.
+  const start = { x: w.x, y: w.y };
+  for (let i = 0; i < 60; i++) {
+    wisp.moveWisp(w, false, 1 / 60);
+    wisp.slideAlongRim(w);
+  }
+  assert.ok(Math.hypot(w.x, w.y) <= lim + 1e-6);
+  assert.ok(Math.hypot(w.x - start.x, w.y - start.y) > 200, "it travelled along the wall");
+  // Heading inward is left alone.
+  const inward = { x: lim + 5, y: 0, angle: Math.PI };
+  wisp.slideAlongRim(inward);
+  assert.equal(inward.angle, Math.PI);
+});
+
+test("the running body length matches a full recount through growth, shrink and edits", () => {
+  const world = new World(false);
+  world.host = true;
+  const s = place(world, "s", 0, 0, 0, 60);
+  let seed = 3;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const check = (label) => {
+    const total = mod.pathLength(s.points);
+    assert.ok(
+      Math.abs(s.path.len - total) < 1e-6,
+      `${label}: cached ${s.path.len.toFixed(3)} vs recount ${total.toFixed(3)}`,
+    );
+    // Boost drain lands after the trim in a step, so allow one segment of slack.
+    assert.ok(
+      total <= model.lengthOf(s.mass) + model.spacingOf(s.mass),
+      `${label}: never longer than wanted (${total.toFixed(1)} vs ${model.lengthOf(s.mass).toFixed(1)})`,
+    );
+  };
+  for (let i = 0; i < 300; i++) {
+    world.inputs.get("s").angle += (rnd() - 0.5) * 0.8;
+    world.inputs.get("s").boost = rnd() < 0.2;
+    if (i % 40 === 0) s.mass += 120;
+    if (i === 200) s.mass = 30;
+    world.step(1 / 40, 0, 0, false);
+    if (i % 5 === 0) check(`tick ${i}`);
+  }
+  // Points replaced wholesale (a reattached snake, a boss laid by hand): the
+  // cache notices and rebuilds instead of trusting a stale length.
+  s.points = s.points.slice(0, 6).map((p) => ({ ...p }));
+  world.step(1 / 40, 0, 0, false);
+  check("after replacing points");
+  // Points edited in place outside the trail helpers are noticed by count.
+  s.points.push({ x: s.x + 5, y: s.y + 5 }, { x: s.x + 10, y: s.y + 8 });
+  world.step(1 / 40, 0, 0, false);
+  check("after pushing points");
+});
+
+test("a slow giant keeps its full body: points sit one spacing apart, under the cap", () => {
+  const world = new World(false);
+  world.host = true;
+  const s = place(world, "g", 0, 0, 0, 3000);
+  let seed = 11;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 400; i++) {
+    world.inputs.get("g").angle += (rnd() - 0.5) * 0.3;
+    world.step(1 / 40, 0, 0, false);
+  }
+  const total = mod.pathLength(s.points);
+  const want = model.lengthOf(s.mass);
+  const sp = model.spacingOf(s.mass);
+  assert.ok(
+    Math.abs(total - want) < sp,
+    `body ${total.toFixed(0)} should match ${want.toFixed(0)} (spacing ${sp.toFixed(1)})`,
+  );
+  assert.ok(s.points.length <= model.maxPointsOf(s.mass), `${s.points.length} points fit the cap`);
+  for (let i = 1; i < s.points.length - 1; i++) {
+    const a = s.points[i - 1];
+    const b = s.points[i];
+    const seg = Math.hypot(a.x - b.x, a.y - b.y);
+    // Spacing follows mass, and the snake eats as it goes: one percent of slack.
+    if (i > 1)
+      assert.ok(
+        Math.abs(seg - sp) < sp * 0.01,
+        `segment ${i} is ${seg.toFixed(2)}, not ${sp.toFixed(2)}`,
+      );
+  }
 });

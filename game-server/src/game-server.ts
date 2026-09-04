@@ -18,10 +18,8 @@ import {
   HUNGER_RATE,
   LANDMARKS,
   WISP_BANK_MAX,
-  WISP_BOOST,
   WISP_REACH,
   WISP_SECS,
-  WISP_SPEED,
   BOUNTY_RATE,
   COMEBACK_KEEP,
   COMEBACK_WINDOW_MS,
@@ -44,7 +42,8 @@ import {
   radiusOf,
   type Snake,
 } from "../../src/game/model";
-import { CELL, HOT_CELL, World, hotKey } from "../../src/game/world";
+import { CELL, World, cellKey, cellKeyOf, hotCellCentre, hotKey } from "../../src/game/world";
+import { moveWisp, slideAlongRim } from "../../src/game/wisp";
 import { cleanName } from "./names";
 import {
   C2S,
@@ -59,6 +58,9 @@ import {
 import { DailyBoard } from "./daily";
 import { ProfileStore, type Profile } from "./profiles";
 import {
+  MODE_DOUBLE_REMAINS,
+  MODE_HUNGER,
+  MODE_TINY,
   UNLOCK_DEATH,
   UNLOCK_TRAIL,
   isoWeek,
@@ -90,7 +92,10 @@ interface Client {
   bands?: string[];
   view: View;
   known: Set<string>;
+  /** Orb ids the client holds. */
   sentFood: Set<number>;
+  /** Per food cell in view: the stamp last synced and the ids the client holds there. */
+  foodCells: Map<number, FoodCellSync>;
   /** Sequence number of the last input applied, echoed in snapshots. */
   seq: number;
   /** Newer protocol: device key present, gets STATS2/PROFILE/NEAR/EVENT. */
@@ -129,6 +134,14 @@ interface Client {
   verifiedUntil: number;
   /** The linked account behind this socket, once a ticket has been redeemed. */
   account: Identity | null;
+}
+
+interface FoodCellSync {
+  gx: number;
+  gy: number;
+  /** World stamp of the cell when it was last synced; -1 means never. */
+  stamp: number;
+  ids: number[];
 }
 
 /** What the current life has done so far, for challenges and the profile. */
@@ -179,6 +192,34 @@ const CONNECTS_PER_MINUTE = 20;
 const MAX_MSGS_PER_SECOND = 60;
 const HEAT_DECAY_MS = 10 * 60_000;
 const HOT_THRESHOLD = 3;
+/** How long a redeemed identity ticket is trusted without asking the site again. */
+const IDENTITY_TTL_MS = 10 * 60_000;
+const IDENTITY_CACHE_MAX = 5000;
+/** The view rectangle a client may ask for, in world units from its centre. */
+const VIEW_MAX_HW = 4000;
+const VIEW_MAX_HH = 3000;
+
+/** A finite number from the wire, or the fallback for NaN and infinities. */
+function finite(v: number, fallback: number): number {
+  return Number.isFinite(v) ? v : fallback;
+}
+
+/**
+ * Players this process admits. The default was measured against a Vercel
+ * Sandbox; a home arena on a desktop core sets ARENA_CAPACITY higher, and
+ * the coordinator reads the value each arena reports rather than assuming.
+ */
+function capacityFromEnv(): number {
+  const n = Number(process.env.ARENA_CAPACITY);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : MAX_PLAYERS_PER_INSTANCE;
+}
+
+/** First-life helper bots beyond the scaled bot count; past this, newcomers get none. */
+const HELPER_BOT_SLACK = 6;
+/** Helpers start at mass 14; a bot under this is still someone's helper and is not retired. */
+const HELPER_BOT_MASS = 20;
+/** Orbs one food sync may add; a cell cut short is finished on the next one. */
+const FOOD_ADD_CAP = 1500;
 
 function sanitizeName(raw: string): string {
   const s = raw
@@ -225,6 +266,7 @@ export class GameServer {
     `${process.env.VERCEL_DEPLOYMENT_ID ?? "local"}-${randomBytes(3).toString("hex")}`;
   /** Set once an old arena has been told to hand its players to the coordinator. */
   private draining = false;
+  readonly capacity = capacityFromEnv();
   private readonly secret = process.env.GAME_SECRET ?? randomBytes(32).toString("hex");
   private readonly playGate = playGateFromEnv(this.secret);
   private readonly identity = identityGateFromEnv();
@@ -239,6 +281,10 @@ export class GameServer {
   private readonly parties = new Map<string, Set<string>>();
   private bountyOf = new Map<string, number>();
   private event: { x: number; y: number; until: number } | null = null;
+  /** Outbound buffers for the per-tick messages; `finish` copies, so they are reused. */
+  private readonly outSnap = new Writer();
+  private readonly outAdd = new Writer();
+  private readonly outDel = new Writer();
   private readonly connsByIp = new Map<string, number>();
   private readonly connectLog = new Map<string, number[]>();
   /** Death sites by coarse cell with timestamps, for spawn placement. */
@@ -266,7 +312,11 @@ export class GameServer {
     this.wss.on("connection", (ws, req) => this.onConnection(ws, req));
     server.on("request", (req, res) => {
       if (req.headers.upgrade) return;
-      void this.onHttpRequest(req, res);
+      this.onHttpRequest(req, res).catch((err: unknown) => {
+        console.error("[http] failed:", (err as Error)?.message ?? err);
+        if (!res.headersSent) res.statusCode = 500;
+        if (!res.writableEnded) res.end(JSON.stringify({ ok: false }));
+      });
     });
   }
 
@@ -395,7 +445,7 @@ export class GameServer {
       uptimeSec: Math.round((Date.now() - this.startedAt) / 1000),
       tick: this.tick,
       stepMs: Math.round(this.stepMs * 100) / 100,
-      capacity: MAX_PLAYERS_PER_INSTANCE,
+      capacity: this.capacity,
       loopMs: Math.round(this.loopMs * 100) / 100,
       playGate: this.playGate.enabled,
       hot: this.hotSpots(12),
@@ -410,9 +460,7 @@ export class GameServer {
     for (const [key, times] of this.heat) {
       const recent = times.filter((t) => now - t < HEAT_DECAY_MS);
       if (!recent.length) continue;
-      const gx = Math.floor(key / 128) - 64;
-      const gy = (key % 128) - 64;
-      out.push({ x: (gx + 0.5) * HOT_CELL, y: (gy + 0.5) * HOT_CELL, deaths: recent.length });
+      out.push({ ...hotCellCentre(key), deaths: recent.length });
     }
     return out.sort((a, b) => b.deaths - a.deaths).slice(0, n);
   }
@@ -434,6 +482,32 @@ export class GameServer {
       else this.heat.delete(key);
       if (recent.length < HOT_THRESHOLD) this.world.hot.delete(key);
     }
+  }
+
+  /** Drop per-address and per-ticket records that have aged out, so a long-lived arena stays flat. */
+  private pruneCaches(): void {
+    const now = Date.now();
+    for (const [ip, times] of this.connectLog) {
+      if (times.every((t) => now - t >= 60_000)) this.connectLog.delete(ip);
+    }
+    for (const [key, hit] of this.identities) {
+      if (now - hit.at >= IDENTITY_TTL_MS) this.identities.delete(key);
+    }
+    for (const [sig, exp] of this.usedTokens) if (exp < now) this.usedTokens.delete(sig);
+  }
+
+  /** The connected client that owns a snake, if any. */
+  private clientBySid(sid: string): Client | null {
+    for (const c of this.clients) if (c.sid === sid) return c;
+    return null;
+  }
+
+  /** Take a snake out of its party, and forget the party once it is empty. */
+  private leaveParty(code: string, sid: string): void {
+    const set = this.parties.get(code);
+    if (!set) return;
+    set.delete(sid);
+    if (!set.size) this.parties.delete(code);
   }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
@@ -465,6 +539,16 @@ export class GameServer {
     if (!this.timer) return;
     clearInterval(this.timer);
     this.timer = null;
+  }
+
+  /** Stop the loop, drop pending timers and close every socket (tests, orderly shutdown). */
+  close(): void {
+    this.stopLoop();
+    for (const t of this.grace.values()) clearTimeout(t);
+    this.grace.clear();
+    for (const c of this.clients) c.ws.close(1001, "server closing");
+    this.wss?.close();
+    this.wss = null;
   }
 
   private nidOf(sid: string): number {
@@ -519,7 +603,7 @@ export class GameServer {
       ws.close(1013, "arena draining");
       return;
     }
-    if (this.clients.size >= MAX_PLAYERS_PER_INSTANCE) {
+    if (this.clients.size >= this.capacity) {
       ws.send(
         new Writer()
           .u8(S2C.FULL)
@@ -541,6 +625,7 @@ export class GameServer {
       view: { cx: 0, cy: 0, hw: 900, hh: 600 },
       known: new Set(),
       sentFood: new Set(),
+      foodCells: new Map(),
       seq: 0,
       v2: false,
       proto,
@@ -594,8 +679,8 @@ export class GameServer {
     this.lastActivity = Date.now();
     const sid = client.sid;
     client.sid = null;
-    if (client.party) this.parties.get(client.party)?.delete(sid ?? "");
     if (!sid) return;
+    if (client.party) this.leaveParty(client.party, sid);
     // Hold the snake for a moment so a reconnect (forced by the platform's
     // connection cap, or a flaky network) can pick it back up.
     const input = this.world.inputs.get(sid);
@@ -711,9 +796,13 @@ export class GameServer {
       // and a respawn request ends the current life first so no snake is
       // left running unowned.
       if (!respawn) return;
+      const old = this.world.snakes.find((s) => s.id === client.sid);
       this.world.killSnake(client.sid);
+      if (old) this.endLife(client, old, false);
       client.sid = null;
     }
+    // Whatever spawns next, the afterlife is over.
+    if (client.wisp) this.endWisp(client);
     // Check the signed resume token before consuming it: a verified session
     // must survive the platform moving a socket to another server instance.
     const resume = tokenText && !respawn ? this.verifyToken(tokenText) : null;
@@ -734,23 +823,23 @@ export class GameServer {
       client.verifiedUntil = verifiedUntil;
     }
     const token = resume ? this.redeemToken(tokenText) : null;
+    const now = Date.now();
     let snake: Snake | null = null;
     if (token) {
       const held = this.world.snakes.find((s) => s.id === token.sid && s.alive);
       const timer = this.grace.get(token.sid);
-      const owner = held ? [...this.clients].find((c) => c !== client && c.sid === held.id) : null;
-      if (held && (timer || owner)) {
+      const owner = held ? this.clientBySid(held.id) : null;
+      if (held && (timer || (owner && owner !== client))) {
         // Reattach. If another socket still owns the snake (the old
         // connection has not closed yet), ownership moves here rather than a
         // second copy being built.
         if (timer) clearTimeout(timer);
         this.grace.delete(token.sid);
-        if (owner) {
+        if (owner && owner !== client) {
           owner.sid = null;
           owner.known.clear();
         }
         snake = held;
-        snake.name = client.name;
         snake.skin = client.skin;
         snake.bands = client.bands;
       } else {
@@ -774,13 +863,11 @@ export class GameServer {
     } else {
       // A comeback keeps a quarter of the lost length, once per connection,
       // if asked for within a few seconds of dying.
-      const now = Date.now();
-      if (client.wisp) this.endWisp(client);
       let mass: number | undefined;
       if (
         respawn &&
         comeback &&
-        modeNow().id !== 4 &&
+        modeNow().id !== MODE_TINY &&
         !client.comebackUsed &&
         client.deathAt &&
         now - client.deathAt < COMEBACK_WINDOW_MS
@@ -805,11 +892,6 @@ export class GameServer {
         this.world.ensureTrail(snake);
       }
       client.wispBank = 0;
-      // Rookies (best under 100) and anyone on a rough start get gentler bots.
-      snake.rookie = (client.profile?.best ?? 0) < 100 || client.rough >= 2;
-      if (client.profile?.crew) snake.name = `[${client.profile.crew}] ${client.name}`;
-      if (client.profile && client.profile.crownUntil > now) snake.crown = true;
-      if (client.account) snake.linked = true;
       // Skill-based placement: veterans start out where the big snakes roam,
       // newcomers in the quietest corner the arena has. A party overrides it.
       const best = client.profile?.best ?? 0;
@@ -838,6 +920,13 @@ export class GameServer {
         this.world.ensureTrail(snake);
       }
     }
+    // The same dressing whether the snake is new, rebuilt or reattached, so a
+    // reconnect never drops the crew tag, crown or badge.
+    snake.name = client.profile?.crew ? `[${client.profile.crew}] ${client.name}` : client.name;
+    snake.crown = Boolean(client.profile && client.profile.crownUntil > now);
+    snake.linked = Boolean(client.account);
+    // Rookies (best under 100) and anyone on a rough start get gentler bots.
+    snake.rookie = (client.profile?.best ?? 0) < 100 || client.rough >= 2;
     snake.trail = client.trail;
     snake.deathFx = client.deathFx;
     snake.level = client.profile ? levelOf(client.profile.eaten) : 0;
@@ -918,6 +1007,11 @@ export class GameServer {
   }
 
   private spawnHelperBot(snake: Snake): void {
+    // Helpers are extra bots. Without a ceiling a wave of newcomers doubled
+    // the bot population and the world's cost with it.
+    let bots = 0;
+    for (const s of this.world.snakes) if (s.isBot && s.alive) bots++;
+    if (bots >= this.world.desiredBots + HELPER_BOT_SLACK) return;
     const used = new Set(this.world.snakes.map((s) => s.name.toLowerCase()));
     const bot = this.world.spawnBot(used);
     bot.mass = 14;
@@ -1075,14 +1169,8 @@ export class GameServer {
         this.endWisp(c);
         continue;
       }
-      const sp = w.boost ? WISP_BOOST : WISP_SPEED;
-      w.x += Math.cos(w.angle) * sp * dt;
-      w.y += Math.sin(w.angle) * sp * dt;
-      const d = Math.hypot(w.x, w.y);
-      if (d > ARENA_RADIUS - 40) {
-        w.x *= (ARENA_RADIUS - 40) / d;
-        w.y *= (ARENA_RADIUS - 40) / d;
-      }
+      moveWisp(w, w.boost, dt);
+      slideAlongRim(w);
       if (w.bank >= WISP_BANK_MAX) continue;
       // Everything but chase and event orbs, anywhere inside the halo.
       for (const f of this.world.queryFood(w.x, w.y, WISP_REACH + 12)) {
@@ -1126,7 +1214,7 @@ export class GameServer {
     }
     if (!this.world.bossHits.length) return;
     for (const h of this.world.bossHits) {
-      const c = [...this.clients].find((x) => x.sid === h.attacker);
+      const c = this.clientBySid(h.attacker);
       if (!c) continue;
       c.bossHits++;
       if (!h.killed) continue;
@@ -1173,13 +1261,17 @@ export class GameServer {
   private async redeemIdentity(origin: string, ticket: string): Promise<Identity | null> {
     const k = `${origin}|${ticket}`;
     const hit = this.identities.get(k);
-    if (hit && Date.now() - hit.at < 600_000) return hit.id;
+    if (hit && Date.now() - hit.at < IDENTITY_TTL_MS) return hit.id;
     const id = await this.identity.redeem(origin, ticket);
     if (id) {
+      // Entries are only ever appended, so insertion order is age order and
+      // the first key is the oldest.
+      this.identities.delete(k);
       this.identities.set(k, { id, at: Date.now() });
-      if (this.identities.size > 5000) {
-        const oldest = [...this.identities.entries()].sort((a, b) => a[1].at - b[1].at)[0];
-        if (oldest) this.identities.delete(oldest[0]);
+      while (this.identities.size > IDENTITY_CACHE_MAX) {
+        const oldest = this.identities.keys().next().value;
+        if (oldest === undefined) break;
+        this.identities.delete(oldest);
       }
     }
     return id;
@@ -1208,11 +1300,14 @@ export class GameServer {
     if (r.remaining >= 21) client.seq = r.u16();
     const angle = r.angle();
     const boost = r.u8() === 1;
+    // Floats off the wire can be NaN or infinite; such a view would silently
+    // stop every snapshot, so keep the previous one instead.
+    const v = client.view;
     client.view = {
-      cx: r.f32(),
-      cy: r.f32(),
-      hw: Math.min(4000, r.f32()),
-      hh: Math.min(3000, r.f32()),
+      cx: finite(r.f32(), v.cx),
+      cy: finite(r.f32(), v.cy),
+      hw: Math.min(VIEW_MAX_HW, Math.max(0, finite(r.f32(), v.hw))),
+      hh: Math.min(VIEW_MAX_HH, Math.max(0, finite(r.f32(), v.hh))),
     };
     const lag = r.remaining >= 1 ? (r.u8() * 4) / 1000 : 0;
     this.fingerprint(client, angle);
@@ -1295,8 +1390,6 @@ export class GameServer {
     const t = this.verifyToken(text);
     if (!t) return null;
     const sig = text.slice(text.indexOf(".") + 1);
-    const now = Date.now();
-    for (const [k, exp] of this.usedTokens) if (exp < now) this.usedTokens.delete(k);
     if (this.usedTokens.has(sig)) return null;
     this.usedTokens.set(sig, t.exp);
     return t;
@@ -1326,7 +1419,9 @@ export class GameServer {
               humanExp: raw.h,
             }
           : raw;
-      if (typeof t.mass !== "number" || t.exp < Date.now()) return null;
+      if (typeof t.sid !== "string" || typeof t.mass !== "number" || typeof t.exp !== "number")
+        return null;
+      if (!Number.isFinite(t.mass) || t.exp < Date.now()) return null;
       t.mass = Math.min(t.mass, 100_000);
       return t;
     } catch {
@@ -1353,7 +1448,7 @@ export class GameServer {
     for (const s of this.world.snakes) if (!this.nids.has(s.id)) this.nidOf(s.id);
 
     if (this.world.deaths.length) this.onDeaths();
-    this.stepWisps(1 / SERVER_TICK_HZ);
+    this.stepWisps(dt);
     if (this.tick % SERVER_TICK_HZ === 0) this.stepBoss();
     if (this.world.eats.length) this.onEats();
     if (this.world.nears.length) this.onNears();
@@ -1365,9 +1460,10 @@ export class GameServer {
     if (this.tick % SERVER_TICK_HZ === 0) {
       const players = this.clients.size;
       this.world.desiredBots = Math.max(SERVER_BOTS_MIN, SERVER_BOTS - Math.floor(players * 0.6));
+      this.retireSurplusBot();
       const mode = modeNow().id;
-      this.world.remainsMult = mode === 1 ? 2 : 1;
-      this.world.hunger = mode === 3 ? HUNGER_RATE : 0;
+      this.world.remainsMult = mode === MODE_DOUBLE_REMAINS ? 2 : 1;
+      this.world.hunger = mode === MODE_HUNGER ? HUNGER_RATE : 0;
     }
     const heavy = this.stepMs > 6;
     const snapEvery = Math.max(1, Math.round(SERVER_TICK_HZ / (heavy ? 20 : SNAPSHOT_HZ)));
@@ -1376,7 +1472,26 @@ export class GameServer {
     if (this.tick % foodEvery === 0) for (const c of this.clients) this.sendFood(c);
     if (this.tick % Math.round(SERVER_TICK_HZ / 2) === 0) this.sendStatsAll();
     if (this.tick % SERVER_TICK_HZ === 0) for (const c of this.clients) this.sendToken(c);
-    if (this.tick % (SERVER_TICK_HZ * 30) === 0) this.decayHeat();
+    if (this.tick % (SERVER_TICK_HZ * 30) === 0) {
+      this.decayHeat();
+      this.pruneCaches();
+    }
+  }
+
+  /**
+   * Bots scale down as players arrive. Not spawning more only waits for
+   * attrition, and bots are good at surviving, so once a second the
+   * smallest grown bot over the target retires into remains.
+   */
+  private retireSurplusBot(): void {
+    let bots = 0;
+    let victim: Snake | null = null;
+    for (const s of this.world.snakes) {
+      if (!s.isBot || !s.alive || s.boss) continue;
+      bots++;
+      if (s.mass >= HELPER_BOT_MASS && (!victim || s.mass < victim.mass)) victim = s;
+    }
+    if (bots > this.world.desiredBots && victim) this.world.killSnake(victim.id);
   }
 
   private trackLives(): void {
@@ -1392,7 +1507,7 @@ export class GameServer {
   private onNears(): void {
     const now = Date.now();
     for (const n of this.world.nears) {
-      const c = [...this.clients].find((x) => x.sid === n.id);
+      const c = this.clientBySid(n.id);
       if (!c || !c.life) continue;
       c.combo = { n: now - c.combo.last < NEAR_COMBO_WINDOW * 1000 ? c.combo.n + 1 : 1, last: now };
       c.life.near++;
@@ -1454,13 +1569,16 @@ export class GameServer {
         .f32(s.y)
         .finish();
       const bounty = this.bountyOf.get(s.id) ?? 0;
-      const killerClient = d.killerId ? [...this.clients].find((c) => c.sid === d.killerId) : null;
+      const killerClient = d.killerId ? this.clientBySid(d.killerId) : null;
       for (const c of this.clients) {
         if (c.known.has(s.id) || c.sid === s.id || (d.killerId && c.sid === d.killerId))
           c.ws.send(msg);
         c.known.delete(s.id);
         if (c.sid === s.id) this.endLife(c, s);
       }
+      // A snake killed after its socket went away has no client to end its
+      // life, so the per-snake sets are cleared here as well.
+      this.world.nearIds.delete(s.id);
       if (bounty && d.killerId) {
         const killer = this.world.snakes.find((x) => x.id === d.killerId && x.alive);
         if (killer) killer.mass += Math.min(600, Math.floor(bounty * 0.3));
@@ -1470,7 +1588,9 @@ export class GameServer {
       }
       if (!s.isBot) this.daily.record(s.name, Math.floor(s.mass));
       this.nids.delete(s.id);
-      if (d.reason === "snake") this.recordDeath(s.x, s.y);
+      // Only a real snake-on-snake death marks the spot; a dropped connection
+      // or a retired bot has no killer and says nothing about the place.
+      if (d.reason === "snake" && d.killerId) this.recordDeath(s.x, s.y);
       this.world.inputs.delete(s.id);
       const g = this.grace.get(s.id);
       if (g) {
@@ -1480,30 +1600,36 @@ export class GameServer {
     }
   }
 
-  /** Close out a player's life: profile, challenges, comeback window. */
-  private endLife(c: Client, s: Snake): void {
+  /**
+   * Close out a player's life: profile, challenges, and (after a real death)
+   * the afterlife wisp and comeback window. A life ended by the player's own
+   * respawn request is booked without either.
+   */
+  private endLife(c: Client, s: Snake, afterlife = true): void {
     c.sid = null;
     this.world.nearIds.delete(s.id);
-    if (c.party) this.parties.get(c.party)?.delete(s.id);
+    if (c.party) this.leaveParty(c.party, s.id);
     c.deathAt = Date.now();
     c.deathMass = s.mass;
     const life = c.life;
     c.life = null;
     if (!life) return;
     c.rough = Date.now() - life.startAt < 20_000 ? c.rough + 1 : 0;
-    // Afterlife: a wisp for a while, banking starting length for the next life.
-    if (c.proto >= 2) {
-      c.wisp = {
-        x: s.x,
-        y: s.y,
-        angle: s.angle,
-        boost: false,
-        until: Date.now() + WISP_SECS * 1000,
-        bank: 0,
-      };
-      this.sendWisp(c, WISP_SECS);
+    if (afterlife) {
+      // Afterlife: a wisp for a while, banking starting length for the next life.
+      if (c.proto >= 2) {
+        c.wisp = {
+          x: s.x,
+          y: s.y,
+          angle: s.angle,
+          boost: false,
+          until: Date.now() + WISP_SECS * 1000,
+          bank: 0,
+        };
+        this.sendWisp(c, WISP_SECS);
+      }
+      if (c.v2 && !c.comebackUsed) this.notice(c, 3, "comeback");
     }
-    if (c.v2 && !c.comebackUsed) this.notice(c, 3, "comeback");
     if (!c.profile) return;
     const stats: LifeStats = {
       length: Math.floor(s.mass),
@@ -1535,7 +1661,7 @@ export class GameServer {
     const counts = new Map<string, number>();
     for (const e of this.world.eats) {
       if (e.k === 2) {
-        const c = [...this.clients].find((x) => x.sid === e.id);
+        const c = this.clientBySid(e.id);
         if (c?.life) c.life.remains += e.v;
       }
       let w = bySid.get(e.id);
@@ -1568,10 +1694,22 @@ export class GameServer {
 
   private snakeVisible(c: Client, s: Snake): boolean {
     if (s.id === c.sid) return true;
-    const r = radiusOf(s.mass);
+    // Geometry from the step's cache: this runs per snake, per client, per snapshot.
+    const box = s.box;
+    const r = box ? box.r : radiusOf(s.mass);
     if (this.inView(c.view, s.x, s.y, VIEW_MARGIN + r)) return true;
     // A long body can be on screen while the head is far away.
-    if (!this.inView(c.view, s.x, s.y, VIEW_MARGIN + lengthOf(s.mass) + r)) return false;
+    if (box) {
+      const v = c.view;
+      const pad = VIEW_MARGIN + r;
+      if (
+        box.maxX < v.cx - v.hw - pad ||
+        box.minX > v.cx + v.hw + pad ||
+        box.maxY < v.cy - v.hh - pad ||
+        box.minY > v.cy + v.hh + pad
+      )
+        return false;
+    } else if (!this.inView(c.view, s.x, s.y, VIEW_MARGIN + lengthOf(s.mass) + r)) return false;
     const pts = s.points;
     const stride = Math.max(1, (pts.length / 12) | 0);
     for (let i = 0; i < pts.length; i += stride) {
@@ -1583,8 +1721,9 @@ export class GameServer {
 
   private sendSnapshot(c: Client): void {
     if (c.wisp) this.sendWisp(c, (c.wisp.until - Date.now()) / 1000);
-    if (c.seq) c.ws.send(new Writer().u8(S2C.ACK).u16(c.seq).finish());
-    const w = new Writer()
+    if (c.seq) c.ws.send(this.outAdd.reset().u8(S2C.ACK).u16(c.seq).finish());
+    const w = this.outSnap
+      .reset()
       .u8(S2C.SNAP)
       .u32(this.tick)
       .u32(Date.now() >>> 0);
@@ -1605,8 +1744,7 @@ export class GameServer {
     w.u16(visible.length);
     for (const s of visible) {
       const full = !c.known.has(s.id);
-      const packed = s.trail ? { ...s, skin: packSkin(s.skin, s.trail) } : s;
-      writeSnakeEntry(w, this.nidOf(s.id), packed, full, MAX_NET_POINTS);
+      writeSnakeEntry(w, this.nidOf(s.id), s, full, MAX_NET_POINTS, packSkin(s.skin, s.trail ?? 0));
       if (full && c.proto >= 2) w.u8(Math.min(255, s.level ?? 0));
       c.known.add(s.id);
     }
@@ -1628,32 +1766,86 @@ export class GameServer {
     c.ws.send(w.finish());
   }
 
+  /**
+   * Bring the client's orbs in line with the server's for the area on
+   * screen. Cells are stamped by the world on every change, so a cell whose
+   * stamp the client already has is skipped whole; only cells that changed,
+   * entered the view or left it are walked. An orb that crossed between two
+   * cells in view stays put on the client (its position there is cosmetic).
+   */
   private sendFood(c: Client): void {
     const v = c.view;
     const pad = VIEW_MARGIN + CELL;
-    const x0 = v.cx - v.hw - pad;
-    const y0 = v.cy - v.hh - pad;
-    const x1 = v.cx + v.hw + pad;
-    const y1 = v.cy + v.hh + pad;
-    const add = new Writer().u8(S2C.FOOD_ADD).u16(0);
+    const gx0 = Math.floor((v.cx - v.hw - pad) / CELL);
+    const gx1 = Math.floor((v.cx + v.hw + pad) / CELL);
+    const gy0 = Math.floor((v.cy - v.hh - pad) / CELL);
+    const gy1 = Math.floor((v.cy + v.hh + pad) / CELL);
+    const inRange = (gx: number, gy: number): boolean =>
+      gx >= gx0 && gx <= gx1 && gy >= gy0 && gy <= gy1;
+    const world = this.world;
+    const add = this.outAdd.reset().u8(S2C.FOOD_ADD).u16(0);
+    const del = this.outDel.reset().u8(S2C.FOOD_DEL).u16(0);
     let nAdd = 0;
-    const seen = new Set<number>();
-    this.world.forEachFoodIn(x0, y0, x1, y1, (f) => {
-      const id = f.id!;
-      seen.add(id);
-      if (c.sentFood.has(id) || nAdd >= 1500) return;
-      writeFood(add, f);
-      c.sentFood.add(id);
-      nAdd++;
-    });
-    const del = new Writer().u8(S2C.FOOD_DEL).u16(0);
     let nDel = 0;
-    for (const id of c.sentFood) {
-      if (seen.has(id)) continue;
-      c.sentFood.delete(id);
-      if (nDel >= 4000) continue;
+    const drop = (id: number): void => {
+      if (!c.sentFood.delete(id)) return;
       del.u32(id);
       nDel++;
+    };
+    // Cells that left the view: everything the client holds there goes.
+    for (const [key, cell] of c.foodCells) {
+      if (inRange(cell.gx, cell.gy)) continue;
+      for (const id of cell.ids) drop(id);
+      c.foodCells.delete(key);
+    }
+    let capped = false;
+    for (let gx = gx0; gx <= gx1; gx++) {
+      for (let gy = gy0; gy <= gy1; gy++) {
+        const key = cellKeyOf(gx, gy);
+        const stamp = world.foodCellStamp(key);
+        let cell = c.foodCells.get(key);
+        if (cell && cell.stamp === stamp) continue;
+        if (!cell) {
+          cell = { gx, gy, stamp: -1, ids: [] };
+          c.foodCells.set(key, cell);
+        }
+        // Orbs the client holds for this cell that are no longer in it: gone
+        // from the world, moved out of view, or moved to another cell in view
+        // (that cell's stamp changed too, so it adopts the id below).
+        if (cell.ids.length) {
+          let keep = 0;
+          for (const id of cell.ids) {
+            const f = world.foodById.get(id);
+            if (f && cellKey(f.x, f.y) === key) {
+              cell.ids[keep++] = id;
+              continue;
+            }
+            if (!f || !inRange(Math.floor(f.x / CELL), Math.floor(f.y / CELL))) drop(id);
+          }
+          cell.ids.length = keep;
+        }
+        const bucket = world.foodsInCell(key);
+        if (bucket) {
+          for (const f of bucket) {
+            const id = f.id!;
+            if (cell.ids.includes(id)) continue;
+            if (c.sentFood.has(id)) {
+              cell.ids.push(id);
+              continue;
+            }
+            if (nAdd >= FOOD_ADD_CAP) {
+              capped = true;
+              continue;
+            }
+            cell.ids.push(id);
+            c.sentFood.add(id);
+            writeFood(add, f);
+            nAdd++;
+          }
+        }
+        // A cell cut short by the cap keeps its old stamp and is walked again next time.
+        if (!capped) cell.stamp = stamp;
+      }
     }
     if (nAdd) {
       const bytes = add.finish();

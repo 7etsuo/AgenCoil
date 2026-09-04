@@ -3,7 +3,7 @@
  * this file, so the layout lives in one place. Every message starts with a
  * one-byte type tag.
  */
-import type { Food, Snake, Vec } from "./model";
+import { MAX_CUSTOM_BANDS, wrapAngle, type Food, type Snake, type Vec } from "./model";
 
 export const C2S = {
   HELLO: 1,
@@ -42,13 +42,14 @@ export const S2C = {
   NOTICE: 16,
   /** Leaderboard v2: board entries carry a bounty. Sent instead of STATS to v2 clients. */
   STATS2: 17,
+  /** The server refused a spawn because no valid human-verification session exists. */
+  GATE_REQUIRED: 18,
   /** This instance is full; the client should reconnect after the given seconds. */
   FULL: 19,
   /** Someone emoted: nid, emote id. */
   EMOTE: 20,
+  /** Afterlife wisp position, bank and seconds left (0 ends it). */
   WISP: 21,
-  /** The server refused a spawn because no valid human-verification session exists. */
-  GATE_REQUIRED: 18,
   /** An achievement this client just earned: id. */
   ACHIEVE: 22,
 } as const;
@@ -122,15 +123,18 @@ export class Writer {
     this.pos += b.length;
     return this;
   }
-  /** Angle in radians packed into 16 bits. */
+  /** Angle in radians packed into 16 bits. A non-finite angle is sent as 0. */
   angle(a: number): this {
-    let w = a;
-    while (w > Math.PI) w -= Math.PI * 2;
-    while (w < -Math.PI) w += Math.PI * 2;
+    const w = Number.isFinite(a) ? wrapAngle(a) : 0;
     return this.i16(Math.round(((w + Math.PI) / (Math.PI * 2)) * 65535) - 32768);
   }
   finish(): Uint8Array {
     return this.bytes.slice(0, this.pos);
+  }
+  /** Start a new message in the same buffer; `finish` copies, so reuse is safe. */
+  reset(): this {
+    this.pos = 0;
+    return this;
   }
 }
 
@@ -199,9 +203,9 @@ export function rgbToHex(r: number, g: number, b: number): string {
 }
 
 export function writeBands(w: Writer, bands: string[] | undefined): void {
-  const list = bands ?? [];
-  w.u8(Math.min(6, list.length));
-  for (const c of list.slice(0, 6)) {
+  const list = (bands ?? []).slice(0, MAX_CUSTOM_BANDS);
+  w.u8(list.length);
+  for (const c of list) {
     const [r, g, b] = hexToRgb(c);
     w.u8(r).u8(g).u8(b);
   }
@@ -237,12 +241,14 @@ export function readFood(r: Reader): Food {
   };
 }
 
+/** Write a body, subsampled evenly to at most `max` points (never fewer than two). */
 export function writePoints(w: Writer, pts: Vec[], max: number): void {
   let list = pts;
-  if (list.length > max) {
+  const keep = Math.max(2, max);
+  if (list.length > keep) {
     const out: Vec[] = [];
     const n = list.length - 1;
-    for (let i = 0; i < max; i++) out.push(list[Math.min(n, Math.round((i / (max - 1)) * n))]!);
+    for (let i = 0; i < keep; i++) out.push(list[Math.min(n, Math.round((i / (keep - 1)) * n))]!);
     list = out;
   }
   w.u16(list.length);
@@ -265,13 +271,17 @@ export const SNAKE_BOSS = 32;
 /** The player behind this snake signed in with an account. */
 export const SNAKE_LINKED = 64;
 
-/** One snake entry inside a snapshot. `full` includes identity and body. */
+/**
+ * One snake entry inside a snapshot. `full` includes identity and body.
+ * `skinByte` is the wire skin (see `packSkin`); it defaults to the plain skin.
+ */
 export function writeSnakeEntry(
   w: Writer,
   nid: number,
   s: Snake,
   full: boolean,
   maxPts: number,
+  skinByte = s.skin,
 ): void {
   let flags = 0;
   if (full) flags |= SNAKE_FULL;
@@ -283,7 +293,7 @@ export function writeSnakeEntry(
   if (s.linked) flags |= SNAKE_LINKED;
   w.u16(nid).u8(flags).f32(s.x).f32(s.y).angle(s.angle).f32(s.mass);
   if (full) {
-    w.u8(s.skin).str(s.name);
+    w.u8(skinByte).str(s.name);
     writeBands(w, s.bands);
     writePoints(w, s.points, maxPts);
   }

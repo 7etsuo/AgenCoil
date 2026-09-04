@@ -70,11 +70,16 @@ export function titleOf(p: {
   return "";
 }
 
+/** Mode ids on the wire; 0 means no mode is running. Id 2 was retired and is never reused. */
+export const MODE_DOUBLE_REMAINS = 1;
+export const MODE_HUNGER = 3;
+export const MODE_TINY = 4;
+
 /** Hourly arena modes: active for the first 15 minutes of every hour. */
 export const MODES = [
-  { id: 1, name: "double remains", text: "Bots drop twice the remains" },
-  { id: 3, name: "hunger", text: "Length drains slowly, keep eating" },
-  { id: 4, name: "tiny", text: "No comebacks, everyone starts fresh" },
+  { id: MODE_DOUBLE_REMAINS, name: "double remains", text: "Bots drop twice the remains" },
+  { id: MODE_HUNGER, name: "hunger", text: "Length drains slowly, keep eating" },
+  { id: MODE_TINY, name: "tiny", text: "No comebacks, everyone starts fresh" },
 ] as const;
 export const MODE_MINUTES = 15;
 

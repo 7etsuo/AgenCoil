@@ -5,7 +5,6 @@
  */
 export const ARENA_RADIUS = 7200;
 export const FOOD_TARGET = 16000;
-export const TICK = 1 / 60;
 export const START_MASS = 10;
 export const MIN_MASS = 10;
 /** You need a little length in the bank before boosting is allowed. */
@@ -14,8 +13,6 @@ export const BOOST_MIN_MASS = 11;
 export const BOOST_DRAIN = 15;
 export const BOOST_DROP_EVERY = 1 / 6;
 export const SPAWN_INVULN = 1.6;
-export const NET_INTERVAL = 1000 / 18;
-export const INTERP_DELAY = 110;
 /** Body points in a full snake entry. High so a coiled body arrives faithful. */
 export const MAX_NET_POINTS = 220;
 export const MAX_BOTS = 24;
@@ -64,6 +61,8 @@ export const WISP_BOOST = 540;
 export const WISP_BANK_MAX = 150;
 /** Pickup radius: a wide halo, so a pass through a cluster clears it. */
 export const WISP_REACH = 70;
+/** How far inside the rim the wisp is kept. */
+export const WISP_RIM_MARGIN = 40;
 
 /** The Boss Hour: a server snake with hit points that everyone cuts together. */
 export const BOSS_MASS = 2500;
@@ -148,6 +147,30 @@ export interface Snake {
   linked?: boolean;
   /** Server side: last tick each attacker landed a boss hit. */
   bossHitAt?: Map<string, number>;
+  /** Server side, refreshed every step: derived geometry and a box around the body. */
+  box?: SnakeBox;
+  /**
+   * Running length of `points`, kept by `recordTrail`/`trimBody` so a trim
+   * is O(dropped points) instead of a walk of the whole body. Valid only
+   * while the array identity and count match; anything else recomputes.
+   */
+  path?: { pts: Vec[]; n: number; len: number };
+}
+
+/**
+ * Per-step geometry of one snake, so the pair loops (collisions, near
+ * misses, bot clearance) neither recompute `scaleOf` per pair nor walk a
+ * body the head is nowhere near.
+ */
+export interface SnakeBox {
+  r: number;
+  len: number;
+  /** Boosted speed: how far the body can have moved per second of view lag. */
+  boostSpeed: number;
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
 }
 
 export interface Camera {

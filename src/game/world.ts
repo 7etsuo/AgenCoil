@@ -17,11 +17,15 @@ import {
   BOSS_MASS,
   BOSS_NAME,
   LANDMARKS,
+  MAX_CUSTOM_BANDS,
   REMAINS_CAP,
+  SERVER_TICK_HZ,
+  SKINS,
   SPAWN_INVULN,
   START_MASS,
   type Food,
   type Snake,
+  type SnakeBox,
   type Vec,
   boostDrainOf,
   clamp,
@@ -44,9 +48,13 @@ export const CELL = 96;
 const HIT_CONTACT = 0.95;
 /** Longest view lag a player may be compensated for, in seconds. */
 const MAX_LAG_COMP = 0.35;
-/** Ticks of travel and tail history kept for rewinds (0.5 s at 40 Hz). */
-const TRAVEL_LOG = 20;
-const TAIL_HIST = 40;
+/** Ticks of travel and tail history kept for rewinds (0.5 s at the server rate). */
+const TRAVEL_LOG = Math.ceil(SERVER_TICK_HZ / 2);
+const TAIL_HIST = SERVER_TICK_HZ;
+/** Ticks between two boss hits by the same attacker (one second). */
+const BOSS_HIT_EVERY = SERVER_TICK_HZ;
+/** Ticks the boss spends heading for one landmark before moving on. */
+const BOSS_LEG_TICKS = SERVER_TICK_HZ * 45;
 /** Bots past this length boost freely, shedding what they cannot use. */
 const BOT_SOFT_CAP = 2000;
 /** Bots past this length retire soon after, turning into a big pile of remains. */
@@ -90,14 +98,36 @@ export interface PlayerInput {
 
 /** 400-unit cells used for the death heat map. */
 export const HOT_CELL = 400;
+const HOT_OFF = 64;
+const HOT_SPAN = 128;
 export function hotKey(x: number, y: number): number {
-  return (Math.floor(x / HOT_CELL) + 64) * 128 + (Math.floor(y / HOT_CELL) + 64);
+  return (Math.floor(x / HOT_CELL) + HOT_OFF) * HOT_SPAN + (Math.floor(y / HOT_CELL) + HOT_OFF);
+}
+/** The centre of the heat-map cell behind a key from `hotKey`. */
+export function hotCellCentre(key: number): Vec {
+  const gx = Math.floor(key / HOT_SPAN) - HOT_OFF;
+  const gy = (key % HOT_SPAN) - HOT_OFF;
+  return { x: (gx + 0.5) * HOT_CELL, y: (gy + 0.5) * HOT_CELL };
+}
+
+/** Total length of a point path. */
+export function pathLength(pts: Vec[]): number {
+  let len = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1]!;
+    const b = pts[i]!;
+    len += Math.hypot(a.x - b.x, a.y - b.y);
+  }
+  return len;
 }
 
 export function cellKey(x: number, y: number): number {
-  const gx = Math.floor(x / CELL) + GRID_OFF;
-  const gy = Math.floor(y / CELL) + GRID_OFF;
-  return gx * GRID_SPAN + gy;
+  return cellKeyOf(Math.floor(x / CELL), Math.floor(y / CELL));
+}
+
+/** The key of a food cell by its grid coordinates (see `cellKey`). */
+export function cellKeyOf(gx: number, gy: number): number {
+  return (gx + GRID_OFF) * GRID_SPAN + (gy + GRID_OFF);
 }
 
 /**
@@ -126,14 +156,24 @@ export class World {
   remainsMult = 1;
   hunger = 0;
   eats: EatEvent[] = [];
+  /** Events of the last step. Deaths caused between steps are surfaced by the next one. */
   deaths: DeathEvent[] = [];
   nears: NearEvent[] = [];
+  private queuedDeaths: DeathEvent[] = [];
+  private stepping = false;
   /** Snakes to check for near misses (players; bots do not earn them). */
   nearIds = new Set<string>();
   foodById = new Map<number, Food>();
   /** Coarse cells (see `hotKey`) to avoid when spawning: recent death sites. */
   hot = new Set<number>();
   private grid = new Map<number, Food[]>();
+  /**
+   * A stamp per food cell, bumped by every add, remove or move that touches
+   * it, so a client's food sync can skip cells nothing has happened in.
+   * Stamps come from one counter and are never reused.
+   */
+  private cellStamps = new Map<number, number>();
+  private foodSeq = 0;
   private foodIndex = new Map<Food, number>();
   private chasers: Food[] = [];
   private botTimer = 0;
@@ -180,7 +220,7 @@ export class World {
   ): Snake {
     this.snakes = this.snakes.filter((s) => s.id !== id);
     const s = this.makeSnake(id, name, skin, isBot);
-    if (bands && bands.length) s.bands = bands.slice(0, 6);
+    if (bands && bands.length) s.bands = bands.slice(0, MAX_CUSTOM_BANDS);
     if (mass && mass > START_MASS) {
       s.mass = mass;
       s.points = [];
@@ -193,7 +233,12 @@ export class World {
   spawnBot(used: Set<string>, grown = false): Snake {
     const name = pickBotName(used);
     used.add(name.toLowerCase());
-    const s = this.makeSnake(`b${this.nextBotId++}`, name, (Math.random() * 16) | 0, true);
+    const s = this.makeSnake(
+      `b${this.nextBotId++}`,
+      name,
+      (Math.random() * SKINS.length) | 0,
+      true,
+    );
     s.mass = START_MASS + Math.random() * 20;
     if (grown) {
       const roll = Math.random();
@@ -213,7 +258,7 @@ export class World {
     const s: Snake = {
       id,
       name,
-      skin: skin % 16,
+      skin: skin % SKINS.length,
       x: pos.x,
       y: pos.y,
       angle,
@@ -237,12 +282,13 @@ export class World {
   }
 
   removeSnake(id: string, drop = false): void {
+    this.inputs.delete(id);
+    this.lags.delete(id);
+    this.nearIds.delete(id);
     const s = this.snakes.find((x) => x.id === id);
     if (!s) return;
     if (drop && s.alive) this.kill(s, "snake", null, null);
     this.snakes = this.snakes.filter((x) => x.id !== id);
-    this.inputs.delete(id);
-    this.lags.delete(id);
   }
 
   upsertRemote(s: Snake): void {
@@ -259,12 +305,26 @@ export class World {
     this.foodById.set(f.id, f);
     this.foodIndex.set(f, this.foods.length);
     this.foods.push(f);
-    const key = cellKey(f.x, f.y);
+    this.bucket(f, cellKey(f.x, f.y));
+    if (f.k === 3) this.chasers.push(f);
+    return f;
+  }
+
+  private bucket(f: Food, key: number): void {
     const bucket = this.grid.get(key);
     if (bucket) bucket.push(f);
     else this.grid.set(key, [f]);
-    if (f.k === 3) this.chasers.push(f);
-    return f;
+    this.cellStamps.set(key, ++this.foodSeq);
+  }
+
+  /** The stamp of a food cell: equal stamps mean the cell's orbs are unchanged. */
+  foodCellStamp(key: number): number {
+    return this.cellStamps.get(key) ?? 0;
+  }
+
+  /** The orbs in one cell, if any. */
+  foodsInCell(key: number): readonly Food[] | undefined {
+    return this.grid.get(key);
   }
 
   removeFood(f: Food): void {
@@ -290,6 +350,7 @@ export class World {
   }
 
   clearFood(): void {
+    for (const key of this.grid.keys()) this.cellStamps.set(key, ++this.foodSeq);
     this.foods = [];
     this.foodById.clear();
     this.foodIndex.clear();
@@ -307,6 +368,7 @@ export class World {
       bucket.pop();
     }
     if (!bucket.length) this.grid.delete(key);
+    this.cellStamps.set(key, ++this.foodSeq);
   }
 
   moveFood(f: Food, x: number, y: number): void {
@@ -320,9 +382,7 @@ export class World {
     this.unbucket(f);
     f.x = x;
     f.y = y;
-    const bucket = this.grid.get(after);
-    if (bucket) bucket.push(f);
-    else this.grid.set(after, [f]);
+    this.bucket(f, after);
   }
 
   /** Visit every orb whose cell overlaps the rectangle. */
@@ -381,9 +441,21 @@ export class World {
   // ── simulation ─────────────────────────────────────────────────────────────
 
   step(dt: number, aimX: number, aimY: number, wantBoost: boolean): void {
-    this.deaths = [];
+    // Deaths caused since the last step (a disconnect timer, the boss clock)
+    // belong to this one, so the server broadcasts and books them like any other.
+    this.deaths = this.queuedDeaths;
+    this.queuedDeaths = [];
     this.eats = [];
     this.nears = [];
+    this.stepping = true;
+    try {
+      this.advanceAll(dt, aimX, aimY, wantBoost);
+    } finally {
+      this.stepping = false;
+    }
+  }
+
+  private advanceAll(dt: number, aimX: number, aimY: number, wantBoost: boolean): void {
     this.maintainFood();
     this.maintainBots(dt);
 
@@ -405,12 +477,49 @@ export class World {
       }
     }
 
+    this.refreshBoxes();
     this.magnet(dt);
     this.moveChasers(dt);
     this.resolveEats();
     this.resolveKills();
     this.resolveNearMisses();
     this.cullDead();
+  }
+
+  /**
+   * Derived geometry and a bounding box per live snake, once per step. The
+   * pair loops below test a head against the box before walking a body, and
+   * read radius and length from here instead of calling `scaleOf` per pair.
+   */
+  private refreshBoxes(): void {
+    for (const s of this.snakes) {
+      if (!s.alive) continue;
+      const b = (s.box ??= { r: 0, len: 0, boostSpeed: 0, minX: 0, minY: 0, maxX: 0, maxY: 0 });
+      b.r = radiusOf(s.mass);
+      b.len = lengthOf(s.mass);
+      b.boostSpeed = speedOf(s.mass, true);
+      let minX = s.x;
+      let maxX = s.x;
+      let minY = s.y;
+      let maxY = s.y;
+      const pts = s.points;
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i]!;
+        if (p.x < minX) minX = p.x;
+        else if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        else if (p.y > maxY) maxY = p.y;
+      }
+      b.minX = minX;
+      b.maxX = maxX;
+      b.minY = minY;
+      b.maxY = maxY;
+    }
+  }
+
+  /** Is the point within `pad` of the box (the body it encloses can be that close)? */
+  private static nearBox(b: SnakeBox, x: number, y: number, pad: number): boolean {
+    return x >= b.minX - pad && x <= b.maxX + pad && y >= b.minY - pad && y <= b.maxY + pad;
   }
 
   /**
@@ -422,14 +531,12 @@ export class World {
     if (!this.nearIds.size) return;
     const now = performance.now();
     for (const s of this.snakes) {
-      if (!s.alive || s.invuln > 0 || !this.nearIds.has(s.id)) continue;
-      const hr = radiusOf(s.mass);
+      if (!s.alive || s.invuln > 0 || !this.nearIds.has(s.id) || !s.box) continue;
+      const hr = s.box.r;
       for (const o of this.snakes) {
-        if (o.id === s.id || !o.alive || o.invuln > 0 || o.mass < 30) continue;
-        const orad = radiusOf(o.mass);
-        const nearR = (hr + orad) * NEAR_FACTOR;
-        const reach = lengthOf(o.mass) + nearR + 24;
-        if (dist2(s.x, s.y, o.x, o.y) > reach * reach) continue;
+        if (o.id === s.id || !o.alive || o.invuln > 0 || o.mass < 30 || !o.box) continue;
+        const nearR = (hr + o.box.r) * NEAR_FACTOR;
+        if (!World.nearBox(o.box, s.x, s.y, nearR)) continue;
         const last = s.nearMark?.get(o.id);
         if (last !== undefined && now - last < NEAR_COOLDOWN * 1000) continue;
         const pts = o.points;
@@ -544,20 +651,53 @@ export class World {
    */
   recordTrail(s: Snake): void {
     const pts = s.points;
-    const head = pts[pts.length - 1];
+    const c = this.pathOf(s);
+    let head = pts[pts.length - 1];
     const anchor = pts[pts.length - 2];
     if (!head || !anchor) {
       pts.push({ x: s.x, y: s.y });
+      c.n = pts.length;
+      c.len = pathLength(pts);
     } else {
+      // Committed points sit exactly one spacing apart along the line the
+      // head travelled, however far it moved this tick. (Fixing the old
+      // head where it was a tick earlier made segments alternate long and
+      // short, so slow big snakes carried far more points than their length
+      // allowed and were cut short by the point cap.)
       const sp = spacingOf(s.mass);
-      if (dist2(s.x, s.y, anchor.x, anchor.y) >= sp * sp) {
-        pts.push({ x: s.x, y: s.y });
-      } else {
-        head.x = s.x;
-        head.y = s.y;
+      const prevLast = Math.hypot(head.x - anchor.x, head.y - anchor.y);
+      let ax = anchor.x;
+      let ay = anchor.y;
+      let d = Math.hypot(s.x - ax, s.y - ay);
+      let committed = 0;
+      while (d >= sp) {
+        const t = sp / d;
+        ax += (s.x - ax) * t;
+        ay += (s.y - ay) * t;
+        head.x = ax;
+        head.y = ay;
+        head = { x: s.x, y: s.y };
+        pts.push(head);
+        committed++;
+        d -= sp;
       }
+      head.x = s.x;
+      head.y = s.y;
+      c.len += committed * sp + d - prevLast;
+      c.n = pts.length;
     }
     this.trimBody(s);
+  }
+
+  /** The running path length for a snake, rebuilt when its points were replaced or edited elsewhere. */
+  private pathOf(s: Snake): { pts: Vec[]; n: number; len: number } {
+    const pts = s.points;
+    let c = s.path;
+    if (!c || c.pts !== pts || c.n !== pts.length) {
+      c = { pts, n: pts.length, len: pathLength(pts) };
+      s.path = c;
+    }
+    return c;
   }
 
   /** Move the head forward one tick without any rules (client prediction). */
@@ -618,32 +758,50 @@ export class World {
     }
   }
 
+  /**
+   * Cut the tail so the body is `lengthOf(mass)` long: whole tail points go
+   * while the rest still reaches that length, then the last one is slid
+   * along its segment to land exactly. Runs from the running path length, so
+   * a body that only moved costs a couple of segment measurements.
+   */
   trimBody(s: Snake): void {
     const want = lengthOf(s.mass);
     const pts = s.points;
     if (pts.length < 2) return;
-    let total = 0;
-    for (let i = pts.length - 1; i > 0; i--) {
-      const a = pts[i]!;
-      const b = pts[i - 1]!;
-      const d = Math.hypot(a.x - b.x, a.y - b.y);
-      if (total + d >= want) {
-        const t = clamp((want - total) / Math.max(d, 1e-6), 0, 1);
-        // Keep what the tail is about to lose: a rewind may need it.
-        if (i - 1 > 0) {
-          const hist = (s.tailHist ??= []);
-          for (let j = 0; j < i - 1; j++) hist.push(pts[j]!);
-          if (hist.length > TAIL_HIST) hist.splice(0, hist.length - TAIL_HIST);
-          pts.splice(0, i - 1);
-        }
-        b.x = a.x + (b.x - a.x) * t;
-        b.y = a.y + (b.y - a.y) * t;
-        break;
-      }
-      total += d;
+    const c = this.pathOf(s);
+    let drop = 0;
+    while (pts.length - drop > 2) {
+      const a = pts[drop]!;
+      const b = pts[drop + 1]!;
+      const seg = Math.hypot(a.x - b.x, a.y - b.y);
+      if (c.len - seg < want) break;
+      c.len -= seg;
+      drop++;
+    }
+    if (drop > 0) {
+      // Keep what the tail is about to lose: a rewind may need it.
+      const hist = (s.tailHist ??= []);
+      for (let j = 0; j < drop; j++) hist.push(pts[j]!);
+      if (hist.length > TAIL_HIST) hist.splice(0, hist.length - TAIL_HIST);
+      pts.splice(0, drop);
+      c.n = pts.length;
+    }
+    const excess = c.len - want;
+    if (excess > 0) {
+      const a = pts[0]!;
+      const b = pts[1]!;
+      const seg = Math.hypot(a.x - b.x, a.y - b.y);
+      const t = clamp(excess / Math.max(seg, 1e-6), 0, 1);
+      a.x += (b.x - a.x) * t;
+      a.y += (b.y - a.y) * t;
+      c.len = want;
     }
     const cap = maxPointsOf(s.mass) + 40;
-    if (pts.length > cap) pts.splice(0, pts.length - cap);
+    if (pts.length > cap) {
+      pts.splice(0, pts.length - cap);
+      c.n = pts.length;
+      c.len = pathLength(pts);
+    }
   }
 
   // ── bots ───────────────────────────────────────────────────────────────────
@@ -656,9 +814,15 @@ export class World {
     let best = Math.min(cap, ARENA_RADIUS - Math.hypot(px, py) - radiusOf(self.mass));
     for (const o of this.snakes) {
       if (o === self || !o.alive) continue;
-      const orad = radiusOf(o.mass);
-      const reach = cap + lengthOf(o.mass) + orad;
-      if (dist2(px, py, o.x, o.y) > reach * reach) continue;
+      // Boxes are from the last step; a body moves under 30 units in one.
+      const box = o.box;
+      const orad = box ? box.r : radiusOf(o.mass);
+      if (box) {
+        if (!World.nearBox(box, px, py, cap + orad + 30)) continue;
+      } else {
+        const reach = cap + lengthOf(o.mass) + orad;
+        if (dist2(px, py, o.x, o.y) > reach * reach) continue;
+      }
       const pts = o.points;
       const stride = Math.max(1, Math.ceil(pts.length / 48));
       for (let i = 0; i < pts.length; i += stride) {
@@ -700,7 +864,7 @@ export class World {
     s.avoid -= dt;
     if (s.think <= 0) {
       s.think = 0.5;
-      const idx = Math.floor(this.tickN / (40 * 45)) % LANDMARKS.length;
+      const idx = Math.floor(this.tickN / BOSS_LEG_TICKS) % LANDMARKS.length;
       const t = LANDMARKS[idx]!;
       const d = Math.hypot(t.x - s.x, t.y - s.y);
       s.wander =
@@ -965,30 +1129,6 @@ export class World {
     }
   }
 
-  /** Would this head, where it is now, be touching any other snake? */
-  wouldCollide(s: Snake): boolean {
-    if (s.invuln > 0) return false;
-    const hr = radiusOf(s.mass);
-    for (const o of this.snakes) {
-      if (o.id === s.id || !o.alive || o.invuln > 0) continue;
-      const orad = radiusOf(o.mass);
-      const hitR = (hr + orad) * HIT_CONTACT;
-      const hitR2 = hitR * hitR;
-      const reach = lengthOf(o.mass) + hitR + 24;
-      if (dist2(s.x, s.y, o.x, o.y) > reach * reach) continue;
-      if (dist2(s.x, s.y, o.x, o.y) <= hitR2) return true;
-      const pts = o.points;
-      for (let i = 1; i < pts.length; i++) {
-        const a = pts[i - 1]!;
-        const b = pts[i]!;
-        if (Math.abs(a.x - s.x) > hitR && Math.abs(b.x - s.x) > hitR) continue;
-        if (Math.abs(a.y - s.y) > hitR && Math.abs(b.y - s.y) > hitR) continue;
-        if (pointSegDist2(s.x, s.y, a.x, a.y, b.x, b.y) <= hitR2) return true;
-      }
-    }
-    return false;
-  }
-
   /**
    * Where a snake's head was `lag` seconds ago and how much of its body
    * existed then: the head is walked back along the body by the distance it
@@ -999,7 +1139,7 @@ export class World {
     const pts = o.points;
     // Distance actually travelled over the lag window, from the tick log;
     // fall back to nominal speed if the log is short.
-    const ticks = Math.round(lag * 40);
+    const ticks = Math.round(lag * SERVER_TICK_HZ);
     let d = 0;
     const log = o.travel ?? [];
     if (log.length >= ticks) {
@@ -1057,89 +1197,81 @@ export class World {
   }
 
   private resolveKills(): void {
-    // Judge every head against the state at the start of the tick, so a
-    // head-on collision kills both snakes instead of only the one processed
-    // first.
-    const alive = new Set<string>();
-    for (const s of this.snakes) if (s.alive) alive.add(s.id);
+    // Every head is judged against the state at the start of the tick: the
+    // kills are collected here and applied after both loops, so a head-on
+    // collision kills both snakes instead of only the one processed first.
     const kills: { s: Snake; o: Snake }[] = [];
     this.tickN++;
     const hits: { s: Snake; o: Snake }[] = [];
-    // Touching the boss's body is a cut, not a death; its head still kills.
-    const contact = (s: Snake, o: Snake, headOn: boolean): void => {
-      if (o.boss && !headOn) hits.push({ s, o });
-      else kills.push({ s, o });
-    };
     for (const s of this.snakes) {
-      if (!s.alive || s.invuln > 0) continue;
+      if (!s.alive || s.invuln > 0 || !s.box) continue;
       if (!this.owned(s)) continue;
-      const hr = radiusOf(s.mass);
+      const hr = s.box.r;
       const lag = Math.min(MAX_LAG_COMP, this.lags.get(s.id) ?? 0);
       for (const o of this.snakes) {
         // Spawn protection works both ways: a fresh snake neither dies nor
         // kills, so nobody can be farmed by (or farm) a respawn.
-        if (o.id === s.id || !alive.has(o.id) || o.invuln > 0) continue;
-        const orad = radiusOf(o.mass);
+        if (o === s || !o.alive || o.invuln > 0 || !o.box) continue;
         // Death on visual contact, as in slither.io: the drawn discs have
         // radius r, so the sum of radii is where they touch.
-        const hitR = (hr + orad) * HIT_CONTACT;
-        const hitR2 = hitR * hitR;
-        const reach = lengthOf(o.mass) + hitR + 24;
-        if (dist2(s.x, s.y, o.x, o.y) > reach * reach) continue;
-        // Lag compensation: the other snake as this player last saw it.
-        const rw =
-          lag > 0 ? this.rewind(o, lag) : { cut: o.points.length - 1, hx: o.x, hy: o.y, d: 0 };
-        // Head on head: both lose.
-        if (dist2(s.x, s.y, rw.hx, rw.hy) <= hitR2) {
-          contact(s, o, true);
-          break;
+        const hitR = (hr + o.box.r) * HIT_CONTACT;
+        // The body as this player saw it may trail the current one by what
+        // it travelled in the lag window, so the box is padded by that much.
+        if (!World.nearBox(o.box, s.x, s.y, hitR + lag * o.box.boostSpeed)) continue;
+        const headOn = this.touches(s, o, hitR, lag);
+        if (headOn === null) continue;
+        // Touching the boss's body is a cut, not a death; its head still kills.
+        if (o.boss && !headOn) {
+          hits.push({ s, o });
+          continue;
         }
-        const pts = o.points;
-        if (pts.length < 2) continue;
-        const minX = s.x - hitR;
-        const maxX = s.x + hitR;
-        const minY = s.y - hitR;
-        const maxY = s.y + hitR;
-        const end = Math.min(pts.length - 1, rw.cut);
-        for (let i = 1; i <= end; i++) {
-          const a = pts[i - 1]!;
-          const b = pts[i]!;
-          if ((a.x < minX && b.x < minX) || (a.x > maxX && b.x > maxX)) continue;
-          if ((a.y < minY && b.y < minY) || (a.y > maxY && b.y > maxY)) continue;
-          if (pointSegDist2(s.x, s.y, a.x, a.y, b.x, b.y) <= hitR2) {
-            contact(s, o, false);
-            break;
-          }
-        }
-        if (kills.length && kills[kills.length - 1]!.s === s) break;
-        // The partial segment between the last kept point and the rewound head.
-        if (end < pts.length - 1) {
-          const a = pts[end]!;
-          if (pointSegDist2(s.x, s.y, a.x, a.y, rw.hx, rw.hy) <= hitR2) {
-            contact(s, o, false);
-            break;
-          }
-        }
-        // And the stretch of tail that still existed then.
-        if (rw.d > 0) {
-          let prev: Vec = pts[0]!;
-          let hit = false;
-          for (const q of this.tailThen(o, rw.d)) {
-            if (pointSegDist2(s.x, s.y, prev.x, prev.y, q.x, q.y) <= hitR2) {
-              hit = true;
-              break;
-            }
-            prev = q;
-          }
-          if (hit) {
-            contact(s, o, false);
-            break;
-          }
-        }
+        kills.push({ s, o });
+        break;
       }
     }
     for (const k of kills) this.kill(k.s, "snake", k.o.id, k.o.name);
     for (const h of hits) this.bossHit(h.s, h.o);
+  }
+
+  /**
+   * Does head `s` touch snake `o` as `s`'s player saw it `lag` seconds ago?
+   * Returns true for a head-on contact, false for a body contact, and null
+   * for no contact.
+   */
+  private touches(s: Snake, o: Snake, hitR: number, lag: number): boolean | null {
+    const hitR2 = hitR * hitR;
+    // Lag compensation: the other snake as this player last saw it.
+    const rw = lag > 0 ? this.rewind(o, lag) : { cut: o.points.length - 1, hx: o.x, hy: o.y, d: 0 };
+    // Head on head: both lose.
+    if (dist2(s.x, s.y, rw.hx, rw.hy) <= hitR2) return true;
+    const pts = o.points;
+    if (pts.length < 2) return null;
+    const minX = s.x - hitR;
+    const maxX = s.x + hitR;
+    const minY = s.y - hitR;
+    const maxY = s.y + hitR;
+    const end = Math.min(pts.length - 1, rw.cut);
+    for (let i = 1; i <= end; i++) {
+      const a = pts[i - 1]!;
+      const b = pts[i]!;
+      if ((a.x < minX && b.x < minX) || (a.x > maxX && b.x > maxX)) continue;
+      if ((a.y < minY && b.y < minY) || (a.y > maxY && b.y > maxY)) continue;
+      if (pointSegDist2(s.x, s.y, a.x, a.y, b.x, b.y) <= hitR2) return false;
+    }
+    // The partial segment between the last kept point and the rewound head.
+    if (end < pts.length - 1) {
+      const a = pts[end]!;
+      if (pointSegDist2(s.x, s.y, a.x, a.y, rw.hx, rw.hy) <= hitR2) return false;
+    }
+    // And the stretch of tail that still existed then.
+    if (rw.d > 0) {
+      let prev: Vec = pts[0]!;
+      for (const q of this.tailThen(o, rw.d)) {
+        if (pointSegDist2(s.x, s.y, prev.x, prev.y, q.x, q.y) <= hitR2) return false;
+        prev = q;
+      }
+    }
+    return null;
   }
 
   /**
@@ -1151,7 +1283,7 @@ export class World {
     if (!o.alive || s.isBot) return;
     const marks = (o.bossHitAt ??= new Map());
     const last = marks.get(s.id);
-    if (last !== undefined && this.tickN - last < 40) return;
+    if (last !== undefined && this.tickN - last < BOSS_HIT_EVERY) return;
     marks.set(s.id, this.tickN);
     o.hp = Math.max(0, (o.hp ?? 1) - 1);
     s.mass += BOSS_HIT_MASS;
@@ -1186,7 +1318,9 @@ export class World {
       const k = this.snakes.find((x) => x.id === killerId);
       if (k && k.alive) k.kills++;
     }
-    this.deaths.push({ snake: s, reason, killerId, killerName, pellets });
+    const event: DeathEvent = { snake: s, reason, killerId, killerName, pellets };
+    if (this.stepping) this.deaths.push(event);
+    else this.queuedDeaths.push(event);
     this.lags.delete(s.id);
   }
 
@@ -1197,7 +1331,7 @@ export class World {
   }
 
   private cullDead(): void {
-    this.snakes = this.snakes.filter((s) => s.alive);
+    if (this.snakes.some((s) => !s.alive)) this.snakes = this.snakes.filter((s) => s.alive);
   }
 
   private maintainBots(dt: number): void {
