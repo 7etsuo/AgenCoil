@@ -74,6 +74,7 @@ import { playGateFromEnv } from "./play-gate";
 import { cleanHandle, identityGateFromEnv, type Identity } from "./identity";
 import { lifeFeats } from "../../src/game/achievements";
 import { ArenaHost } from "./arena-host";
+import { EventLog } from "./events";
 
 interface View {
   cx: number;
@@ -131,6 +132,9 @@ interface Client {
   fp: { lastAt: number; lastAngle: number; n: number; sumDt: number; sumDt2: number; same: number };
   lastPing: number;
   alive: boolean;
+  /** For the session event: when the socket opened and how many lives it played. */
+  connectedAt: number;
+  lives: number;
   /** A successful Turnstile redemption authorizes respawns until this time. */
   verifiedUntil: number;
   /** The linked account behind this socket, once a ticket has been redeemed. */
@@ -284,6 +288,8 @@ export class GameServer {
   private readonly daily = new DailyBoard();
   private readonly profiles = new ProfileStore();
   private readonly host = new ArenaHost(this.profiles.db, process.env);
+  /** What players do, for the metrics readout; nothing is kept without a database. */
+  private readonly events = new EventLog(this.profiles.db, this.instance);
   private readonly parties = new Map<string, Set<string>>();
   private bountyOf = new Map<string, number>();
   private event: { x: number; y: number; until: number } | null = null;
@@ -354,6 +360,25 @@ export class GameServer {
         res.statusCode = 503;
         res.end(JSON.stringify({ ok: false, error: (e as Error).message }));
       }
+      return;
+    }
+    const metricsDays = url.searchParams.get("metrics");
+    if (metricsDays !== null) {
+      const secret = process.env.GAME_SECRET ?? "";
+      if (!secret || req.headers["x-game-secret"] !== secret) {
+        res.statusCode = 403;
+        res.end(JSON.stringify({ ok: false }));
+        return;
+      }
+      res.setHeader("cache-control", "no-store");
+      const days = Math.min(90, Math.max(1, Math.floor(Number(metricsDays)) || 7));
+      const m = await this.events.metrics(days);
+      if (!m) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ ok: false, error: "no database" }));
+        return;
+      }
+      res.end(JSON.stringify({ ok: true, ...m }));
       return;
     }
     if (path === "/api/drain") {
@@ -456,6 +481,11 @@ export class GameServer {
       playGate: this.playGate.enabled,
       hot: this.hotSpots(12),
       daily: this.daily.top(3),
+      events: {
+        enabled: this.events.enabled,
+        buffered: this.events.buffered,
+        dropped: this.events.dropped,
+      },
     };
   }
 
@@ -656,6 +686,8 @@ export class GameServer {
       bossHits: 0,
       fp: { lastAt: 0, lastAngle: 0, n: 0, sumDt: 0, sumDt2: 0, same: 0 },
       lastPing: Date.now(),
+      connectedAt: now,
+      lives: 0,
       alive: true,
       verifiedUntil: 0,
       account: null,
@@ -686,6 +718,12 @@ export class GameServer {
     if (n <= 0) this.connsByIp.delete(client.ip);
     else this.connsByIp.set(client.ip, n);
     this.lastActivity = Date.now();
+    if (client.key)
+      this.events.log("session_end", {
+        key: client.key,
+        n: Math.round((Date.now() - client.connectedAt) / 1000),
+        meta: { lives: client.lives },
+      });
     const sid = client.sid;
     client.sid = null;
     if (!sid) return;
@@ -796,6 +834,7 @@ export class GameServer {
           if (!client.alive) return;
           client.key = client.profile.key;
           client.name = `@${client.profile.handle}`;
+          this.events.log("feature", { key: client.key, s: "link" });
           if (this.profiles.award(client.profile, "linked")) this.achieve(client, "linked");
         }
       }
@@ -834,6 +873,7 @@ export class GameServer {
     const token = resume ? this.redeemToken(tokenText) : null;
     const now = Date.now();
     let snake: Snake | null = null;
+    let spawnKind = "fresh";
     if (token) {
       const held = this.world.snakes.find((s) => s.id === token.sid && s.alive);
       const timer = this.grace.get(token.sid);
@@ -844,6 +884,7 @@ export class GameServer {
         // second copy being built.
         if (timer) clearTimeout(timer);
         this.grace.delete(token.sid);
+        spawnKind = "resume";
         if (owner && owner !== client) {
           owner.sid = null;
           owner.known.clear();
@@ -854,6 +895,7 @@ export class GameServer {
       } else {
         // The snake lived on another instance (or was lost): rebuild it with
         // the same length near where it was.
+        spawnKind = "rebuild";
         const at = this.world.safeSpawnNear({ x: token.x, y: token.y });
         snake = this.world.spawnSnake(
           this.newSid(),
@@ -883,6 +925,8 @@ export class GameServer {
       ) {
         mass = Math.max(START_MASS + 1, Math.floor(client.deathMass * COMEBACK_KEEP));
         client.comebackUsed = true;
+        spawnKind = "comeback";
+        this.events.log("feature", { key: client.key, s: "comeback", n: mass });
         if (client.profile && this.profiles.award(client.profile, "comeback"))
           this.achieve(client, "comeback");
       }
@@ -908,8 +952,10 @@ export class GameServer {
       const rival = nearNid
         ? this.world.snakes.find((s) => s.alive && s.id !== selfId && this.nidOf(s.id) === nearNid)
         : undefined;
-      if (rival) this.spawnNearSnake(snake, rival);
-      else if (client.rough >= 2) {
+      if (rival) {
+        this.spawnNearSnake(snake, rival);
+        spawnKind = "rematch";
+      } else if (client.rough >= 2) {
         // Two quick deaths in a row: the quiet corner and a helper again.
         this.spawnQuiet(snake);
         this.spawnHelperBot(snake);
@@ -972,6 +1018,13 @@ export class GameServer {
         .finish(),
     );
     this.sendToken(client);
+    client.lives++;
+    this.events.log("spawn", {
+      key: client.key,
+      s: spawnKind,
+      n: Math.round(snake.mass),
+      meta: { party: Boolean(client.party), rookie: Boolean(snake.rookie) },
+    });
     if (client.v2) {
       void this.sendProfile(client);
       if (this.event && this.event.until > Date.now()) this.sendEvent(client);
@@ -987,6 +1040,7 @@ export class GameServer {
       .slice(0, 4);
     if (tag && (tag.length < 2 || !cleanName(tag))) return;
     this.profiles.setCrew(client.profile, tag);
+    this.events.log("feature", { key: client.key, s: tag ? "crew" : "crew_leave" });
     void this.sendProfile(client);
   }
 
@@ -996,6 +1050,7 @@ export class GameServer {
     const now = Date.now();
     if (now - client.lastEmote < 1500) return;
     client.lastEmote = now;
+    this.events.log("feature", { key: client.key, s: "emote", n: id });
     const msg = new Writer().u8(S2C.EMOTE).u16(this.nidOf(client.sid)).u8(id).finish();
     for (const c of this.clients)
       if (c.v2 && (c.known.has(client.sid) || c === client)) c.ws.send(msg);
@@ -1013,6 +1068,7 @@ export class GameServer {
     client.key = key;
     if (!client.profile) client.profile = await this.profiles.load(key, name);
     if (!client.alive) return;
+    this.events.log("session_start", { key, meta: { proto: client.proto } });
     void this.sendProfile(client);
     if (this.event && this.event.until > Date.now()) this.sendEvent(client);
   }
@@ -1163,6 +1219,7 @@ export class GameServer {
     const w = c.wisp;
     if (!w) return;
     c.wispBank = Math.min(WISP_BANK_MAX, Math.round(w.bank));
+    this.events.log("feature", { key: c.key, s: "wisp", n: c.wispBank });
     this.sendWisp(c, 0);
     c.wisp = null;
   }
@@ -1228,6 +1285,7 @@ export class GameServer {
       const c = this.clientBySid(h.attacker);
       if (!c) continue;
       c.bossHits++;
+      this.events.log("feature", { key: c.key, s: h.killed ? "boss_kill" : "boss_hit" });
       if (!h.killed) continue;
       // The final cut wears the crown until the next boss; everyone who hit it gets a chest.
       if (c.profile) {
@@ -1241,6 +1299,7 @@ export class GameServer {
         this.notice(o, 0, `${c.name} landed the final cut on ${BOSS_NAME} and wears the crown`);
         if (o.bossHits > 0 && o.profile) {
           this.notice(o, 2, this.profiles.openChest(o.profile));
+          this.events.log("feature", { key: o.key, s: "chest" });
           void this.sendProfile(o);
         }
         o.bossHits = 0;
@@ -1264,6 +1323,7 @@ export class GameServer {
 
   /** Tell a v2 client it just earned an achievement. */
   private achieve(client: Client, id: string): void {
+    this.events.log("achievement", { key: client.key, s: id });
     if (!client.v2 || !client.alive) return;
     client.ws.send(new Writer().u8(S2C.ACHIEVE).str(id).finish());
   }
@@ -1581,11 +1641,38 @@ export class GameServer {
         .finish();
       const bounty = this.bountyOf.get(s.id) ?? 0;
       const killerClient = d.killerId ? this.clientBySid(d.killerId) : null;
+      const owner = this.clientBySid(s.id);
+      const life = owner?.life ?? null;
       for (const c of this.clients) {
         if (c.known.has(s.id) || c.sid === s.id || (d.killerId && c.sid === d.killerId))
           c.ws.send(msg);
         c.known.delete(s.id);
         if (c.sid === s.id) this.endLife(c, s);
+      }
+      if (!s.isBot) {
+        // Cause: the rim, another player, a bot (the boss counts as one), or
+        // nobody at all, which is a snake dropped after its socket left.
+        const cause =
+          d.reason === "wall"
+            ? "wall"
+            : !d.killerId
+              ? "left"
+              : d.killerId.startsWith("p")
+                ? "player"
+                : "bot";
+        this.events.log("death", {
+          key: owner?.key ?? "",
+          s: cause,
+          n: Math.floor(s.mass),
+          meta: life
+            ? {
+                survive: Math.round((Date.now() - life.startAt) / 1000),
+                kills: s.kills,
+                near: life.near,
+                boosted: life.boosted,
+              }
+            : { kills: s.kills },
+        });
       }
       // A snake killed after its socket went away has no client to end its
       // life, so the per-snake sets are cleared here as well.
@@ -1657,7 +1744,10 @@ export class GameServer {
       { x: s.x, y: s.y },
     );
     for (const ch of completed) this.notice(c, 2, `quest step done: ${ch.text}`);
-    if (chest) this.notice(c, 2, this.profiles.openChest(c.profile));
+    if (chest) {
+      this.notice(c, 2, this.profiles.openChest(c.profile));
+      this.events.log("feature", { key: c.key, s: "chest" });
+    }
     for (const m of milestones) this.notice(c, 2, `streak milestone: ${m} unlocked`);
     if (freezeEarned)
       this.notice(c, 0, "streak freeze banked: one missed day will not break your streak");
