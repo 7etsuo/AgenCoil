@@ -499,6 +499,19 @@ export class GameServer {
       ws.close(1008, "too many connections");
       return;
     }
+    // The coordinator function never hosts a game while it knows a live
+    // arena: a socket landing here skipped or lost the lookup and would be
+    // alone on this instance. FULL with a one second retry makes the client
+    // ask the coordinator again. With nothing known yet, warm the caches for
+    // the next socket and host this one.
+    if (this.host.enabled) {
+      if (this.host.knownArena()) {
+        ws.send(new Writer().u8(S2C.FULL).u16(1).finish());
+        ws.close(1013, "join the arena");
+        return;
+      }
+      void this.host.resolve("").catch(() => undefined);
+    }
     // A full instance turns newcomers away with a retry hint; on a platform
     // that scales instances by concurrency the retry lands elsewhere.
     if (this.draining) {

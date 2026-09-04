@@ -98,6 +98,8 @@ export interface HudState {
   killerName: string | null;
   players: number;
   mode: NetState;
+  /** The server process this session is on (arena name, or the function's deployment id). */
+  arena: string;
   rtt: number;
   verificationError: string | null;
 }
@@ -628,6 +630,7 @@ export class CoilEngine {
       killerName: this.killerName,
       players: this.stats?.clients ?? (this.online ? 1 : 0),
       mode: this.net?.state ?? "offline",
+      arena: this.net?.arenaName ?? "",
       rtt: this.net?.rttMs ?? 0,
       verificationError: this.verificationError,
     };

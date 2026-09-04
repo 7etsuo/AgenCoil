@@ -58,6 +58,8 @@ export class ArenaHost {
   readonly enabled: boolean;
   private readonly health = new Map<string, ArenaHealth>();
   private lastTick = 0;
+  /** Rows from the last database read, for synchronous checks. */
+  private lastRows: ArenaRow[] = [];
   private ready: Promise<void> | null = null;
 
   constructor(
@@ -180,13 +182,30 @@ export class ArenaHost {
       `SELECT name, domain, created_at, expires_at, build FROM agencoil_arena WHERE expires_at > $1 ORDER BY created_at ASC`,
       [Date.now()],
     );
-    return res.rows.map((r) => ({
+    this.lastRows = res.rows.map((r) => ({
       name: r.name,
       domain: r.domain,
       createdAt: Number(r.created_at),
       expiresAt: Number(r.expires_at),
       build: r.build ?? "",
     }));
+    return this.lastRows;
+  }
+
+  /**
+   * An arena this instance recently saw healthy with room, without any I/O.
+   * Null when nothing is known yet, in which case the function may host.
+   */
+  knownArena(): ArenaRow | null {
+    if (!this.enabled) return null;
+    const now = Date.now();
+    const live: (ArenaRow & { health: ArenaHealth })[] = [];
+    for (const r of this.lastRows) {
+      const h = this.health.get(r.name);
+      if (r.expiresAt > now && h && h.ok && now - h.at < HEALTH_TTL_MS * 6)
+        live.push({ ...r, health: h });
+    }
+    return pickArena(live, null);
   }
 
   private async liveArenas(): Promise<(ArenaRow & { health: ArenaHealth })[]> {
@@ -314,7 +333,7 @@ export class ArenaHost {
 
 async function probe(domain: string): Promise<ArenaHealth> {
   try {
-    const res = await fetch(`${domain}/api/ws`, { signal: AbortSignal.timeout(2500) });
+    const res = await fetch(`${domain}/api/ws`, { signal: AbortSignal.timeout(1500) });
     if (!res.ok) return { ok: false, players: 0, at: Date.now() };
     const j = (await res.json()) as { ok?: boolean; players?: number; draining?: boolean };
     return { ok: Boolean(j.ok) && !j.draining, players: Number(j.players) || 0, at: Date.now() };

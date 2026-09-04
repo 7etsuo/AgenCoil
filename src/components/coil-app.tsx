@@ -44,6 +44,14 @@ import {
   type Totals,
 } from "@/game/achievements";
 
+/** A short tag for the process a session is on, so friends can see they share one. */
+function arenaLabel(name: string): string {
+  if (!name) return "";
+  if (name.startsWith("snek-arena-")) return ` · arena ${name.slice(-5)}`;
+  if (name.startsWith("dpl_")) return " · fallback server";
+  return ` · ${name.slice(-8)}`;
+}
+
 /** Lifetime totals from the profile the server streams, for achievement progress. */
 function totalsOf(p: NonNullable<HudState["profile"]>): Totals {
   return {
@@ -523,7 +531,7 @@ export function CoilApp() {
   const boostOff = () => engineRef.current?.setBoost(false);
   const modeLabel =
     hud?.mode === "online"
-      ? `${hud.count} in the arena · ${hud.players} online`
+      ? `${hud.count} in the arena · ${hud.players} online${arenaLabel(hud.arena)}`
       : hud?.mode === "connecting"
         ? "connecting"
         : "offline · practice arena";

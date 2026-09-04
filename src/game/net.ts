@@ -149,6 +149,9 @@ const INPUT_HZ = 30;
 /** A predicted eat the server has not confirmed by then is put back. */
 const EAT_CONFIRM_MS = 700;
 const OFFLINE_AFTER_MS = 6000;
+/** One coordinator lookup may take this long, and lookups are retried within the budget. */
+const LOOKUP_TIMEOUT_MS = 6000;
+const LOOKUP_BUDGET_MS = 12_000;
 const SNAP_CORRECT_DIST = 220;
 /** Interpolation delay bounds; the live value tracks observed snapshot jitter. */
 const INTERP_MIN_MS = 80;
@@ -285,9 +288,12 @@ export class NetSession {
     if (this.closed || this.resolving) return;
     this.setState(this.state === "online" ? "connecting" : this.state);
     this.resolving = true;
+    const fresh = !this.arena;
     void this.resolveArena().then((target) => {
       this.resolving = false;
       if (this.closed) return;
+      // Time spent waiting for the coordinator is not time spent failing to connect.
+      if (fresh && this.arena && this.state !== "online") this.firstTry = performance.now();
       this.open(target);
     });
   }
@@ -300,26 +306,43 @@ export class NetSession {
   private async resolveArena(): Promise<string> {
     if (this.arena) return this.arena;
     if (performance.now() < this.noLookupUntil) return this.url;
-    try {
-      const q = this.party ? `?with=${encodeURIComponent(this.party)}` : "";
-      const res = await fetch(arenaLookupUrl(this.url) + q, {
-        signal: AbortSignal.timeout(1500),
-        cache: "no-store",
-      });
-      if (res.ok) {
-        const j = (await res.json()) as { ok?: boolean; url?: string };
-        if (j.ok && j.url && /^wss?:\/\//.test(j.url)) {
-          this.arena = j.url;
-          return j.url;
+    const q = this.party ? `?with=${encodeURIComponent(this.party)}` : "";
+    const started = performance.now();
+    // A cold coordinator instance can take a second or two (function start,
+    // database connect, arena probe). Dialing the function itself instead
+    // would put this player alone on one instance, so a slow answer is
+    // waited for and retried; only an unreachable coordinator falls back.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const res = await fetch(arenaLookupUrl(this.url) + q, {
+          signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
+          cache: "no-store",
+        });
+        if (res.ok) {
+          const j = (await res.json()) as { ok?: boolean; url?: string };
+          if (j.ok && j.url && /^wss?:\/\//.test(j.url)) {
+            this.arena = j.url;
+            return j.url;
+          }
+          // No coordinator here (local server): dial directly for a while.
+          this.noLookupUntil = performance.now() + 20_000;
+          return this.url;
         }
-        // No coordinator here: dial directly for a while.
-        this.noLookupUntil = performance.now() + 60_000;
+      } catch (err) {
+        const timedOut = err instanceof Error && err.name === "TimeoutError";
+        if (!timedOut) break;
       }
-    } catch {
-      // Unreachable: reconnect attempts should not wait on lookups.
-      this.noLookupUntil = performance.now() + 8_000;
+      if (this.closed || performance.now() - started > LOOKUP_BUDGET_MS) break;
+      await new Promise((r) => setTimeout(r, 400));
     }
+    // Unreachable or persistently slow: reconnect attempts should not wait on lookups.
+    this.noLookupUntil = performance.now() + 8_000;
     return this.url;
+  }
+
+  /** The process this session is on, from WELCOME ("" before the first one). */
+  get arenaName(): string {
+    return this.instance;
   }
 
   /** The address the socket currently dials (for play tickets). */
