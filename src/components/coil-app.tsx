@@ -1301,10 +1301,10 @@ export function CoilApp() {
           </div>
           <button
             type="button"
-            onClick={() => engineRef.current?.respawn()}
+            onClick={() => engineRef.current?.endWisp()}
             className="rounded-full border border-line bg-bg/80 px-4 py-1.5 text-xs text-muted hover:text-fg"
           >
-            spawn now with +{hud.wisp.bank}
+            done · keep +{hud.wisp.bank}
           </button>
         </div>
       )}

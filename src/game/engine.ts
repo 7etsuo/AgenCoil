@@ -197,6 +197,8 @@ export class CoilEngine {
   private near = { combo: 0, bonus: 0, t: 0 };
   private comebackOffer = 0;
   private deathBeatUntil = 0;
+  /** The death card ignores Space, Enter and clicks until then: no accidental respawn. */
+  private respawnArmedAt = 0;
   private lastEatAt = 0;
   private eatCombo = 0;
   private spawnedAt = 0;
@@ -283,11 +285,8 @@ export class CoilEngine {
           if (secsLeft === 0 && this.phase === "wisp") {
             const full = bank >= WISP_BANK_MAX;
             this.endWisp();
-            // A full bank goes straight back in: no card, no click.
-            if (full) {
-              this.pushFeed(`wisp full: +${bank} banked, back in`);
-              this.respawn();
-            }
+            // The card still shows: comeback, rematch and play again stay on offer.
+            if (full) this.pushFeed(`wisp full: +${bank} banked for your next life`);
           }
         },
         onProfile: (p) => {
@@ -420,6 +419,8 @@ export class CoilEngine {
     this.phase = "dead";
     this.boosting = false;
     this.holdBoost = false;
+    // A key or button held to steer the wisp must not pick a card option.
+    this.respawnArmedAt = performance.now() + 700;
     this.emitHud();
   }
 
@@ -682,7 +683,7 @@ export class CoilEngine {
     }
     if (this.phase === "dead" && (e.code === "Space" || e.code === "Enter")) {
       e.preventDefault();
-      this.respawn();
+      if (performance.now() >= this.respawnArmedAt) this.respawn();
       return;
     }
     if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code))
@@ -728,7 +729,7 @@ export class CoilEngine {
     const t = e.target;
     if (t instanceof Element && t.closest("[data-ui]")) return;
     if (this.phase === "dead") {
-      this.respawn();
+      if (performance.now() >= this.respawnArmedAt) this.respawn();
       return;
     }
     if (this.phase !== "play" && this.phase !== "wisp") return;
@@ -1386,6 +1387,7 @@ export class CoilEngine {
     this.holdBoost = false;
     this.spawnWait = 0;
     this.deathBeatUntil = performance.now() + 700;
+    this.respawnArmedAt = this.deathBeatUntil + 300;
     this.replayFrozen = this.replayBuf.length ? this.replayBuf.slice() : null;
     try {
       localStorage.setItem("agencoil-played", "1");
