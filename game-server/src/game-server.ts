@@ -634,6 +634,8 @@ export class GameServer {
 
   private async onHello(client: Client, r: Reader, respawn: boolean): Promise<void> {
     client.name = sanitizeName(r.str());
+    // A linked player is named by their handle, whatever the client sent.
+    if (client.account && client.profile?.handle) client.name = `@${client.profile.handle}`;
     const look = unpackSkin(r.u8());
     client.skin = look.skin;
     client.bands = sanitizeBands(readBands(r));
@@ -660,7 +662,7 @@ export class GameServer {
         client.profile = await this.profiles.load(client.key, client.name);
       if (!client.alive) return;
       // The identify message may have arrived before the nickname was known.
-      if (client.profile) this.profiles.setName(client.profile, client.name);
+      if (client.profile && !client.account) this.profiles.setName(client.profile, client.name);
       const unlocks = client.profile?.unlocks ?? 0;
       client.trail =
         look.trail < UNLOCK_TRAIL.length &&
@@ -686,6 +688,7 @@ export class GameServer {
           client.profile = await this.profiles.link(client.profile, id, client.name);
           if (!client.alive) return;
           client.key = client.profile.key;
+          client.name = `@${client.profile.handle}`;
           if (this.profiles.award(client.profile, "linked")) this.achieve(client, "linked");
         }
       }

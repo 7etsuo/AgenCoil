@@ -256,8 +256,8 @@ export function CoilApp() {
       .then((t) => {
         if (cancelled) return;
         setIdentity(t);
-        const saved = readNick();
-        if (t.name && (!saved || /^coil\d\d$/.test(saved))) setNick(t.name.slice(0, 16));
+        // Signed in: the X handle is the name, in the arena and offline alike.
+        setNick(`@${t.handle}`.slice(0, 16));
       })
       .catch(() => undefined);
     return () => {
@@ -788,6 +788,7 @@ export function CoilApp() {
                 </Chip>
                 <Chip tone="violet">{LEAGUES[leagueOf(hud.profile.weekBest)]!.name}</Chip>
                 {hud.profile.crew && <Chip>[{hud.profile.crew}]</Chip>}
+                {!hud.profile.linked && !signedIn && <Chip>guest</Chip>}
                 <Chip tone={hud.profile.achv.length > 0 ? "gold" : undefined}>
                   🏆 {hud.profile.achv.length}/{ACHIEVEMENTS.length}
                 </Chip>
@@ -872,8 +873,10 @@ export function CoilApp() {
                 id="nick"
                 value={nick}
                 maxLength={16}
+                readOnly={signedIn && identity !== null}
+                title={signedIn && identity ? "your X handle is your name in the arena" : undefined}
                 onChange={(e) => setNick(e.target.value)}
-                className="h-12 flex-1 mt-1 h-11 w-full rounded-md border border-line bg-elevated px-3 text-base text-fg outline-none focus:border-accent"
+                className={`h-12 flex-1 mt-1 h-11 w-full rounded-md border border-line bg-elevated px-3 text-base text-fg outline-none focus:border-accent ${signedIn && identity ? "text-muted" : ""}`}
               />
               <button
                 type="button"

@@ -734,7 +734,8 @@ export class ProfileStore {
     p.sub = id.sub;
     p.avatar = id.avatar;
     p.handle = await this.freeHandle(id.handle, key);
-    this.setName(p, name);
+    // The profile keeps the account's display name; the arena name is the handle.
+    this.setName(p, id.name || name);
     this.markDirty(key);
     return p;
   }
@@ -755,13 +756,13 @@ export class ProfileStore {
     try {
       if (!(await taken(handle))) return handle;
       for (let i = 2; i < 100; i++) {
-        const h = `${handle.slice(0, 20)}_${i}`;
+        const h = `${handle.slice(0, 12)}_${i}`;
         if (!(await taken(h))) return h;
       }
     } catch (err) {
       console.error("[profiles] handle check failed:", (err as Error)?.message ?? err);
     }
-    return `${handle.slice(0, 16)}_${key.slice(-6)}`;
+    return `${handle.slice(0, 8)}_${key.slice(-6)}`;
   }
 
   /** The profile behind a public handle, or null. */

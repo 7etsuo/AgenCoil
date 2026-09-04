@@ -49,8 +49,8 @@ test("a 404 or a bad body is not an identity", async () => {
   assert.equal(await gBad.redeem("https://s", "b".repeat(20)), null);
 });
 
-test("handles are lower-case [a-z0-9_] between 2 and 24", () => {
+test("handles are lower-case [a-z0-9_] between 2 and 15", () => {
   assert.equal(cleanHandle("@Elon_Musk"), "elon_musk");
   assert.equal(cleanHandle("a"), "");
-  assert.equal(cleanHandle("x".repeat(30)), "x".repeat(24));
+  assert.equal(cleanHandle("x".repeat(30)), "x".repeat(15));
 });

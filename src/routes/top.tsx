@@ -110,7 +110,12 @@ function TopPage() {
                       ✓ {r.name}
                     </Link>
                   ) : (
-                    r.name
+                    <>
+                      {r.name}
+                      {kind !== "crew" && (
+                        <span className="ml-2 text-[10px] text-subtle">guest</span>
+                      )}
+                    </>
                   )}
                   {kind === "weekly" && (
                     <span className="ml-2 text-xs text-subtle">

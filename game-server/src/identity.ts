@@ -10,7 +10,7 @@
 export interface Identity {
   /** Stable account id from the site's user table. */
   sub: string;
-  /** Public handle, lower-case, 2 to 24 of [a-z0-9_]. */
+  /** Public handle, lower-case, 2 to 15 of [a-z0-9_] (X's limit). */
   handle: string;
   /** Display name at sign-in time. */
   name: string;
@@ -18,14 +18,14 @@ export interface Identity {
   avatar: string;
 }
 
-const HANDLE_RE = /^[a-z0-9_]{2,24}$/;
+const HANDLE_RE = /^[a-z0-9_]{2,15}$/;
 
 export function cleanHandle(raw: string): string {
   const h = raw
     .toLowerCase()
     .replace(/^@/, "")
     .replace(/[^a-z0-9_]/g, "")
-    .slice(0, 24);
+    .slice(0, 15);
   return HANDLE_RE.test(h) ? h : "";
 }
 
