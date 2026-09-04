@@ -61,6 +61,23 @@ const BOT_SOFT_CAP = 2000;
 const BOT_HARD_CAP = 4500;
 const GRID_OFF = 256;
 const GRID_SPAN = 512;
+/**
+ * Food is kept at an even density. The arena is cut into regions of this
+ * size, each with a share of FOOD_TARGET, and new orbs go to regions below
+ * their share. Placing them uniformly instead let the interior, where
+ * everyone eats, thin out while the untouched rim filled up, until circling
+ * the edge was the best way to grow.
+ */
+const REGION = CELL * 8;
+const REGION_OFF = 16;
+const REGION_SPAN = 32;
+/** Orbs spawn inside this fraction of the radius. */
+const FOOD_EXTENT = 0.96;
+function regionKey(x: number, y: number): number {
+  return (
+    (Math.floor(x / REGION) + REGION_OFF) * REGION_SPAN + (Math.floor(y / REGION) + REGION_OFF)
+  );
+}
 const CHASE_SPEED = 265;
 const CHASE_SENSE = 320;
 
@@ -175,13 +192,99 @@ export class World {
   private cellStamps = new Map<number, number>();
   private foodSeq = 0;
   private foodIndex = new Map<Food, number>();
+  /** Food regions: each region's share of the target, and how many orbs it holds. */
+  private readonly regionQuota = new Map<number, number>();
+  private readonly regionKeys: number[] = [];
+  private readonly regionCount = new Map<number, number>();
+  /** Where the last natural orb went, so a share of spawns can cluster beside it. */
+  private lastSpawn: Vec | null = null;
+  private pool: { keys: number[]; cum: number[]; total: number } | null = null;
   private chasers: Food[] = [];
   private botTimer = 0;
   private nextFoodId = 1;
   private nextBotId = 1;
 
   constructor(fill = true) {
+    this.initRegions();
     if (fill) this.fillFood(FOOD_TARGET);
+  }
+
+  /** Each region's share of the food target is its share of the arena's area. */
+  private initRegions(): void {
+    const lim = ARENA_RADIUS * FOOD_EXTENT;
+    const cells = new Map<number, number>();
+    let total = 0;
+    for (let x = -lim + CELL / 2; x < lim; x += CELL) {
+      for (let y = -lim + CELL / 2; y < lim; y += CELL) {
+        if (x * x + y * y > lim * lim) continue;
+        const k = regionKey(x, y);
+        cells.set(k, (cells.get(k) ?? 0) + 1);
+        total++;
+      }
+    }
+    for (const [k, n] of cells) {
+      this.regionQuota.set(k, (FOOD_TARGET * n) / total);
+      this.regionKeys.push(k);
+    }
+  }
+
+  /** How many more orbs a region wants, as a fraction of its share (0 when full). */
+  private regionDeficit(key: number): number {
+    const quota = this.regionQuota.get(key);
+    if (!quota) return 0;
+    return Math.max(0, quota - (this.regionCount.get(key) ?? 0)) / quota;
+  }
+
+  /**
+   * Regions below their share, weighted by how far below they are, so a
+   * spawn can pick one in proportion. Rebuilt per batch of spawns.
+   */
+  private deficitPool(): { keys: number[]; cum: number[]; total: number } {
+    const keys: number[] = [];
+    const cum: number[] = [];
+    let total = 0;
+    for (const k of this.regionKeys) {
+      const d = this.regionDeficit(k);
+      if (d <= 0) continue;
+      total += d;
+      keys.push(k);
+      cum.push(total);
+    }
+    return { keys, cum, total };
+  }
+
+  /**
+   * A spawn point in a region below its share, the further below the more
+   * likely; a quarter of orbs land beside the previous one when its region
+   * still has room, for slither.io's loose clusters. Anywhere at all only
+   * when every region is full.
+   */
+  private spawnPoint(pool: { keys: number[]; cum: number[]; total: number }): Vec {
+    const lim = ARENA_RADIUS * FOOD_EXTENT;
+    const lim2 = lim * lim;
+    const last = this.lastSpawn;
+    if (last && Math.random() < 0.25 && this.regionDeficit(regionKey(last.x, last.y)) > 0) {
+      const p = { x: last.x + randRange(-70, 70), y: last.y + randRange(-70, 70) };
+      if (p.x * p.x + p.y * p.y < lim2) return p;
+    }
+    for (let attempt = 0; attempt < 4 && pool.total > 0; attempt++) {
+      const r = Math.random() * pool.total;
+      let lo = 0;
+      let hi = pool.cum.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (pool.cum[mid]! < r) lo = mid + 1;
+        else hi = mid;
+      }
+      const k = pool.keys[lo]!;
+      const rx = Math.floor(k / REGION_SPAN) - REGION_OFF;
+      const ry = (k % REGION_SPAN) - REGION_OFF;
+      for (let t = 0; t < 4; t++) {
+        const p = { x: (rx + Math.random()) * REGION, y: (ry + Math.random()) * REGION };
+        if (p.x * p.x + p.y * p.y < lim2) return p;
+      }
+    }
+    return randomInDisk(lim);
   }
 
   get player(): Snake | undefined {
@@ -310,11 +413,14 @@ export class World {
     return f;
   }
 
-  private bucket(f: Food, key: number): void {
+  private bucket(f: Food, key: number, countRegion = true): void {
     const bucket = this.grid.get(key);
     if (bucket) bucket.push(f);
     else this.grid.set(key, [f]);
     this.cellStamps.set(key, ++this.foodSeq);
+    if (!countRegion) return;
+    const rk = regionKey(f.x, f.y);
+    this.regionCount.set(rk, (this.regionCount.get(rk) ?? 0) + 1);
   }
 
   /** The stamp of a food cell: equal stamps mean the cell's orbs are unchanged. */
@@ -355,10 +461,11 @@ export class World {
     this.foodById.clear();
     this.foodIndex.clear();
     this.grid.clear();
+    this.regionCount.clear();
     this.chasers = [];
   }
 
-  private unbucket(f: Food): void {
+  private unbucket(f: Food, countRegion = true): void {
     const key = cellKey(f.x, f.y);
     const bucket = this.grid.get(key);
     if (!bucket) return;
@@ -369,6 +476,11 @@ export class World {
     }
     if (!bucket.length) this.grid.delete(key);
     this.cellStamps.set(key, ++this.foodSeq);
+    if (!countRegion) return;
+    const rk = regionKey(f.x, f.y);
+    const n = (this.regionCount.get(rk) ?? 1) - 1;
+    if (n > 0) this.regionCount.set(rk, n);
+    else this.regionCount.delete(rk);
   }
 
   moveFood(f: Food, x: number, y: number): void {
@@ -379,10 +491,13 @@ export class World {
       f.y = y;
       return;
     }
-    this.unbucket(f);
+    // The region tally only moves when the orb changes region, which a
+    // magnet pull rarely does.
+    const sameRegion = regionKey(f.x, f.y) === regionKey(x, y);
+    this.unbucket(f, !sameRegion);
     f.x = x;
     f.y = y;
-    this.bucket(f, after);
+    this.bucket(f, after, !sameRegion);
   }
 
   /** Visit every orb whose cell overlaps the rectangle. */
@@ -1348,18 +1463,9 @@ export class World {
     this.spawnBot(used);
   }
 
-  private makeFood(): Food {
-    // A share of orbs spawn beside an existing natural orb, which builds the
-    // loose clusters slither.io has instead of a uniform sprinkle.
-    let at: Vec | null = null;
-    if (this.foods.length > 50 && Math.random() < 0.25) {
-      const near = this.foods[(Math.random() * this.foods.length) | 0]!;
-      if (near.k === 0) {
-        const p = { x: near.x + randRange(-70, 70), y: near.y + randRange(-70, 70) };
-        if (p.x * p.x + p.y * p.y < (ARENA_RADIUS * 0.96) ** 2) at = p;
-      }
-    }
-    const p = at ?? randomInDisk(ARENA_RADIUS * 0.96);
+  private makeFood(pool: { keys: number[]; cum: number[]; total: number }): Food {
+    const p = this.spawnPoint(pool);
+    this.lastSpawn = p;
     const roll = Math.random();
     const prize = roll < 0.02;
     const mid = !prize && roll < 0.12;
@@ -1388,13 +1494,20 @@ export class World {
   }
 
   private fillFood(target: number): void {
-    while (this.foods.length < target) this.addFood(this.makeFood());
+    while (this.foods.length < target) {
+      const pool = this.deficitPool();
+      for (let i = 0; i < 200 && this.foods.length < target; i++) this.addFood(this.makeFood(pool));
+    }
     while (this.chasers.length < CHASE_ORBS) this.addFood(this.makeChaser());
   }
 
   private maintainFood(): void {
-    let n = 0;
-    while (this.foods.length < FOOD_TARGET && n++ < 24) this.addFood(this.makeFood());
+    if (this.foods.length < FOOD_TARGET) {
+      // Shortfalls move slowly, so the pool is rebuilt every few steps.
+      if (!this.pool || this.tickN % 8 === 0) this.pool = this.deficitPool();
+      let n = 0;
+      while (this.foods.length < FOOD_TARGET && n++ < 24) this.addFood(this.makeFood(this.pool));
+    }
     if (this.chasers.length < CHASE_ORBS && Math.random() < 0.02) this.addFood(this.makeChaser());
     if (this.foods.length > FOOD_TARGET + 2500) {
       for (let i = 0; i < 12; i++) {

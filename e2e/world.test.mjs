@@ -425,3 +425,30 @@ test("a slow giant keeps its full body: points sit one spacing apart, under the 
       );
   }
 });
+
+test("food regrows where it was eaten, so the rim is never richer than the middle", () => {
+  const world = new World(true);
+  world.host = true;
+  const R = model.ARENA_RADIUS;
+  const countWithin = (r) =>
+    world.foods.filter((f) => f.k === 0 && Math.hypot(f.x, f.y) < r).length;
+  const share = (r) => (r * r) / (R * 0.96) ** 2;
+  const before = countWithin(2500);
+  assert.ok(Math.abs(before / world.foods.length - share(2500)) < 0.03, "starts even");
+  // Everyone eats in the middle: strip it bare.
+  for (const f of world.foods.slice()) if (Math.hypot(f.x, f.y) < 2500) world.removeFood(f);
+  assert.equal(countWithin(2500), 0);
+  // Let the world top itself up with nobody around.
+  for (let i = 0; i < 400; i++) world.step(1 / 40, 0, 0, false);
+  assert.ok(world.foods.length >= model.FOOD_TARGET - 50, `refilled (${world.foods.length})`);
+  const after = countWithin(2500);
+  const evenShare = share(2500) * world.foods.length;
+  assert.ok(
+    after > evenShare * 0.85,
+    `the eaten middle got its food back: ${after} of an even ${evenShare.toFixed(0)}`,
+  );
+  // And the outer ring did not swell past its share.
+  const rim = world.foods.filter((f) => f.k === 0 && Math.hypot(f.x, f.y) > R * 0.8).length;
+  const rimShare = (1 - share(R * 0.8)) * world.foods.length;
+  assert.ok(rim < rimShare * 1.15, `rim ${rim} vs even ${rimShare.toFixed(0)}`);
+});
