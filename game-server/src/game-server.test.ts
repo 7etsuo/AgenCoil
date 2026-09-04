@@ -385,3 +385,91 @@ test("food sync keeps a client's orbs exactly equal to the server's orbs in its 
     await arena.stop();
   }
 });
+
+/** Parse one SNAP end to end for a protocol version; throws or leaves bytes on a layout mismatch. */
+function parseSnap(r: InstanceType<typeof Reader>, proto: number) {
+  r.u32();
+  r.u32();
+  const n = r.u16();
+  const entries: { nid: number; full: boolean; level: number; league: number; might: number }[] =
+    [];
+  for (let i = 0; i < n; i++) {
+    const e = protocol.readSnakeEntry(r);
+    const level = e.full && proto >= 2 ? r.u8() : 0;
+    const league = e.full && proto >= 3 ? r.u8() : 0;
+    const might = e.full && proto >= 3 ? r.u8() : 0;
+    entries.push({ nid: e.nid, full: e.full, level, league, might });
+  }
+  const gone = r.u16();
+  for (let i = 0; i < gone; i++) r.u16();
+  const chase = r.u8();
+  for (let i = 0; i < chase; i++) {
+    r.u32();
+    r.f32();
+    r.f32();
+  }
+  assert.equal(r.remaining, 0, `protocol ${proto}: snapshot fully consumed`);
+  return entries;
+}
+
+test("protocol 3 full entries carry league and might; protocol 2 keeps its layout", async () => {
+  const arena = await startArena();
+  try {
+    for (const proto of [2, 3]) {
+      const url = arena.url.replace(/v=2$/, `v=${proto}`);
+      const p = new Player(url);
+      await p.open();
+      assert.equal((await p.next(S2C.WELCOME)).str() && 1, 1);
+      p.send(ident(`dev-proto-${proto}`, `p${proto}`));
+      await p.next(S2C.PROFILE);
+      p.send(hello(`p${proto}`, `dev-proto-${proto}`));
+      const nid = (await p.next(S2C.SPAWNED)).u16();
+      const entries = parseSnap(await p.next(S2C.SNAP), proto);
+      const me = entries.find((e) => e.nid === nid);
+      assert.ok(me && me.full, "the first snapshot carries our own full entry");
+      if (proto === 3) {
+        assert.equal(me.league, 1, "a fresh profile is Bronze");
+        assert.equal(me.might, 0, "and has unlocked nothing yet");
+        const bot = entries.find((e) => e.nid !== nid && e.full);
+        if (bot) assert.equal(bot.league, 0, "bots have no league");
+      }
+      // A board row per client protocol: 3 adds a league byte after the bounty.
+      const stats = await p.next(S2C.STATS2, 2000);
+      stats.f32();
+      stats.u16();
+      stats.u16();
+      stats.u16();
+      stats.u16();
+      const nb = stats.u8();
+      for (let i = 0; i < nb; i++) {
+        stats.u16();
+        stats.str();
+        stats.u32();
+        stats.f32();
+        stats.f32();
+        stats.u32();
+        if (proto >= 3) assert.ok(stats.u8() <= 5, "league byte in range");
+      }
+      const nd = stats.u8();
+      for (let i = 0; i < nd; i++) {
+        stats.str();
+        stats.u32();
+      }
+      const np = stats.u8();
+      for (let i = 0; i < np; i++) {
+        stats.str();
+        stats.u32();
+      }
+      stats.u8();
+      stats.u16();
+      stats.u16();
+      stats.u8();
+      stats.f32();
+      stats.f32();
+      assert.equal(stats.remaining, 0, `protocol ${proto}: stats fully consumed`);
+      await p.close();
+    }
+  } finally {
+    await arena.stop();
+  }
+});

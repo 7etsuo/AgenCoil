@@ -5,7 +5,14 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { buildSync } from "esbuild";
 import type pg from "pg";
-import { ACHIEVEMENTS, lifeFeats, nextSteps, totalsUnlocked } from "../../src/game/achievements.ts";
+import {
+  ACHIEVEMENTS,
+  MIGHT_PIPS,
+  lifeFeats,
+  mightPips,
+  nextSteps,
+  totalsUnlocked,
+} from "../../src/game/achievements.ts";
 import type { ProfileStore as ProfileStoreT } from "./profiles.ts";
 
 // profiles.ts uses extensionless imports, which the type stripper cannot
@@ -129,4 +136,17 @@ test("feats read a single life; next steps point at the nearest milestone", () =
   assert.equal(steps[0]!.a.id, "hunter_1");
   assert.equal(steps[0]!.have, 9);
   assert.equal(steps[1]!.a.id, "big_1");
+});
+
+test("might pips: none at zero, one for the first unlock, all five at the full set", () => {
+  assert.equal(mightPips(0), 0);
+  assert.equal(mightPips(1), 1);
+  assert.equal(mightPips(ACHIEVEMENTS.length), MIGHT_PIPS);
+  assert.equal(mightPips(ACHIEVEMENTS.length * 2), MIGHT_PIPS);
+  let last = 0;
+  for (let n = 0; n <= ACHIEVEMENTS.length; n++) {
+    const pips = mightPips(n);
+    assert.ok(pips >= last, "pips never fall as achievements grow");
+    last = pips;
+  }
 });

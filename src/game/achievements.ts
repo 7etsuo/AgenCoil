@@ -109,6 +109,15 @@ export const ACHIEVEMENT_BY_ID: ReadonlyMap<string, Achievement> = new Map(
   ACHIEVEMENTS.map((a) => [a.id, a]),
 );
 
+/** Might is achievements unlocked; it shows as this many pips at most. */
+export const MIGHT_PIPS = 5;
+
+/** Pips for a might count: none at zero, at least one once anything is unlocked. */
+export function mightPips(count: number): number {
+  if (count <= 0) return 0;
+  return Math.max(1, Math.min(MIGHT_PIPS, Math.round((MIGHT_PIPS * count) / ACHIEVEMENTS.length)));
+}
+
 /** Ids of every lifetime milestone the totals satisfy. */
 export function totalsUnlocked(t: Totals): string[] {
   const out: string[] = [];

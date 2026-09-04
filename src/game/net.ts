@@ -41,7 +41,16 @@ export interface StatsInfo {
   count: number;
   kills: number;
   clients: number;
-  board: { nid: number; name: string; mass: number; x: number; y: number; bounty: number }[];
+  board: {
+    nid: number;
+    name: string;
+    mass: number;
+    x: number;
+    y: number;
+    bounty: number;
+    /** Weekly league, 1 Bronze to 5 Diamond, 0 unknown. */
+    league: number;
+  }[];
   daily: { name: string; best: number }[];
   party: { name: string; mass: number }[];
   mode: { id: number; secsLeft: number; secsToNext: number };
@@ -145,6 +154,13 @@ interface Look {
   identity?: { origin: string; ticket: string };
 }
 
+/**
+ * Wire protocol this client speaks, announced on the socket URL. 2 added a
+ * level byte to full snake entries; 3 adds league and might bytes there and
+ * a league byte per leaderboard row. The server answers with what it
+ * honours in WELCOME.
+ */
+const PROTO = 3;
 const INPUT_HZ = 30;
 /** A predicted eat the server has not confirmed by then is put back. */
 const EAT_CONFIRM_MS = 700;
@@ -357,7 +373,7 @@ export class NetSession {
     try {
       // Announce the wire protocol on the URL so the server knows it before
       // the first snapshot (see `proto` on the server's client record).
-      ws = new WebSocket(target + (target.includes("?") ? "&" : "?") + "v=2");
+      ws = new WebSocket(target + (target.includes("?") ? "&" : "?") + `v=${PROTO}`);
     } catch {
       this.scheduleRetry();
       return;
@@ -657,6 +673,7 @@ export class NetSession {
             x: r.f32(),
             y: r.f32(),
             bounty: v2 ? r.u32() : 0,
+            league: v2 && this.serverVersion >= 3 ? r.u8() : 0,
           });
         const nd = r.u8();
         for (let i = 0; i < nd; i++) s.daily.push({ name: r.str(), best: r.u32() });
@@ -888,6 +905,8 @@ export class NetSession {
     for (let i = 0; i < n; i++) {
       const e = readSnakeEntry(r);
       const level = e.full && this.serverVersion >= 2 ? r.u8() : 0;
+      const league = e.full && this.serverVersion >= 3 ? r.u8() : 0;
+      const might = e.full && this.serverVersion >= 3 ? r.u8() : 0;
       const id = String(e.nid);
       if (e.nid === this.selfNid) {
         this.serverSelf = {
@@ -901,6 +920,11 @@ export class NetSession {
         };
         this.reconcile(ack, e.x, e.y);
         const me = this.world.snakes.find((s) => s.id === id);
+        if (me && e.full) {
+          // Our own standing, as the server dressed the snake at spawn.
+          me.league = league;
+          me.might = might;
+        }
         if (me && e.full && e.points && e.points.length > 1 && this.awaitingBody) {
           // A reattached snake gets its real body back instead of the
           // straight placeholder laid on spawn.
@@ -920,6 +944,8 @@ export class NetSession {
           skin: look.skin,
           trail: look.trail,
           level,
+          league,
+          might,
           bands: e.bands,
           x: e.x,
           y: e.y,
@@ -949,6 +975,10 @@ export class NetSession {
       s.crown = e.crown;
       s.boss = e.boss;
       s.linked = e.linked;
+      if (e.full) {
+        s.league = league;
+        s.might = might;
+      }
       const buf = this.buffers.get(id) ?? [];
       buf.push({
         t: now,

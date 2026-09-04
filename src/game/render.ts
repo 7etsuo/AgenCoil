@@ -21,6 +21,8 @@ import {
   zoomOf,
 } from "./model";
 import { pathLength, type World } from "./world";
+import { LEAGUE_COLORS } from "./challenges";
+import { mightPips } from "./achievements";
 
 const HEX = 44;
 const SPRITE = 64;
@@ -99,6 +101,7 @@ export class Renderer {
     ghost: { x: number; y: number; best: number } | null = null,
     emotes: Map<string, { id: number; until: number }> | null = null,
     wisp: { x: number; y: number; angle: number; trail: Vec[] } | null = null,
+    ranks: ReadonlyMap<string, number> | null = null,
   ): void {
     const shake = cam.trauma * cam.trauma;
     const ox = (Math.random() * 2 - 1) * shake * 14;
@@ -149,7 +152,7 @@ export class Renderer {
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.drawVignette(ctx, w, h, localId ? snakes.find((s) => s.id === localId) : undefined);
-    this.drawNames(ctx, snakes, cam, w, h, dpr, z, ox, oy);
+    this.drawNames(ctx, snakes, cam, w, h, dpr, z, ox, oy, ranks);
     this.drawMinimap(ctx, snakes, localId, w, h, dpr, phase, insets, event, ghost, wisp);
   }
 
@@ -285,6 +288,31 @@ export class Renderer {
     ctx.textBaseline = "bottom";
     ctx.fillStyle = "rgba(232,234,238,0.6)";
     ctx.fillText("wisp", w.x, w.y - 14);
+  }
+
+  /**
+   * The weekly league as a ring around the head in the league's colour, so
+   * a real player's standing reads at a glance; platinum and diamond glow.
+   */
+  private drawLeagueRing(ctx: CanvasRenderingContext2D, s: Snake, r: number): void {
+    const color = LEAGUE_COLORS[(s.league ?? 1) - 1] ?? LEAGUE_COLORS[0];
+    const ring = r * 1.34;
+    if ((s.league ?? 0) >= 4) {
+      ctx.globalCompositeOperation = "lighter";
+      ctx.globalAlpha = 0.22 + Math.sin(this.time * 4) * 0.06;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, ring, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(3, r * 0.5);
+      ctx.stroke();
+      ctx.globalCompositeOperation = "source-over";
+      ctx.globalAlpha = 1;
+    }
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, ring, 0, Math.PI * 2);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(1.5, r * 0.16);
+    ctx.stroke();
   }
 
   /** A gold crown floating above a crowned head. */
@@ -680,6 +708,7 @@ export class Renderer {
         ctx.drawImage(sprites[0]!.canvas, s.x - hs / 2, s.y - hs / 2, hs, hs);
       }
       if ((s.level ?? 0) >= 20) this.drawShimmer(ctx, s, r);
+      if (s.league) this.drawLeagueRing(ctx, s, r);
       if (s.crown) this.drawCrown(ctx, s, r);
       if (s.boss) this.drawBossMarks(ctx, s, r);
       this.drawEvolution(ctx, s, r);
@@ -835,6 +864,7 @@ export class Renderer {
     z: number,
     ox: number,
     oy: number,
+    ranks: ReadonlyMap<string, number> | null,
   ): void {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.font = "500 13px Outfit, sans-serif";
@@ -847,17 +877,38 @@ export class Renderer {
       const sy = (s.y - cam.y - oy) * z + cssH / 2;
       if (sx < -40 || sy < -40 || sx > cssW + 40 || sy > cssH + 40) continue;
       const r = radiusOf(s.mass) * z;
+      const rank = ranks?.get(s.id);
       const label = s.boss
         ? `BOSS · ${s.name}`
-        : `${s.crown ? "👑 " : ""}${s.linked ? "✓ " : ""}${s.level ? `Lv${s.level} ` : ""}${s.name} · ${Math.floor(s.mass)}`;
+        : `${rank ? `#${rank} ` : ""}${s.crown ? "👑 " : ""}${s.linked ? "✓ " : ""}${s.level ? `Lv${s.level} ` : ""}${s.name} · ${Math.floor(s.mass)}`;
       const tw = ctx.measureText(label).width;
+      // A league chip sits in the tag before the text.
+      const chip = s.league && !s.boss ? 12 : 0;
       const pad = 6;
       const y = sy - r - 10;
-      ctx.fillStyle = "rgba(7,9,15,0.5)";
-      roundRect(ctx, sx - tw / 2 - pad, y - 16, tw + pad * 2, 18, 9);
+      const left = sx - (tw + chip) / 2 - pad;
+      ctx.fillStyle = rank === 1 ? "rgba(60,44,8,0.7)" : "rgba(7,9,15,0.5)";
+      roundRect(ctx, left, y - 16, tw + chip + pad * 2, 18, 9);
       ctx.fill();
-      ctx.fillStyle = "rgba(238,241,246,0.92)";
-      ctx.fillText(label, sx, y);
+      if (chip) {
+        ctx.beginPath();
+        ctx.arc(left + pad + 4, y - 7, 4, 0, Math.PI * 2);
+        ctx.fillStyle = LEAGUE_COLORS[(s.league ?? 1) - 1] ?? LEAGUE_COLORS[0];
+        ctx.fill();
+      }
+      ctx.fillStyle = rank === 1 ? "#ffe9ad" : "rgba(238,241,246,0.92)";
+      ctx.fillText(label, sx + chip / 2, y);
+      // Might: up to five pips above the tag.
+      const pips = s.boss ? 0 : mightPips(s.might ?? 0);
+      if (pips) {
+        ctx.fillStyle = "#f0c14a";
+        const x0 = sx - ((pips - 1) * 7) / 2;
+        for (let i = 0; i < pips; i++) {
+          ctx.beginPath();
+          ctx.arc(x0 + i * 7, y - 21, 2.2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
     }
   }
 

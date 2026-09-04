@@ -43,6 +43,9 @@ export const LEAGUES = [
   { name: "Diamond", min: 3000 },
 ] as const;
 
+/** One colour per league, in LEAGUES order: the ring around a head and the chip in a tag. */
+export const LEAGUE_COLORS = ["#cd7f32", "#c0c8d4", "#f0c14a", "#9fe3e0", "#7fd4ff"] as const;
+
 export function leagueOf(weekBest: number): number {
   let tier = 0;
   LEAGUES.forEach((l, i) => {

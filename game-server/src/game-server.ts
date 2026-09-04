@@ -64,6 +64,7 @@ import {
   UNLOCK_DEATH,
   UNLOCK_TRAIL,
   isoWeek,
+  leagueOf,
   levelOf,
   modeNow,
   seasonOf,
@@ -568,7 +569,10 @@ export class GameServer {
 
   private onConnection(ws: WebSocket, req: IncomingMessage): void {
     const ip = clientIp(req);
-    const proto = new URL(req.url ?? "/", "http://x").searchParams.get("v") === "2" ? 2 : 1;
+    // Wire protocol the client speaks: 2 adds a level byte to full entries,
+    // 3 adds league and might bytes and a league byte per board row.
+    const asked = Number(new URL(req.url ?? "/", "http://x").searchParams.get("v"));
+    const proto = asked >= 3 ? 3 : asked === 2 ? 2 : 1;
     const now = Date.now();
     const recent = (this.connectLog.get(ip) ?? []).filter((t) => now - t < 60_000);
     recent.push(now);
@@ -930,6 +934,8 @@ export class GameServer {
     snake.trail = client.trail;
     snake.deathFx = client.deathFx;
     snake.level = client.profile ? levelOf(client.profile.eaten) : 0;
+    snake.league = client.profile ? leagueOf(client.profile.weekBest) + 1 : 0;
+    snake.might = client.profile ? Object.keys(client.profile.achv).length : 0;
     client.sid = snake.id;
     client.known.clear();
     client.life = {
@@ -1746,6 +1752,7 @@ export class GameServer {
       const full = !c.known.has(s.id);
       writeSnakeEntry(w, this.nidOf(s.id), s, full, MAX_NET_POINTS, packSkin(s.skin, s.trail ?? 0));
       if (full && c.proto >= 2) w.u8(Math.min(255, s.level ?? 0));
+      if (full && c.proto >= 3) w.u8(s.league ?? 0).u8(Math.min(255, s.might ?? 0));
       c.known.add(s.id);
     }
     const gone: number[] = [];
@@ -1868,22 +1875,24 @@ export class GameServer {
     alive.forEach((s, i) => rankOf.set(s.id, i + 1));
     const top = alive.slice(0, 10);
     const daily = this.daily.top(10);
-    const encodeBoard = (v2: boolean) => {
+    const encodeBoard = (v2: boolean, v3: boolean) => {
       const board = new Writer();
       board.u8(top.length);
       for (const s of top) {
         board.u16(this.nidOf(s.id)).str(s.name).u32(Math.floor(s.mass)).f32(s.x).f32(s.y);
         if (v2) board.u32(this.bountyOf.get(s.id) ?? 0);
+        if (v3) board.u8(s.league ?? 0);
       }
       board.u8(daily.length);
       for (const e of daily) board.str(e.name).u32(e.best);
       return board.finish();
     };
-    const tail1 = encodeBoard(false);
-    const tail2 = encodeBoard(true);
+    const tail1 = encodeBoard(false, false);
+    const tail2 = encodeBoard(true, false);
+    const tail3 = encodeBoard(true, true);
     for (const c of this.clients) {
       const me = c.sid ? alive.find((s) => s.id === c.sid) : undefined;
-      const tail = c.v2 ? tail2 : tail1;
+      const tail = c.v2 ? (c.proto >= 3 ? tail3 : tail2) : tail1;
       const w = new Writer()
         .u8(c.v2 ? S2C.STATS2 : S2C.STATS)
         .f32(me?.mass ?? 0)

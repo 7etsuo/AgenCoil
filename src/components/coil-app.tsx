@@ -16,6 +16,7 @@ import { MAX_CUSTOM_BANDS, SKINS } from "@/game/model";
 import {
   DEATH_FX,
   LEAGUES,
+  LEAGUE_COLORS,
   MODES,
   STREAK_MILESTONES,
   TRAILS,
@@ -38,6 +39,8 @@ import { authEnabled, signIn, signOut } from "@/lib/auth/client";
 import { authStatus, mintIdentity } from "@/lib/identity";
 import {
   ACHIEVEMENTS,
+  MIGHT_PIPS,
+  mightPips,
   ACHIEVEMENT_BY_ID,
   groupSummary,
   nextSteps,
@@ -568,23 +571,66 @@ export function CoilApp() {
       {phase !== "menu" && hud && (
         <div className="pointer-events-none absolute inset-0 p-4 pt-[max(1rem,env(safe-area-inset-top))]">
           <div className="flex items-start justify-between gap-3">
-            <div className="rounded-xl border border-line/80 bg-bg/70 px-3 py-2 tabular-nums">
-              <div className="text-xs tracking-wide text-muted">your length</div>
-              <div className="text-2xl font-semibold leading-tight">{hud.score}</div>
-              <div className="mt-0.5 text-xs text-subtle">
-                rank {hud.rank} of {hud.count} · kills {hud.kills}
-              </div>
-              <div className="text-xs text-subtle">best {hud.best}</div>
-              {hud.goal && (
-                <div className="mt-1.5 w-40">
-                  <div className="truncate text-[10px] text-subtle">{hud.goal.text}</div>
-                  <div className="mt-0.5 h-1 w-full rounded bg-elevated">
-                    <div
-                      className="h-1 rounded bg-accent"
-                      style={{ width: `${Math.min(100, hud.goal.frac * 100)}%` }}
-                    />
-                  </div>
+            {/* The left stack flows, so the arena line, a beat target and the feed never cover the panel. */}
+            <div className="flex flex-col items-start gap-1.5">
+              <div className="rounded-xl border border-line/80 bg-bg/70 px-3 py-2 tabular-nums">
+                <div className="text-xs tracking-wide text-muted">your length</div>
+                <div className="text-2xl font-semibold leading-tight">{hud.score}</div>
+                <div className="mt-0.5 text-xs text-subtle">
+                  rank {hud.rank} of {hud.count} · kills {hud.kills}
                 </div>
+                <div className="flex items-center gap-1.5 text-xs text-subtle">
+                  <span>best {hud.best}</span>
+                  {hud.league > 0 && (
+                    <>
+                      <span>·</span>
+                      <span
+                        className="inline-block h-2.5 w-2.5 rounded-full"
+                        style={{ background: LEAGUE_COLORS[hud.league - 1] }}
+                      />
+                      <span style={{ color: LEAGUE_COLORS[hud.league - 1] }}>
+                        {LEAGUES[hud.league - 1]?.name}
+                      </span>
+                      <span
+                        className="tracking-[0.15em] text-[#f0c14a]"
+                        title={`might: ${hud.might} of ${ACHIEVEMENTS.length} achievements`}
+                      >
+                        {"●".repeat(mightPips(hud.might))}
+                        <span className="text-subtle/60">
+                          {"●".repeat(MIGHT_PIPS - mightPips(hud.might))}
+                        </span>
+                      </span>
+                    </>
+                  )}
+                </div>
+                {hud.goal && (
+                  <div className="mt-1.5 w-40">
+                    <div className="truncate text-[10px] text-subtle">{hud.goal.text}</div>
+                    <div className="mt-0.5 h-1 w-full rounded bg-elevated">
+                      <div
+                        className="h-1 rounded bg-accent"
+                        style={{ width: `${Math.min(100, hud.goal.frac * 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="rounded-full border border-line bg-bg/70 px-3 py-1 text-xs text-muted">
+                {modeLabel}
+              </div>
+              {hud.beat && !hud.beat.done && (
+                <div className="rounded-full border border-[#f0c14a]/60 bg-bg/80 px-3 py-1 text-xs text-[#f0c14a]">
+                  beat {hud.beat.by} · {hud.score}/{hud.beat.target}
+                </div>
+              )}
+              {hud.feed.length > 0 && (
+                <ul className="space-y-0.5 text-xs text-muted">
+                  {hud.feed.map((line, i) => (
+                    <li key={`${line}-${i}`} className="rounded-full bg-bg/60 px-2 py-0.5">
+                      {line}
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
             <div
@@ -614,12 +660,14 @@ export function CoilApp() {
                       n: r.mass,
                       you: r.you,
                       bounty: r.bounty,
+                      league: r.league,
                     }))
                   : hud.daily.map((r) => ({
                       name: r.name,
                       n: r.best,
                       you: r.name === nick,
                       bounty: 0,
+                      league: 0,
                     }))
                 ).map((row, i) => (
                   <li
@@ -627,6 +675,13 @@ export function CoilApp() {
                     className={row.you ? "font-semibold text-fg" : "text-muted"}
                   >
                     <span className="inline-block w-5 text-subtle">{i + 1}</span>
+                    {row.league > 0 && (
+                      <span
+                        className="mr-1 inline-block h-2 w-2 rounded-full align-middle"
+                        style={{ background: LEAGUE_COLORS[row.league - 1] }}
+                        title={LEAGUES[row.league - 1]?.name}
+                      />
+                    )}
                     <span className="font-medium">{row.name}</span>
                     {row.bounty > 0 && (
                       <span className="ml-1 text-xs text-[#f0c14a]" title="bounty">
@@ -642,9 +697,6 @@ export function CoilApp() {
               </ol>
             </div>
           </div>
-          <div className="absolute left-4 top-[calc(6.5rem+env(safe-area-inset-top))] rounded-full border border-line bg-bg/70 px-3 py-1 text-xs text-muted">
-            {modeLabel}
-          </div>
           {hud.killNotice && (
             <div className="absolute left-1/2 top-[calc(6.5rem+env(safe-area-inset-top))] -translate-x-1/2 rounded-full border border-line bg-bg/80 px-4 py-1.5 text-sm">
               {hud.killNotice}
@@ -656,11 +708,6 @@ export function CoilApp() {
               <div className="mt-1 h-1 w-full rounded bg-elevated">
                 <div className="h-1 rounded bg-[#ff5a6e]" style={{ width: `${hud.boss.hp}%` }} />
               </div>
-            </div>
-          )}
-          {hud.beat && !hud.beat.done && (
-            <div className="absolute left-4 top-[calc(10.5rem+env(safe-area-inset-top))] rounded-full border border-[#f0c14a]/60 bg-bg/80 px-3 py-1 text-xs text-[#f0c14a]">
-              beat {hud.beat.by} · {hud.score}/{hud.beat.target}
             </div>
           )}
           {hud.hint && (
@@ -698,15 +745,6 @@ export function CoilApp() {
               </div>
               <div className="text-xs text-[#f0c14a]/80">+{hud.nearBonus}</div>
             </div>
-          )}
-          {hud.feed.length > 0 && (
-            <ul className="absolute left-4 top-[calc(8.75rem+env(safe-area-inset-top))] space-y-0.5 text-xs text-muted">
-              {hud.feed.map((line, i) => (
-                <li key={`${line}-${i}`} className="rounded-full bg-bg/60 px-2 py-0.5">
-                  {line}
-                </li>
-              ))}
-            </ul>
           )}
         </div>
       )}

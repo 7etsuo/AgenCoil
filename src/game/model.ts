@@ -145,6 +145,10 @@ export interface Snake {
   crown?: boolean;
   /** Signed in with an account: drawn with a badge. */
   linked?: boolean;
+  /** Weekly league, 1 Bronze to 5 Diamond; 0 for bots and unknown players. */
+  league?: number;
+  /** Might: achievements unlocked, drawn as pips over the name. */
+  might?: number;
   /** Server side: last tick each attacker landed a boss hit. */
   bossHitAt?: Map<string, number>;
   /** Server side, refreshed every step: derived geometry and a box around the body. */

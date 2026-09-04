@@ -23,6 +23,7 @@ import { moveWisp, slideAlongRim, steerWisp } from "./wisp";
 import { Renderer, desiredZoom } from "./render";
 import { GameAudio } from "./audio";
 import { ACHIEVEMENT_BY_ID } from "./achievements";
+import { leagueOf } from "./challenges";
 import {
   NetSession,
   defaultServerUrl,
@@ -46,7 +47,10 @@ export interface HudState {
   rank: number;
   count: number;
   kills: number;
-  board: { name: string; mass: number; you: boolean; bounty: number }[];
+  board: { name: string; mass: number; you: boolean; bounty: number; league: number }[];
+  /** Your weekly league (1 Bronze to 5 Diamond, 0 unknown) and might (achievements unlocked). */
+  league: number;
+  might: number;
   daily: { name: string; best: number }[];
   profile: ProfileInfo | null;
   challenges: ChallengeInfo[];
@@ -510,6 +514,9 @@ export class CoilEngine {
     const s = w.spawnPlayer("local", this.look.name, this.look.skin, this.look.bands);
     s.trail = this.look.trail;
     s.deathFx = this.look.deathFx;
+    // The standing the server last told us about, so the tag looks the same offline.
+    s.league = this.profile ? leagueOf(this.profile.weekBest) + 1 : 0;
+    s.might = this.profile?.achv.length ?? 0;
     this.phase = "play";
     this.spawnedAt = performance.now();
     this.snapCamTo(s);
@@ -585,12 +592,14 @@ export class CoilEngine {
           mass: b.mass,
           you: b.nid === this.net!.selfNid,
           bounty: b.bounty,
+          league: b.league,
         }))
       : alive.slice(0, 10).map((s) => ({
           name: s.name,
           mass: Math.floor(s.mass),
           you: s.id === world.playerId,
           bounty: 0,
+          league: s.league ?? 0,
         }));
     const now = performance.now();
     const ev = this.event;
@@ -631,6 +640,8 @@ export class CoilEngine {
       nearWin: this.phase === "dead" ? this.nearWin : null,
       beat: this.beat,
       hint: this.hint(),
+      league: this.profile ? leagueOf(this.profile.weekBest) + 1 : 0,
+      might: this.profile?.achv.length ?? 0,
       firstLife: this.isFirstLife(),
       party: this.stats?.party ?? [],
       arenaMode: this.stats?.mode ?? { id: 0, secsLeft: 0, secsToNext: 0 },
@@ -1528,6 +1539,7 @@ export class CoilEngine {
         : null,
       this.emotes,
       this.phase === "wisp" ? this.wisp : null,
+      this.topRanks(),
     );
     const nowMs = performance.now();
     for (const [id, e] of this.emotes) if (e.until < nowMs) this.emotes.delete(id);
@@ -1540,6 +1552,19 @@ export class CoilEngine {
         y: this.stick.y - rect.top,
       });
     }
+  }
+
+  /** Snake id to arena rank for the top three, from the board online or the local world offline. */
+  private topRanks(): Map<string, number> {
+    const out = new Map<string, number>();
+    const st = this.online && this.world !== this.local ? this.stats : null;
+    if (st) {
+      st.board.slice(0, 3).forEach((b, i) => out.set(String(b.nid), i + 1));
+      return out;
+    }
+    const alive = this.world.snakes.filter((s) => s.alive).sort((a, b) => b.mass - a.mass);
+    alive.slice(0, 3).forEach((s, i) => out.set(s.id, i + 1));
+    return out;
   }
 
   private burst(x: number, y: number, color: string, n: number, speed: number): void {
@@ -1574,6 +1599,10 @@ export class CoilEngine {
       instance: this.net?.instance ?? "",
       rtt: this.net?.rttMs ?? 0,
       eatMisses: this.net?.eatMisses ?? 0,
+      badFrames: this.net?.badFrames ?? 0,
+      profile: this.profile
+        ? { league: this.profile.weekBest, achv: this.profile.achv.length }
+        : null,
       boosting: this.boosting,
       controls: this.controls,
       diag: this.net?.diag ?? null,
