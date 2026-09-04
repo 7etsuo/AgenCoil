@@ -33,6 +33,14 @@ export interface ArenaHealth {
 
 /** Session length asked of the Sandbox, and how long before expiry to roll. */
 export const ARENA_SESSION_MS = 23 * 3600_000;
+/**
+ * Arenas registered by hand (a machine you run, reached through a tunnel)
+ * carry this build tag. The coordinator health-checks and places players on
+ * them like any other arena but never rolls, drains or forgets them; a
+ * Sandbox is only created when every static arena is down or full.
+ */
+export const STATIC_BUILD = "static";
+export const isStatic = (r: { build: string }): boolean => r.build === STATIC_BUILD;
 export const ARENA_ROLL_BEFORE_MS = 90 * 60_000;
 const HEALTH_TTL_MS = 10_000;
 const LOCK_MS = 60_000;
@@ -139,6 +147,9 @@ export class ArenaHost {
     const build = this.build;
     for (const r of rows) {
       const h = await this.checkHealth(r);
+      // A static arena is someone's machine: leave its row alone when it is
+      // down (players simply are not sent there) and never roll it.
+      if (isStatic(r)) continue;
       if (!h.ok && now - r.createdAt > 120_000) {
         // Unreachable and not just booting: forget it.
         await this.q(`DELETE FROM agencoil_arena WHERE name = $1`, [r.name]);
@@ -148,18 +159,25 @@ export class ArenaHost {
       // bundle than this function: a push reaches the world within a tick.
       const stale = r.build !== build;
       if (stale || r.expiresAt - now < ARENA_ROLL_BEFORE_MS) {
-        const younger = rows.find(
+        // Somewhere for its players to go: a fresh Sandbox on this build, or
+        // a healthy static arena, in which case no successor is needed.
+        const successor = rows.find(
           (o) =>
             o.name !== r.name &&
-            o.createdAt > r.createdAt &&
-            o.build === build &&
-            o.expiresAt - now > ARENA_ROLL_BEFORE_MS,
+            (isStatic(o) ||
+              (o.createdAt > r.createdAt &&
+                o.build === build &&
+                o.expiresAt - now > ARENA_ROLL_BEFORE_MS)),
         );
-        if (!younger) {
+        if (!successor) {
           created = (await this.createArena()) || created;
-        } else if (this.health.get(younger.name)?.ok) {
+        } else if (this.health.get(successor.name)?.ok) {
           await this.drain(r);
           drained.push(r.name);
+        } else if (!isStatic(successor)) {
+          /* the successor is still booting: wait for the next tick */
+        } else {
+          created = (await this.createArena()) || created;
         }
       }
     }

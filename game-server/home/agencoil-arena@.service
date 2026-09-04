@@ -1,0 +1,22 @@
+# One arena process per instance: `systemctl --user enable --now agencoil-arena@1`
+# listens on port 8090 + N (here 8091). Install with home/install.sh.
+[Unit]
+Description=snek arena %i (home)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/git/AgenCoil/game-server
+EnvironmentFile=%h/.config/agencoil/arena.env
+Environment=ARENA_NAME=home-%i
+ExecStart=/bin/sh -c 'PORT=$((8090 + %i)) exec node dist/dev.mjs'
+Restart=always
+RestartSec=2
+# A drained arena refuses new sockets until restarted; the deploy script
+# restarts units in turn so the coordinator always has one to send players to.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

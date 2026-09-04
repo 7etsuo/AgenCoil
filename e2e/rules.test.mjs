@@ -188,11 +188,124 @@ test("the coordinator picks the party's arena, else the oldest with room, else t
   const arenas = [
     { name: "a", domain: "https://a", createdAt: 1, expiresAt: 9, health: ok(60) },
     { name: "b", domain: "https://b", createdAt: 2, expiresAt: 9, health: ok(3) },
-    { name: "c", domain: "https://c", createdAt: 3, expiresAt: 9, health: { ok: false, players: 0, at: 0 } },
+    {
+      name: "c",
+      domain: "https://c",
+      createdAt: 3,
+      expiresAt: 9,
+      health: { ok: false, players: 0, at: 0 },
+    },
   ];
   assert.equal(pickArena(arenas, null, 60).name, "b", "oldest arena with room");
   assert.equal(pickArena(arenas, "a", 60).name, "a", "party sticks to its arena even when full");
   assert.equal(pickArena(arenas, "c", 60).name, "b", "a dead party arena is ignored");
   assert.equal(pickArena([arenas[0]], null, 60).name, "a", "everything full: the newest live one");
   assert.equal(pickArena([arenas[2]], null, 60), null, "nothing live");
+});
+
+test("static arenas are placed on, never rolled or forgotten, and absorb a stale sandbox", async () => {
+  const { mkdirSync: mk } = await import("node:fs");
+  const outDir = join(root, "game-server", "node_modules", ".cache");
+  mk(outDir, { recursive: true });
+  const out = join(outDir, "agencoil-arena-tick.test.mjs");
+  await esbuild.build({
+    entryPoints: [join(root, "game-server", "src", "arena-host.ts")],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    external: ["pg", "@vercel/sandbox"],
+    outfile: out,
+    logLevel: "silent",
+  });
+  const { ArenaHost, STATIC_BUILD } = await import(pathToFileURL(out).href);
+  const now = Date.now();
+  const far = Date.UTC(2100, 0, 1);
+  const rows = [
+    {
+      name: "home-1",
+      domain: "https://home1",
+      created_at: 1,
+      expires_at: far,
+      build: STATIC_BUILD,
+    },
+    {
+      name: "snek-arena-old",
+      domain: "https://old",
+      created_at: now - 3600_000,
+      expires_at: now + 20 * 3600_000,
+      build: "dpl_old",
+    },
+  ];
+  const deleted = [];
+  const pool = {
+    query: async (text) => {
+      if (text.includes("FROM agencoil_arena WHERE expires_at"))
+        return { rows, rowCount: rows.length };
+      if (text.startsWith("DELETE FROM agencoil_arena WHERE name")) {
+        deleted.push(text);
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const health = {
+    "https://home1": { ok: true, players: 4 },
+    "https://old": { ok: true, players: 2 },
+  };
+  const drained = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/api/drain")) {
+      drained.push(u);
+      return new Response("{}", { status: 200 });
+    }
+    const base = u.replace(/\/api\/ws$/, "");
+    return new Response(JSON.stringify(health[base] ?? { ok: false }), { status: 200 });
+  };
+  try {
+    const host = new ArenaHost(pool, {
+      VERCEL: "1",
+      GAME_SECRET: "s",
+      VERCEL_DEPLOYMENT_ID: "dpl_new",
+    });
+    assert.equal(host.enabled, true);
+    // resolve() also kicks a background tick once a minute; keep the test deterministic.
+    host.lastTick = Date.now();
+    // Placement prefers the static arena (created first, has room).
+    const pick = await host.resolve("");
+    assert.equal(pick.name, "home-1");
+    // The stale sandbox drains into the healthy static arena; no successor is made.
+    const t1 = await host.tick();
+    assert.deepEqual(t1.drained, ["snek-arena-old"]);
+    assert.equal(t1.created, false);
+    assert.ok(drained[0].startsWith("https://old/"), "drain went to the sandbox");
+    assert.equal(deleted.length, 1, "only the sandbox row was removed");
+    // A static arena that is down is skipped by placement but its row survives.
+    health["https://home1"] = { ok: false };
+    rows.splice(1, 1, {
+      name: "snek-arena-new",
+      domain: "https://new",
+      created_at: now,
+      expires_at: now + 20 * 3600_000,
+      build: "dpl_new",
+    });
+    health["https://new"] = { ok: true, players: 1 };
+    const host2 = new ArenaHost(pool, {
+      VERCEL: "1",
+      GAME_SECRET: "s",
+      VERCEL_DEPLOYMENT_ID: "dpl_new",
+    });
+    host2.lastTick = Date.now();
+    const t2 = await host2.tick();
+    assert.equal(deleted.length, 1, "the static row is never deleted");
+    assert.deepEqual(t2.drained, []);
+    assert.equal(
+      (await host2.resolve("")).name,
+      "snek-arena-new",
+      "players go to the live sandbox meanwhile",
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

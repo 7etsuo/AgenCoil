@@ -1,0 +1,10 @@
+# ~/.cloudflared/config.yml
+# One hostname per arena process; WebSockets pass through unchanged.
+tunnel: <TUNNEL-UUID>
+credentials-file: /home/tetsuo/.cloudflared/<TUNNEL-UUID>.json
+ingress:
+  - hostname: arena1.example.com
+    service: http://127.0.0.1:8091
+  - hostname: arena2.example.com
+    service: http://127.0.0.1:8092
+  - service: http_status:404
