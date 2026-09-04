@@ -120,6 +120,8 @@ const ZOOM_MIN = 0.55;
 const ZOOM_MAX = 1.7;
 /** How far ahead of the head the aim point sits, in world units. */
 const AIM_REACH = 240;
+/** Aim closer than this to the wisp keeps its current heading (units). */
+const WISP_AIM_DEAD = 12;
 const SPAWN_TIMEOUT_MS = 4000;
 
 interface DeathFx {
@@ -776,7 +778,9 @@ export class CoilEngine {
 
   private refreshAim(): void {
     const a = this.aimScreen;
-    const p = this.world.player;
+    // The wisp steers like a head: the cursor is a direction from it, never
+    // a point it can reach and stall on.
+    const p = this.world.player ?? (this.phase === "wisp" ? this.wisp : null);
     if (!a) return;
     if (!p) {
       this.pointer.x = this.cam.x + a.x / this.cam.z;
@@ -857,7 +861,11 @@ export class CoilEngine {
   private stepWisp(dt: number): void {
     const w = this.wisp;
     if (!w || this.phase !== "wisp") return;
-    w.angle = Math.atan2(this.pointer.y - w.y, this.pointer.x - w.x);
+    // A released key leaves the aim at a fixed point; once the wisp is on it
+    // the direction is undefined, so keep flying the way it was going.
+    const ax = this.pointer.x - w.x;
+    const ay = this.pointer.y - w.y;
+    if (Math.hypot(ax, ay) > WISP_AIM_DEAD) w.angle = Math.atan2(ay, ax);
     const sp = this.boosting ? WISP_BOOST : WISP_SPEED;
     w.x += Math.cos(w.angle) * sp * dt;
     w.y += Math.sin(w.angle) * sp * dt;
@@ -927,8 +935,9 @@ export class CoilEngine {
       net.update(dt, this.pointer, boost);
       const me = net.world.player;
       this.stepWisp(dt);
-      const anchor = me ?? this.wisp;
-      const angle = anchor ? Math.atan2(this.pointer.y - anchor.y, this.pointer.x - anchor.x) : 0;
+      const angle = me
+        ? Math.atan2(this.pointer.y - me.y, this.pointer.x - me.x)
+        : (this.wisp?.angle ?? 0);
       const cssW = this.canvas.width / this.dpr;
       const cssH = this.canvas.height / this.dpr;
       net.sendInput(angle, boost, {
@@ -974,7 +983,12 @@ export class CoilEngine {
     }
     if (this.phase === "dead" && this.wispWanted && this.wispSrv && nowMs > this.deathBeatUntil) {
       this.phase = "wisp";
-      this.wisp = { x: this.wispSrv.x, y: this.wispSrv.y, angle: 0, trail: [] };
+      this.wisp = {
+        x: this.wispSrv.x,
+        y: this.wispSrv.y,
+        angle: this.corpse?.angle ?? 0,
+        trail: [],
+      };
       this.emitHud();
     }
     this.renderer.stepFx(fxDt, this.particles, this.floaters, this.cam);
@@ -1003,7 +1017,8 @@ export class CoilEngine {
     if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) dy += 1;
     if (!dx && !dy) return;
     const p = this.world.player;
-    const origin = p ?? { x: this.cam.x, y: this.cam.y };
+    const origin = p ??
+      (this.phase === "wisp" ? this.wisp : null) ?? { x: this.cam.x, y: this.cam.y };
     this.aimScreen = null;
     this.pointer.x = origin.x + dx * AIM_REACH;
     this.pointer.y = origin.y + dy * AIM_REACH;
