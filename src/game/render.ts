@@ -143,6 +143,12 @@ export class Renderer {
     for (const s of ordered) {
       this.drawSnake(ctx, s, s.id === localId ? aim : null, cam, view, x0, y0, x1, y1, z);
     }
+    // Boost squash marks are dropped when a snake stops boosting; one that
+    // died mid-boost never does, so the map is pruned once it outgrows the arena.
+    if (this.boostSince.size > snakes.length + 16) {
+      const live = new Set(snakes.map((s) => s.id));
+      for (const id of this.boostSince.keys()) if (!live.has(id)) this.boostSince.delete(id);
+    }
     if (phase === "play" && aim) this.drawAim(ctx, aim, z);
 
     this.drawFloaters(ctx, floaters, z);

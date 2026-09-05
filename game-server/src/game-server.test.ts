@@ -223,6 +223,106 @@ test("a snake killed after its socket left leaves no per-snake state behind", as
   }
 });
 
+test("a life ended by a lost connection is still booked on the profile", async () => {
+  const arena = await startArena();
+  try {
+    const p = await joinArena(arena.url, "dev-left", "leaver");
+    const me = arena.game.world.snakes.find((s) => !s.isBot);
+    assert.ok(me);
+    me.mass = 777;
+    me.kills = 2;
+    await p.close();
+    await sleep(50);
+    // What the grace timer would do, without waiting it out.
+    arena.game.world.killSnake(me.id);
+    await sleep(150);
+    // The next session on the same device sees the run it walked away from.
+    const again = new Player(arena.url);
+    await again.open();
+    again.send(ident("dev-left", "leaver"));
+    const profile = parseProfile(await again.next(S2C.PROFILE));
+    assert.equal(profile.best, 777, "the best length of the abandoned run");
+    assert.equal(profile.weekBest, 777);
+    assert.equal(profile.weekLives, 1, "the life counts");
+    assert.deepEqual(profile.weekRuns, [1, 1, 0, 0, 0], "and it was a Silver run");
+    await again.close();
+  } finally {
+    await arena.stop();
+  }
+});
+
+test("a reconnect that reattaches the held snake carries its life on", async () => {
+  const arena = await startArena();
+  try {
+    const game = arena.game as unknown as { clients: Set<{ life: { startAt: number } | null }> };
+    const first = await joinArena(arena.url, "dev-carry", "carrier");
+    const token = (await first.next(S2C.TOKEN)).str();
+    const life = [...game.clients][0]!.life;
+    assert.ok(life, "a life started with the spawn");
+    await first.close();
+    await sleep(60);
+    const second = await joinArena(arena.url, "dev-carry", "carrier", token);
+    const now = [...game.clients][0]!.life;
+    assert.ok(now);
+    assert.equal(now.startAt, life.startAt, "the clock on the life did not restart");
+    await second.close();
+  } finally {
+    await arena.stop();
+  }
+});
+
+test("a head-on names each snake as the other's killer and frees both wire ids", async () => {
+  const arena = await startArena();
+  try {
+    const game = arena.game as unknown as {
+      nids: Map<string, number>;
+      stopLoop(): void;
+      step(dt: number): void;
+    };
+    const a = await joinArena(arena.url, "dev-head-a", "left");
+    const b = await joinArena(arena.url, "dev-head-b", "right");
+    const world = arena.game.world;
+    const sa = world.snakes.find((s) => s.name === "left")!;
+    const sb = world.snakes.find((s) => s.name === "right")!;
+    const nidA = game.nids.get(sa.id)!;
+    const nidB = game.nids.get(sb.id)!;
+    // An empty stretch of arena, stepped by hand, with the two heads pointed at each other.
+    game.stopLoop();
+    await sleep(60);
+    world.clearBots();
+    world.desiredBots = 0;
+    for (const [s, x, angle] of [
+      [sa, -150, 0],
+      [sb, 150, Math.PI],
+    ] as const) {
+      s.x = x;
+      s.y = 0;
+      s.angle = angle;
+      s.invuln = 0;
+      s.points = [];
+      world.ensureTrail(s);
+      world.inputs.get(s.id)!.angle = angle;
+    }
+    for (let i = 0; i < 200 && world.snakes.some((s) => !s.isBot); i++) game.step(1 / 40);
+    assert.ok(!world.snakes.some((s) => !s.isBot), "both heads died");
+    const deathOf = async (p: Player, nid: number): Promise<number> => {
+      for (;;) {
+        const r = await p.next(S2C.DEATH, 1000);
+        const who = r.u16();
+        const killer = r.u16();
+        if (who === nid) return killer;
+      }
+    };
+    assert.equal(await deathOf(a, nidA), nidB, "the left snake was killed by the right one");
+    assert.equal(await deathOf(b, nidB), nidA, "and the right one by the left");
+    assert.ok(!game.nids.has(sa.id) && !game.nids.has(sb.id), "neither id lingers");
+    await a.close();
+    await b.close();
+  } finally {
+    await arena.stop();
+  }
+});
+
 test("a resume token is single use", async () => {
   const arena = await startArena();
   try {

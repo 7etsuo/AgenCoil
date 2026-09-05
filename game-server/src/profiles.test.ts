@@ -66,6 +66,25 @@ test("concurrent loads of one key share a single profile object", async () => {
   assert.equal(await store.load("same-key", "c"), a);
 });
 
+test("a flushed profile nobody holds is forgotten after a while; in use, dirty or without a database it stays", async () => {
+  const pool = { query: async () => ({ rows: [], rowCount: 0 }) } as unknown as pg.Pool;
+  const store = new ProfileStore(pool);
+  const p = await store.load("dev-idle", "idle");
+  const later = Date.now() + 11 * 60_000;
+  assert.equal(store.sweep(new Set(["dev-idle"]), undefined, later), 0, "held by a client");
+  assert.equal(await store.load("dev-idle", "idle"), p);
+  store.setName(p, "renamed");
+  assert.equal(store.sweep(new Set(), undefined, later), 0, "a dirty row waits for its flush");
+  await (store as unknown as { flush(): Promise<void> }).flush();
+  assert.equal(store.sweep(new Set(), undefined, Date.now()), 0, "used a moment ago");
+  assert.equal(store.sweep(new Set(), undefined, later), 1);
+  assert.notEqual(await store.load("dev-idle", "idle"), p, "a later load reads it afresh");
+  const memory = new ProfileStore(null);
+  const m = await memory.load("dev-mem", "mem");
+  assert.equal(memory.sweep(new Set(), undefined, later), 0, "in memory the cache is the store");
+  assert.equal(await memory.load("dev-mem", "mem"), m);
+});
+
 test("a fresh device with no history does not take over an account", async () => {
   const store = new ProfileStore();
   const first = await store.link(await store.load("d1", "a"), id, "a");

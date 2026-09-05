@@ -1430,8 +1430,11 @@ export class World {
     const pellets = reason === "wall" ? [] : this.pelletsFrom(s);
     for (const p of pellets) this.addFood(p);
     if (killerId) {
+      // The killer may have died in the same tick (a head-on): kills are
+      // collected against the tick's starting state and applied together,
+      // so both heads are credited, whichever the loop reached first.
       const k = this.snakes.find((x) => x.id === killerId);
-      if (k && k.alive) k.kills++;
+      if (k) k.kills++;
     }
     const event: DeathEvent = { snake: s, reason, killerId, killerName, pellets };
     if (this.stepping) this.deaths.push(event);

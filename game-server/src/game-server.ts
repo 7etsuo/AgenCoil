@@ -288,6 +288,12 @@ export class GameServer {
   /** Redeemed tickets, so a reconnect or an arena hop does not call the site again. */
   private readonly identities = new Map<string, { id: Identity; at: number }>();
   private readonly clients = new Set<Client>();
+  /**
+   * Clients whose socket closed while their snake lives on in the grace
+   * window, by snake id. The life is booked on the profile when the snake
+   * dies, and carried on when a reconnect reattaches it.
+   */
+  private readonly detached = new Map<string, Client>();
   private readonly nids = new Map<string, number>();
   private readonly grace = new Map<string, NodeJS.Timeout>();
   private readonly daily = new DailyBoard();
@@ -543,6 +549,19 @@ export class GameServer {
     return null;
   }
 
+  /** The client behind a snake: connected, or gone with the snake still in its grace window. */
+  private ownerOf(sid: string): Client | null {
+    return this.clientBySid(sid) ?? this.detached.get(sid) ?? null;
+  }
+
+  /** Profile keys held by connected clients and by snakes still in their grace window. */
+  private profilesInUse(): Set<string> {
+    const keys = new Set<string>();
+    for (const c of this.clients) if (c.profile) keys.add(c.profile.key);
+    for (const c of this.detached.values()) if (c.profile) keys.add(c.profile.key);
+    return keys;
+  }
+
   /** Take a snake out of its party, and forget the party once it is empty. */
   private leaveParty(code: string, sid: string): void {
     const set = this.parties.get(code);
@@ -587,6 +606,7 @@ export class GameServer {
     this.stopLoop();
     for (const t of this.grace.values()) clearTimeout(t);
     this.grace.clear();
+    this.detached.clear();
     for (const c of this.clients) c.ws.close(1001, "server closing");
     this.wss?.close();
     this.wss = null;
@@ -734,9 +754,12 @@ export class GameServer {
     if (!sid) return;
     if (client.party) this.leaveParty(client.party, sid);
     // Hold the snake for a moment so a reconnect (forced by the platform's
-    // connection cap, or a flaky network) can pick it back up.
+    // connection cap, or a flaky network) can pick it back up. The client
+    // record is kept with it: a snake that dies in the window still ends a
+    // life, and the profile must hear about it.
     const input = this.world.inputs.get(sid);
     if (input) input.boost = false;
+    this.detached.set(sid, client);
     this.grace.set(
       sid,
       setTimeout(() => {
@@ -879,6 +902,9 @@ export class GameServer {
     const now = Date.now();
     let snake: Snake | null = null;
     let spawnKind = "fresh";
+    // The life so far of a reattached snake, so a reconnect does not restart
+    // the clock on "survive five minutes" or forget a boost.
+    let resumed: Life | null = null;
     if (token) {
       const held = this.world.snakes.find((s) => s.id === token.sid && s.alive);
       const timer = this.grace.get(token.sid);
@@ -889,7 +915,14 @@ export class GameServer {
         // second copy being built.
         if (timer) clearTimeout(timer);
         this.grace.delete(token.sid);
+        const left = this.detached.get(token.sid);
+        this.detached.delete(token.sid);
         spawnKind = "resume";
+        const previous = owner && owner !== client ? owner : left;
+        if (previous) {
+          resumed = previous.life;
+          previous.life = null;
+        }
         if (owner && owner !== client) {
           owner.sid = null;
           owner.known.clear();
@@ -995,7 +1028,7 @@ export class GameServer {
     snake.finish = client.profile?.prevTier ?? 0;
     client.sid = snake.id;
     client.known.clear();
-    client.life = {
+    client.life = resumed ?? {
       startAt: Date.now(),
       near: 0,
       remains: 0,
@@ -1516,7 +1549,11 @@ export class GameServer {
       if (typeof t.sid !== "string" || typeof t.mass !== "number" || typeof t.exp !== "number")
         return null;
       if (!Number.isFinite(t.mass) || t.exp < Date.now()) return null;
+      // A rebuilt snake is placed from these; a NaN would put it nowhere,
+      // where nothing can ever touch it.
+      if (![t.x, t.y, t.angle].every(Number.isFinite)) return null;
       t.mass = Math.min(t.mass, 100_000);
+      t.kills = Number.isFinite(t.kills) ? Math.max(0, Math.floor(t.kills)) : 0;
       return t;
     } catch {
       return null;
@@ -1570,6 +1607,7 @@ export class GameServer {
     if (this.tick % (SERVER_TICK_HZ * 30) === 0) {
       this.decayHeat();
       this.pruneCaches();
+      this.profiles.sweep(this.profilesInUse());
     }
   }
 
@@ -1690,14 +1728,21 @@ export class GameServer {
         .f32(s.y)
         .finish();
       const bounty = this.bountyOf.get(s.id) ?? 0;
-      const killerClient = d.killerId ? this.clientBySid(d.killerId) : null;
-      const owner = this.clientBySid(s.id);
+      const killerClient = d.killerId ? this.ownerOf(d.killerId) : null;
+      const owner = this.ownerOf(s.id);
       const life = owner?.life ?? null;
       for (const c of this.clients) {
         if (c.known.has(s.id) || c.sid === s.id || (d.killerId && c.sid === d.killerId))
           c.ws.send(msg);
         c.known.delete(s.id);
         if (c.sid === s.id) this.endLife(c, s);
+      }
+      // A snake whose socket left dies in its grace window: the life still
+      // counts (best, kills, quests, league runs), without a wisp or comeback.
+      const left = this.detached.get(s.id);
+      if (left) {
+        this.detached.delete(s.id);
+        this.endLife(left, s, false);
       }
       if (!s.isBot) {
         // Cause: the rim, another player, a bot (the boss counts as one), or
@@ -1735,7 +1780,6 @@ export class GameServer {
         for (const c of this.clients) this.notice(c, 1, line);
       }
       if (!s.isBot) this.daily.record(s.name, Math.floor(s.mass));
-      this.nids.delete(s.id);
       // Only a real snake-on-snake death marks the spot; a dropped connection
       // or a retired bot has no killer and says nothing about the place.
       if (d.reason === "snake" && d.killerId) this.recordDeath(s.x, s.y);
@@ -1746,6 +1790,11 @@ export class GameServer {
         this.grace.delete(s.id);
       }
     }
+    // Wire ids are freed once the whole batch is told: in a head-on both
+    // snakes die at once, and each death names the other as its killer.
+    // Freeing an id inside the loop minted a fresh one for a snake already
+    // dead, which nothing ever released.
+    for (const d of this.world.deaths) this.nids.delete(d.snake.id);
   }
 
   /**

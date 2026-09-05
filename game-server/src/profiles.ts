@@ -174,12 +174,17 @@ export interface ChallengeView {
   done: boolean;
 }
 
+/** A cached profile nobody has asked for in this long may be forgotten (see `sweep`). */
+export const PROFILE_IDLE_MS = 10 * 60_000;
+
 export class ProfileStore {
   private readonly cache = new Map<string, Profile>();
   /** Loads in progress, so two sockets asking for one key share a single Profile object. */
   private readonly loading = new Map<string, Promise<Profile>>();
   private readonly dirty = new Set<string>();
   private readonly versions = new Map<string, number>();
+  /** When each cached profile was last asked for, so idle ones can be forgotten. */
+  private readonly lastUsed = new Map<string, number>();
   private pool: pg.Pool | null = null;
 
   /** The shared connection pool, for the arena coordinator. */
@@ -343,6 +348,7 @@ export class ProfileStore {
   async load(key: string, name: string): Promise<Profile> {
     const cached = this.cache.get(key);
     if (cached) {
+      this.lastUsed.set(key, Date.now());
       this.setName(cached, name);
       this.rollDay(cached);
       return cached;
@@ -476,7 +482,32 @@ export class ProfileStore {
     }
     this.rollDay(p);
     this.cache.set(key, p);
+    this.lastUsed.set(key, Date.now());
     return p;
+  }
+
+  /**
+   * Forget cached profiles nobody has used for a while, so an arena that
+   * runs for weeks does not keep every visitor it ever saw. `inUse` names
+   * the keys connected clients still hold; those stay, as do rows waiting
+   * for a flush, loads in flight and toasts not yet shown. Without a
+   * database the cache is the store, so nothing is ever dropped. Returns
+   * how many were forgotten.
+   */
+  sweep(inUse: ReadonlySet<string>, idleMs = PROFILE_IDLE_MS, now = Date.now()): number {
+    if (!this.pool) return 0;
+    for (const key of inUse) if (this.cache.has(key)) this.lastUsed.set(key, now);
+    let dropped = 0;
+    for (const [key, p] of this.cache) {
+      if (inUse.has(key) || this.dirty.has(key) || this.loading.has(key)) continue;
+      if (p.pendingAchv.length) continue;
+      if (now - (this.lastUsed.get(key) ?? 0) < idleMs) continue;
+      this.cache.delete(key);
+      this.versions.delete(key);
+      this.lastUsed.delete(key);
+      dropped++;
+    }
+    return dropped;
   }
 
   private rollDay(p: Profile): void {
@@ -906,9 +937,11 @@ export class ProfileStore {
       this.cache.delete(device.key);
       this.dirty.delete(device.key);
       this.versions.delete(device.key);
+      this.lastUsed.delete(device.key);
       device.key = key;
       p = device;
       this.cache.set(key, p);
+      this.lastUsed.set(key, Date.now());
     }
     if (!p) p = await this.load(key, name);
     p.sub = id.sub;

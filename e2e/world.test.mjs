@@ -71,6 +71,9 @@ test("a head-on collision kills both snakes", () => {
   assert.ok(n >= 0, "both should die within the step budget");
   assert.ok(died.has(a.id) && died.has(b.id));
   assert.equal(world.snakes.length, 0);
+  // Each head took the other down; which one the loop reached first is no reason to credit only it.
+  assert.equal(a.kills, 1);
+  assert.equal(b.kills, 1);
 });
 
 test("a spawn-protected snake cannot win a head-on", () => {
