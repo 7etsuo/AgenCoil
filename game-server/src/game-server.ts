@@ -1136,7 +1136,6 @@ export class GameServer {
       if (client.key && !client.profile)
         client.profile = await this.profiles.load(client.key, client.name);
       if (!client.alive) return;
-      if (client.trusted && client.profile) this.profiles.flag(client.profile);
       // The identify message may have arrived before the nickname was known.
       if (client.profile && !client.account) this.profiles.setName(client.profile, client.name);
       const unlocks = client.profile?.unlocks ?? 0;
@@ -1426,8 +1425,6 @@ export class GameServer {
     if (!client.account) client.key = key;
     if (!client.profile) client.profile = await this.profiles.load(key, name);
     if (!client.alive) return;
-    // The owner's agents play under profiles that count for nothing public.
-    if (client.trusted) this.profiles.flag(client.profile);
     if (idOrigin && idTicket) {
       await this.linkAccount(client, idOrigin, idTicket);
       if (!client.alive) return;
@@ -2423,7 +2420,7 @@ export class GameServer {
         const line = `${d.killerName ?? "someone"} claimed the ${bounty} bounty on ${s.name}`;
         for (const c of this.clients) this.notice(c, 1, line);
       }
-      if (!s.isBot && !owner?.trusted) this.daily.record(s.name, Math.floor(s.mass));
+      if (!s.isBot) this.daily.record(s.name, Math.floor(s.mass));
       // Only a real snake-on-snake death marks the spot; a dropped connection
       // or a retired bot has no killer and says nothing about the place.
       if (d.reason === "snake" && d.killerId) this.recordDeath(s.x, s.y);
