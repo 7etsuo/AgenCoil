@@ -82,8 +82,9 @@ class Agent {
     index: number,
     url: string,
     private readonly weights: Weights,
+    names: readonly string[] = NAMES,
   ) {
-    this.name = NAMES[index % NAMES.length]! + (index >= NAMES.length ? String(index) : "");
+    this.name = names[index % names.length]! + (index >= names.length ? String(index) : "");
     // The client reads its device key from localStorage as it is built.
     const g = globalThis as unknown as { localStorage: Memory; sessionStorage: Memory };
     g.localStorage = new Memory({
@@ -171,6 +172,11 @@ if (!secret) {
 }
 const count = Number(arg("agents", "10"));
 const minutes = Number(arg("minutes", "180"));
+// Names for the run, comma separated (up to 16 characters each, as the arena allows).
+const names = arg("names", "")
+  .split(",")
+  .map((n) => n.trim().slice(0, 16))
+  .filter(Boolean);
 const server = arg("url", "wss://agencoil-server.vercel.app/api/ws");
 const weights = JSON.parse(
   await (
@@ -181,7 +187,7 @@ const url = `${server}${server.includes("?") ? "&" : "?"}agent=${encodeURICompon
 console.log(`${count} agents for ${minutes} minutes on ${server}`);
 const agents: Agent[] = [];
 for (let i = 0; i < count; i++) {
-  agents.push(new Agent(i, url, weights));
+  agents.push(new Agent(i, url, weights, names.length ? names : NAMES));
   // Spread the connections out a little.
   await new Promise((r) => setTimeout(r, 400));
 }
