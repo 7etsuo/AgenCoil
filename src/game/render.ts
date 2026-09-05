@@ -746,12 +746,17 @@ export class Renderer {
       ctx.stroke();
       ctx.globalAlpha = 1;
     }
+    // Spawn protection works both ways: a protected snake neither dies nor
+    // kills, so it is drawn as a ghost, plainly not solid yet.
+    const ghost = s.invuln > 0 && !s.boss;
+    if (ghost) ctx.globalAlpha = 0.55;
 
     if (invisible) {
       tracePath(0, 0);
       ctx.strokeStyle = fill;
       ctx.lineWidth = r * 2;
       ctx.stroke();
+      ctx.globalAlpha = 1;
       return;
     }
 
@@ -825,6 +830,7 @@ export class Renderer {
       this.drawEvolution(ctx, s, r);
       this.drawEyes(ctx, s, r, aim);
     }
+    ctx.globalAlpha = 1;
   }
 
   /** Legendary (level 20+): a bright pulse travelling down the body twice a second. */

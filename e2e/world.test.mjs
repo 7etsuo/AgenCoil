@@ -209,10 +209,12 @@ test("rewind follows actual travel when the other snake just stopped boosting", 
     `boosted travel ${actual.toFixed(0)} should far exceed nominal ${nominal.toFixed(0)}`,
   );
   // A head placed where the nominal rewind would put the other head is NOT a
-  // hit, because the real rewound head is much further back.
+  // hit, because the real rewound head is much further back. The lag sits at
+  // the compensation cap (150 ms), so the nominal distance is taken over that.
   const sum = model.radiusOf(20) + model.radiusOf(200);
-  place(world, "me", other.x - nominal + sum * 0.5, sum * 0.3, Math.PI / 2, 20);
-  world.lags.set("me", 0.2);
+  const nominalCap = model.speedOf(other.mass, false) * 0.15;
+  place(world, "me", other.x - nominalCap + sum * 0.5, sum * 0.3, Math.PI / 2, 20);
+  world.lags.set("me", 0.15);
   world.step(1 / 40, 0, 0, false);
   assert.ok(!world.deaths.some((d) => d.snake.id === "me"), "nominal rewind spot must be clear");
 });

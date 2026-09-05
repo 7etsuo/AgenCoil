@@ -1747,7 +1747,16 @@ export class GameServer {
     for (const s of this.world.snakes) {
       if (!s.isBot || !s.alive || s.boss) continue;
       bots++;
-      if (s.mass >= HELPER_BOT_MASS && (!victim || s.mass < victim.mass)) victim = s;
+      if (s.mass < HELPER_BOT_MASS || (victim && s.mass >= victim.mass)) continue;
+      // Never in front of anyone: a bot dying with nothing near it reads as a bug.
+      let seen = false;
+      for (const c of this.clients) {
+        if (this.snakeVisible(c, s)) {
+          seen = true;
+          break;
+        }
+      }
+      if (!seen) victim = s;
     }
     if (bots > this.world.desiredBots && victim) this.world.killSnake(victim.id);
   }

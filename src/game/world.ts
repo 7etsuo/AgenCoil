@@ -48,8 +48,14 @@ import {
 export const CELL = 96;
 /** Fraction of the summed radii at which two snakes count as touching. */
 const HIT_CONTACT = 0.95;
-/** Longest view lag a player may be compensated for, in seconds. */
-const MAX_LAG_COMP = 0.35;
+/**
+ * Longest view lag a player may be compensated for, in seconds. The body a
+ * snake laid down inside this window "did not exist yet" for a player, so
+ * the cap decides how close a cut-off can be and still kill: at 350 ms a
+ * head could pass through two to five widths of fresh body, which the body's
+ * owner saw as going straight through them.
+ */
+const MAX_LAG_COMP = 0.15;
 /** Ticks of travel and tail history kept for rewinds (0.5 s at the server rate). */
 const TRAVEL_LOG = Math.ceil(SERVER_TICK_HZ / 2);
 const TAIL_HIST = SERVER_TICK_HZ;
@@ -59,7 +65,7 @@ const BOSS_HIT_EVERY = SERVER_TICK_HZ;
 const BOSS_LEG_TICKS = SERVER_TICK_HZ * 45;
 /** Bots past this length boost freely, shedding what they cannot use. */
 const BOT_SOFT_CAP = 2000;
-/** Bots past this length retire soon after, turning into a big pile of remains. */
+/** Bots past this length boost without pause, shedding it as pellets until they are back under. */
 const BOT_HARD_CAP = 4500;
 const GRID_OFF = 256;
 const GRID_SPAN = 512;
@@ -540,14 +546,22 @@ export class World {
     // Only bots take the event multiplier: their mass is capped, so doubling
     // it cannot run away, while player remains fed back into players did.
     const mult = s.isBot ? this.remainsMult : 1;
-    const each = Math.max(1, Math.min(REMAINS_CAP, s.mass * 0.85 * mult) / n);
+    const total = Math.max(n, Math.min(REMAINS_CAP, s.mass * 0.85 * mult));
+    // Orbs vary in size, but together they are worth exactly the total.
+    const weights: number[] = [];
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+      const w = randRange(0.7, 1.3);
+      weights.push(w);
+      sum += w;
+    }
     const colors = bandsOf(s).map(foodColorOf);
     const bandLen = Math.max(1, s.bands?.length ? 3 : SKINS[s.skin % SKINS.length]!.band);
     for (let i = 0; i < n; i++) {
       const j = ((i / n) * (pts.length - 1)) | 0;
       const p = pts[j]!;
       const fromHead = pts.length - 1 - j;
-      const v = Math.round(each * randRange(0.7, 1.3) * 10) / 10;
+      const v = Math.round(((total * weights[i]!) / sum) * 10) / 10;
       out.push({
         x: p.x + randRange(-9, 9),
         y: p.y + randRange(-9, 9),
@@ -1020,12 +1034,11 @@ export class World {
       this.chooseGoal(s);
       // Without enough players to hunt them, bots would compound forever
       // and the arena would fill with giants. Big bots get reckless and
-      // shed length; the very biggest retire into remains for the rest.
+      // shed length; past the hard cap they boost without pause, which
+      // sheds it as pellets everyone can eat and gets them killed the way
+      // snakes die, by driving into something, never by popping unprovoked.
       if (s.mass > BOT_SOFT_CAP && Math.random() < 0.5) s.boostLeft = 0.4;
-      if (s.mass > BOT_HARD_CAP && Math.random() < 0.02) {
-        this.kill(s, "snake", null, null);
-        return;
-      }
+      if (s.mass > BOT_HARD_CAP) s.boostLeft = 1;
     }
     if (s.avoid <= 0) {
       s.avoid = 0.08;
