@@ -153,9 +153,9 @@ function arg(name: string, def: string): string {
   return i >= 0 ? (process.argv[i + 1] ?? def) : def;
 }
 
-const secret = process.env.GAME_SECRET ?? "";
+const secret = process.env.AGENT_SECRET || process.env.GAME_SECRET || "";
 if (!secret) {
-  console.error("GAME_SECRET is needed to mint the agent pass");
+  console.error("AGENT_SECRET (or GAME_SECRET) is needed to mint the agent pass");
   process.exit(1);
 }
 const count = Number(arg("agents", "10"));

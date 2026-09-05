@@ -1,5 +1,6 @@
 // Put trained agents into a live arena as real clients. Usage:
-//   GAME_SECRET=... node rl/play.mjs [--agents 10] [--minutes 180] [--weights rl/dist/watch/weights.json] [--url wss://.../api/ws]
+//   AGENT_SECRET=... node rl/play.mjs [--agents 10] [--minutes 180] [--weights rl/dist/watch/weights.json] [--url wss://.../api/ws]
+// AGENT_SECRET is the agencoil-server project's variable of that name (vercel env pull).
 // The weights come from `python3 rl/export.py rl/runs/<run>/latest.pt <out.json>`.
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";

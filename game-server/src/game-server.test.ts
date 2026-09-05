@@ -47,6 +47,7 @@ const { C2S, S2C, Reader, Writer, writeBands } = protocol;
 delete process.env.DATABASE_URL;
 delete process.env.TURNSTILE_SECRET_KEY;
 delete process.env.VERCEL;
+delete process.env.AGENT_SECRET;
 process.env.GAME_SECRET = "test-secret";
 
 interface Arena {

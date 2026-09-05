@@ -447,6 +447,7 @@ export class ArenaHost {
         "TURNSTILE_SECRET_KEY",
         "TURNSTILE_ACTION",
         "TURNSTILE_HOSTNAMES",
+        "AGENT_SECRET",
       ];
       const env: Record<string, string> = {
         PORT: String(ARENA_PORT),

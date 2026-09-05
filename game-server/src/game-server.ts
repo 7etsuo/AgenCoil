@@ -855,7 +855,7 @@ export class GameServer {
     const asked = Number(params.get("v"));
     const proto = Number.isFinite(asked) ? Math.max(1, Math.min(5, Math.floor(asked))) : 1;
     // The owner's headless agents carry a signed pass: no per-address caps, no human gate.
-    const trusted = checkAgentPass(params.get("agent"), this.secret);
+    const trusted = checkAgentPass(params.get("agent"), process.env.AGENT_SECRET || this.secret);
     const now = Date.now();
     const recent = (this.connectLog.get(ip) ?? []).filter((t) => now - t < 60_000);
     recent.push(now);

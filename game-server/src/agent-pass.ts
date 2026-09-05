@@ -1,9 +1,10 @@
 /**
  * A pass for the owner's own headless clients (the trained agents in rl/):
- * `?agent=<timestamp>.<signature>` on the socket URL, signed with the game
- * secret. A socket carrying a valid pass is exempt from the per-address
- * connection caps and the human-verification gate, nothing else. The
- * signature covers the timestamp, and a pass is honoured for a day.
+ * `?agent=<timestamp>.<signature>` on the socket URL, signed with
+ * `AGENT_SECRET` (the game secret when that is unset). A socket carrying a
+ * valid pass is exempt from the per-address connection caps and the
+ * human-verification gate, nothing else. The signature covers the
+ * timestamp, and a pass is honoured for a day.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 
