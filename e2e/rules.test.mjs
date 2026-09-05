@@ -605,12 +605,17 @@ test("league tiers are shares of the season's field, with the fixed ladder for a
   const field = Array.from({ length: 100 }, (_, i) => (i + 1) * 100);
   const c = rules.cutoffsFrom(field);
   assert.equal(c[0], 0, "Bronze is everyone");
-  assert.ok(c[1] >= 4400 && c[1] <= 4700, `Silver starts at the 45th percentile (${c[1]})`);
-  assert.ok(c[2] >= 7400 && c[2] <= 7700, `Gold at the 75th (${c[2]})`);
-  assert.ok(c[3] >= 9100 && c[3] <= 9300, `Platinum at the 92nd (${c[3]})`);
-  assert.ok(c[4] >= 9700 && c[4] <= 9900, `Diamond at the 98th (${c[4]})`);
+  assert.ok(c[1] >= 3400 && c[1] <= 3700, `Silver starts at the 35th percentile (${c[1]})`);
+  assert.ok(c[2] >= 6400 && c[2] <= 6700, `Gold at the 65th (${c[2]})`);
+  assert.ok(c[3] >= 8400 && c[3] <= 8600, `Platinum at the 85th (${c[3]})`);
+  assert.ok(c[4] >= 9400 && c[4] <= 9600, `Diamond at the 95th (${c[4]})`);
   assert.equal(rules.leagueOf(10000, c), 4);
   assert.equal(rules.leagueOf(5000, c), 1);
+  // A small field: every tier is at least three players wide.
+  const small = rules.cutoffsFrom(Array.from({ length: 20 }, (_, i) => (i + 1) * 100));
+  assert.equal(rules.leagueOf(1800, small), 4, "the top three are Diamond");
+  assert.ok(rules.leagueOf(1700, small) < 4, "the fourth is not");
+  assert.equal(rules.leagueOf(1500, small), 3, "the next three Platinum");
   assert.equal(rules.leagueOf(5000), 4, "on the fixed ladder 5000 is Diamond");
   assert.deepEqual(
     [...rules.cutoffsFrom([50, 60, 70])],

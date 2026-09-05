@@ -50,14 +50,17 @@ export const LEAGUES = [
 
 /**
  * Each tier is the top share of the season's players by season best:
- * Diamond the top 2%, Platinum the top 8%, Gold the top 25%, Silver the
- * top 55%, Bronze everyone. The server turns the field into length cutoffs
- * (`cutoffsFrom`) and sends them to every client, so the same run is
- * Diamond in a weak field and Gold in a strong one.
+ * Diamond the top 5%, Platinum the top 15%, Gold the top 35%, Silver the
+ * top 65%, Bronze everyone, and every tier is at least `LEAGUE_MIN_TIER`
+ * players wide, so a small field still has real groups (with 37 players,
+ * Diamond is the top three). The server turns the field into length
+ * cutoffs (`cutoffsFrom`) and sends them to every client, so the same run
+ * is Diamond in a weak field and Gold in a strong one.
  */
-export const LEAGUE_SHARES = [1, 0.55, 0.25, 0.08, 0.02] as const;
+export const LEAGUE_SHARES = [1, 0.65, 0.35, 0.15, 0.05] as const;
+export const LEAGUE_MIN_TIER = 3;
 /** Fewer season players than this, and the fixed ladder is used instead of percentiles. */
-export const LEAGUE_MIN_FIELD = 20;
+export const LEAGUE_MIN_FIELD = 15;
 /** The length a best must reach per tier, Bronze first (always 0). */
 export type Cutoffs = readonly number[];
 export const DEFAULT_CUTOFFS: Cutoffs = LEAGUES.map((l) => l.min);
@@ -68,7 +71,12 @@ export function cutoffsFrom(bestsAscending: readonly number[]): Cutoffs {
   if (n < LEAGUE_MIN_FIELD) return DEFAULT_CUTOFFS;
   const out: number[] = [0];
   for (let i = 1; i < LEAGUE_SHARES.length; i++) {
-    const pos = (1 - LEAGUE_SHARES[i]!) * (n - 1);
+    // The share from the top, or enough players for this tier and the ones above it.
+    const share = Math.min(
+      1,
+      Math.max(LEAGUE_SHARES[i]!, ((LEAGUES.length - i) * LEAGUE_MIN_TIER) / n),
+    );
+    const pos = (1 - share) * (n - 1);
     const lo = Math.floor(pos);
     const hi = Math.min(n - 1, lo + 1);
     const v = bestsAscending[lo]! + (bestsAscending[hi]! - bestsAscending[lo]!) * (pos - lo);

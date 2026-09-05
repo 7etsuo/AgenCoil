@@ -1513,9 +1513,9 @@ export function CoilApp() {
                       the week
                     </div>
                     <div className="mt-0.5 text-subtle">
-                      Tiers are shares of this season&apos;s players: Diamond the top 2%, Platinum
-                      the top 8%, Gold the top 25%, Silver the top 55%. The lengths move with the
-                      field.
+                      Tiers are shares of this season&apos;s players: Diamond the top 5%, Platinum
+                      the top 15%, Gold the top 35%, Silver the top 65%, each at least three players
+                      wide. The lengths move with the field.
                     </div>
                     <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-subtle">
                       {LEAGUES.map((l, i) => (
