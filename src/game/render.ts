@@ -656,6 +656,36 @@ export class Renderer {
         ctx.drawImage(orb.canvas, x - size / 2, y - size / 2, size, size);
         return;
       }
+      if (f.k === 5) {
+        // A loot orb: a spinning gem in the rarity band's glow, gold on purple.
+        const phase = f.x * 0.07 + f.y * 0.05;
+        const size = f.r * 1.4;
+        if (size * z < 2) return;
+        ctx.save();
+        ctx.translate(f.x, f.y + Math.sin(t * 2 + phase) * 2);
+        ctx.rotate(t * 2 + phase);
+        ctx.globalCompositeOperation = "lighter";
+        ctx.globalAlpha = 0.35 + Math.sin(t * 4 + phase) * 0.15;
+        ctx.beginPath();
+        ctx.arc(0, 0, size * 1.6, 0, Math.PI * 2);
+        ctx.fillStyle = f.c >= 2 ? "#b56bff" : f.c === 1 ? "#4da3ff" : "#f0c14a";
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = "source-over";
+        ctx.beginPath();
+        ctx.moveTo(0, -size);
+        ctx.lineTo(size * 0.7, 0);
+        ctx.lineTo(0, size);
+        ctx.lineTo(-size * 0.7, 0);
+        ctx.closePath();
+        ctx.fillStyle = "#f0c14a";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255,255,255,0.85)";
+        ctx.lineWidth = Math.max(1, size * 0.12);
+        ctx.stroke();
+        ctx.restore();
+        return;
+      }
       const wob = f.k === 3 || f.k === 4 ? 0.18 : 0.09;
       const pulse = 1 - wob + Math.sin(t * (f.k >= 3 ? 6 : 2.6) + f.x * 0.07 + f.y * 0.05) * wob;
       const dest = spr.size * (f.r / 15) * pulse;

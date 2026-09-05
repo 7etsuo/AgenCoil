@@ -9,7 +9,7 @@ import WebSocket from "ws";
 import type { GameServer as GameServerT } from "./game-server.ts";
 import type * as ProtocolT from "../../src/game/protocol.ts";
 import { growthXp, killXp, levelOf, xpForLevel } from "../../src/game/level.ts";
-import { cosmeticIndex } from "../../src/game/cosmetics.ts";
+import { cosmeticIndex, dropPool } from "../../src/game/cosmetics.ts";
 
 // The server and the shared protocol use extensionless imports, which the
 // type stripper cannot resolve, so both are bundled the way the build does.
@@ -1646,6 +1646,196 @@ test("the wardrobe: protocol 6 entries carry the loadout, equips need ownership,
     wardrobe(3, 0, "halo");
     assert.equal(parseWardrobe(await p.next(S2C.WARDROBE)).status, 3, "never sold");
     await p.close();
+  } finally {
+    await arena.stop();
+  }
+});
+test("loot orbs: a big player's death by another player drops one, never twice in ten minutes, never for party mates, agents or bots; eating it rolls a piece", async () => {
+  const arena = await startArena();
+  try {
+    const url6 = arena.url.replace(/v=2$/, "v=6");
+    const killer = await joinArena(url6, "dev-loot-k", "hunter");
+    const victim = await joinArena(url6, "dev-loot-v", "prey");
+    const game = arena.game as unknown as {
+      rand: () => number;
+      stopLoop(): void;
+      step(dt: number): void;
+      clients: Set<{ sid: string | null; party: string; trusted: boolean }>;
+    };
+    game.stopLoop();
+    await sleep(60);
+    game.rand = () => 0;
+    const world = arena.game.world;
+    world.clearBots();
+    world.desiredBots = 0;
+    const kill = (s: (typeof world.snakes)[number], by: (typeof world.snakes)[number]): void => {
+      (world as unknown as { kill(s: unknown, r: "snake", k: string, n: string): void }).kill(
+        s,
+        "snake",
+        by.id,
+        by.name,
+      );
+      game.step(1 / 40);
+    };
+    const orbs = () => [...world.foodById.values()].filter((f) => f.k === 5);
+    const respawn = async (p: Player, name: string, key: string) => {
+      p.send(hello(name, key, "", true));
+      await p.next(S2C.SPAWNED);
+      const s = world.snakes.find((x) => x.name === name && x.alive)!;
+      s.invuln = 0;
+      return s;
+    };
+    const sk = world.snakes.find((s) => s.name === "hunter")!;
+    let sv = world.snakes.find((s) => s.name === "prey")!;
+    sv.mass = 250;
+    kill(sv, sk);
+    assert.equal(orbs().length, 0, "under 300 drops nothing");
+    await sleep(450);
+    sv = await respawn(victim, "prey", "dev-loot-v");
+    sv.mass = 1500;
+    sv.x = 900;
+    sv.y = 900;
+    kill(sv, sk);
+    const [orb] = orbs();
+    assert.ok(orb, "a 1,500 victim drops an orb");
+    assert.equal(orb!.c, 1, "the orb carries the middle band");
+    assert.ok(Math.hypot(orb!.x - 900, orb!.y - 900) < 60, "among the remains");
+    await sleep(450);
+    sv = await respawn(victim, "prey", "dev-loot-v");
+    sv.mass = 1500;
+    kill(sv, sk);
+    assert.equal(orbs().length, 1, "the same victim drops nothing twice in ten minutes");
+    // A bot victim drops nothing, and neither does a party mate.
+    const bot = world.spawnBot(new Set(), true);
+    bot.mass = 2000;
+    kill(bot, sk);
+    assert.equal(orbs().length, 1, "bots drop nothing");
+    await sleep(450);
+    sv = await respawn(victim, "prey", "dev-loot-v");
+    sv.mass = 1500;
+    const cv = [...game.clients].find((c) => c.sid === sv.id)!;
+    const ck = [...game.clients].find((c) => c.sid === sk.id)!;
+    (arena.game as unknown as { lootedAt: Map<string, number> }).lootedAt.clear();
+    cv.party = "abc";
+    ck.party = "abc";
+    kill(sv, sk);
+    assert.equal(orbs().length, 1, "party mates drop nothing for each other");
+    cv.party = "";
+    ck.party = "";
+    await sleep(450);
+    sv = await respawn(victim, "prey", "dev-loot-v");
+    sv.mass = 1500;
+    (arena.game as unknown as { lootedAt: Map<string, number> }).lootedAt.clear();
+    ck.trusted = true;
+    kill(sv, sk);
+    assert.equal(orbs().length, 1, "the owner's agents neither drop nor cause drops");
+    ck.trusted = false;
+    // The hunter eats the orb: a piece from the band's pool, announced to them.
+    killer.drain(S2C.LOOT);
+    sk.x = orb!.x;
+    sk.y = orb!.y;
+    sk.invuln = 0;
+    game.step(1 / 40);
+    const l = await killer.next(S2C.LOOT);
+    const id = l.str();
+    assert.ok(
+      dropPool().some((c) => c.id === id),
+      `a piece from the drop pool (${id})`,
+    );
+    l.u8();
+    assert.equal(l.u8(), 3, "source: a drop");
+    assert.equal(orbs().length, 0, "the orb is gone");
+    await killer.close();
+    await victim.close();
+  } finally {
+    await arena.stop();
+  }
+});
+
+test("the leviathan's death pays everyone who hit it a roll, and the final cut a set piece", async () => {
+  const arena = await startArena();
+  try {
+    const url6 = arena.url.replace(/v=2$/, "v=6");
+    const a = await joinArena(url6, "dev-boss-a", "cutter");
+    const b = await joinArena(url6, "dev-boss-b", "watcher");
+    const game = arena.game as unknown as {
+      rand: () => number;
+      stopLoop(): void;
+      step(dt: number): void;
+      stepBoss(): void;
+      boss: unknown;
+      bossUntil: number;
+    };
+    game.stopLoop();
+    await sleep(60);
+    game.rand = () => 0.5;
+    const world = arena.game.world;
+    world.clearBots();
+    world.desiredBots = 0;
+    const boss = world.spawnBoss({ x: 0, y: 0 });
+    boss.angle = 0;
+    boss.wander = 0;
+    boss.points = [];
+    for (let x = -600; x <= 0; x += 20) boss.points.push({ x, y: 0 });
+    boss.x = 0;
+    boss.y = 0;
+    boss.hp = 1;
+    game.boss = boss;
+    game.bossUntil = Date.now() + 60_000;
+    const sa = world.snakes.find((s) => s.name === "cutter")!;
+    sa.x = -300;
+    sa.y = 50;
+    sa.angle = -Math.PI / 2;
+    sa.invuln = 0;
+    sa.points = [];
+    world.ensureTrail(sa);
+    world.inputs.set(sa.id, { angle: -Math.PI / 2, boost: false, seq: 0, lag: 0 } as never);
+    const sb = world.snakes.find((s) => s.name === "watcher")!;
+    sb.x = 3000;
+    sb.y = 3000;
+    a.drain(S2C.LOOT);
+    a.drain(S2C.NOTICE);
+    b.drain(S2C.NOTICE);
+    for (let i = 0; i < 80 && boss.alive; i++) game.step(1 / 40);
+    assert.equal(boss.alive, false, "the cut killed it");
+    game.stepBoss();
+    // rand 0.5: the participant roll pays 150 scales, the final roll is
+    // Spines; the boss slayer feat's own piece arrives first.
+    const pieces: { id: string; source: number; scales: number }[] = [];
+    for (let i = 0; i < 3; i++) {
+      const l = await a.next(S2C.LOOT, 1500).catch(() => null);
+      if (!l) break;
+      const id = l.str();
+      l.u8();
+      pieces.push({ id, source: l.u8(), scales: l.u16() });
+    }
+    assert.ok(
+      pieces.some((x) => x.id === "slayer_name" && x.source === 4),
+      "the boss slayer feat hands out Slayer Name",
+    );
+    assert.ok(
+      pieces.some((x) => x.id === "leviathan_spines" && x.source === 2 && x.scales === 0),
+      `the final cut takes Spines (${pieces.map((x) => x.id).join(",")})`,
+    );
+    const texts: string[] = [];
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline && texts.length < 8) {
+      const r = await a.next(S2C.NOTICE, 500).catch(() => null);
+      if (!r) break;
+      r.u8();
+      texts.push(r.str());
+    }
+    assert.ok(
+      texts.some((t) => /the leviathan left you 150 scales/.test(t)),
+      texts.join(" | "),
+    );
+    assert.ok(texts.some((t) => /the final cut left you Leviathan Spines \(epic\)/.test(t)));
+    // The watcher hears about the epic, and gets nothing (no hit).
+    const heard = await b.next(S2C.NOTICE, 2000);
+    heard.u8();
+    assert.match(heard.str(), /landed the final cut|found Leviathan Spines \(epic\)/);
+    await a.close();
+    await b.close();
   } finally {
     await arena.stop();
   }

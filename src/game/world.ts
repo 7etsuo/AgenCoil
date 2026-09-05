@@ -1324,6 +1324,8 @@ export class World {
       const nearby = this.queryFood(s.x, s.y, reach + 18);
       for (const f of nearby) {
         if (dist2(s.x, s.y, f.x, f.y) > (reach + f.r * 0.6) ** 2) continue;
+        // A loot orb is for players: a bot passing over it leaves it be.
+        if (f.k === 5 && s.isBot) continue;
         if (gains) {
           s.mass += f.v;
           this.eats.push({ x: f.x, y: f.y, v: f.v, c: f.c, id: s.id, k: f.k });

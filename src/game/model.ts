@@ -103,7 +103,9 @@ export interface Vec {
 
 /**
  * One orb. `k` is the kind: 0 natural, 1 boost trail, 2 remains of a dead
- * snake, 3 chase orb (flees from heads, worth the most).
+ * snake, 3 chase orb (flees from heads, worth the most), 4 a golden swarm
+ * orb, 5 a loot orb dropped by a kill (`c` is then the loot band, and bots
+ * leave it alone).
  */
 export interface Food {
   x: number;

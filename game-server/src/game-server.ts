@@ -134,8 +134,14 @@ import {
   cosmeticById,
   itemForFeat,
   itemsForLevel,
+  killLootBand,
+  killLootChance,
   loadoutOf,
   priceOf,
+  rollBossFinal,
+  rollBossParticipant,
+  rollKillLoot,
+  type Roll,
 } from "../../src/game/cosmetics";
 import { playGateFromEnv } from "./play-gate";
 import { chosenHandle, cleanHandle, identityGateFromEnv, type Identity } from "./identity";
@@ -534,6 +540,10 @@ export class GameServer {
   private cutoffs: Cutoffs = DEFAULT_CUTOFFS;
   private cutoffsAt = 0;
   private nextNid = 1;
+  /** Randomness for loot rolls and orb drops; tests replace it. */
+  rand: () => number = Math.random;
+  /** When each profile last dropped a loot orb on dying, so nobody is farmed for pieces. */
+  private lootedAt = new Map<string, number>();
   private nextPlayer = 1;
   private tick = 0;
   private timer: NodeJS.Timeout | null = null;
@@ -1870,6 +1880,11 @@ export class GameServer {
           this.grantXp(o, XP_CHEST, "other");
           if (o !== c) this.grantXp(o, XP_BOSS_PART, "boss");
           this.profiles.addScales(o.profile, SCALES_BOSS);
+          // Everyone who hit it rolls once on the leviathan's table; the final
+          // blow also takes a guaranteed piece of the set.
+          const owned = new Set(Object.keys(o.profile.wardrobe));
+          this.giveLoot(o, rollBossParticipant(owned, this.rand), LOOT_BOSS, "the leviathan");
+          if (o === c) this.giveLoot(o, rollBossFinal(this.rand), LOOT_BOSS, "the final cut");
           void this.sendProfile(o);
         }
         o.bossHits = 0;
@@ -1971,6 +1986,67 @@ export class GameServer {
     if (status === WARDROBE_OK && op !== 3) this.redress(client);
     this.sendWardrobe(client, status);
     if (op === 3 && status === WARDROBE_OK) void this.sendProfile(client);
+  }
+
+  /**
+   * Hand a loot roll to a player: scales, or a piece (a duplicate pays scales
+   * by rarity). A rare or better piece is announced to the whole arena.
+   */
+  private giveLoot(client: Client, roll: Roll, source: number, from: string): void {
+    const p = client.profile;
+    if (!p) return;
+    if (roll.kind === "scales") {
+      this.profiles.addScales(p, roll.scales);
+      this.notice(client, 2, `${from} left you ${roll.scales} scales`);
+      void this.sendProfile(client);
+      return;
+    }
+    const piece = cosmeticById(roll.id);
+    if (!piece) return;
+    const got = this.profiles.grant(p, roll.id);
+    this.sendLoot(client, roll.id, source, got.scales);
+    if (got.fresh) {
+      this.notice(client, 2, `${from} left you ${piece.name} (${piece.rarity})`);
+      if (piece.rarity !== "common" && piece.rarity !== "uncommon")
+        for (const o of this.clients)
+          if (o !== client)
+            this.notice(o, 0, `${client.name} found ${piece.name} (${piece.rarity})`);
+      this.sendWardrobe(client, WARDROBE_OK);
+    } else this.notice(client, 2, `${from} left you ${piece.name} again: +${got.scales} scales`);
+    void this.sendProfile(client);
+  }
+
+  /**
+   * Does this death drop a loot orb? A player of some length, taken down by
+   * another player, neither the owner's agents, not a party mate, and not
+   * looted in the last while, rolls the chance for their length band.
+   */
+  private lootWorthy(victim: Client, killer: Client, s: Snake): boolean {
+    if (s.isBot || s.mass < LOOT_MIN_MASS) return false;
+    const vp = victim.profile;
+    const kp = killer.profile;
+    if (!vp || !kp || vp.key === kp.key) return false;
+    if (victim.trusted || killer.trusted) return false;
+    if (victim.party && victim.party === killer.party) return false;
+    const now = Date.now();
+    if (now - (this.lootedAt.get(vp.key) ?? 0) < LOOT_AGAIN_MS) return false;
+    if (this.rand() >= killLootChance(s.mass)) return false;
+    this.lootedAt.set(vp.key, now);
+    return true;
+  }
+
+  /** A loot orb among the remains, carrying its band in the colour byte. */
+  private dropLootOrb(s: Snake): void {
+    const band = Math.max(0, killLootBand(s.mass));
+    this.world.addFood({
+      x: s.x + (this.rand() - 0.5) * 80,
+      y: s.y + (this.rand() - 0.5) * 80,
+      v: 5,
+      c: band,
+      r: 12,
+      k: 5,
+    });
+    this.events.log("feature", { key: "", s: "loot_orb", n: band });
   }
 
   /** The live snake wears what the profile has on; everyone gets its full entry again. */
@@ -2259,6 +2335,8 @@ export class GameServer {
     if (this.tick % (SERVER_TICK_HZ * 30) === 0) {
       this.decayHeat();
       this.pruneCaches();
+      for (const [key, at] of this.lootedAt)
+        if (Date.now() - at > LOOT_AGAIN_MS) this.lootedAt.delete(key);
       this.profiles.sweep(this.profilesInUse());
       if (Date.now() - this.cutoffsAt > 5 * 60_000) void this.refreshCutoffs();
     }
@@ -2605,6 +2683,9 @@ export class GameServer {
       }
       // A kill pays by the victim's length, capped, whoever the victim was.
       if (d.reason === "snake" && killerClient) this.grantXp(killerClient, killXp(s.mass), "kills");
+      // A big enough player, taken down by another, may leave a loot orb among the remains.
+      if (d.reason === "snake" && killerClient && owner && this.lootWorthy(owner, killerClient, s))
+        this.dropLootOrb(s);
       // Contracts on the dead snake: the hunter who did it inside the clock
       // is paid; any other hunt on it is void.
       const now = Date.now();
@@ -2783,6 +2864,13 @@ export class GameServer {
       if (e.k === 2) {
         const c = this.clientBySid(e.id);
         if (c?.life) c.life.remains += e.v;
+      } else if (e.k === 5) {
+        // A loot orb: whoever eats it rolls on its band's table.
+        const c = this.clientBySid(e.id);
+        if (c?.profile) {
+          const owned = new Set(Object.keys(c.profile.wardrobe));
+          this.giveLoot(c, rollKillLoot(e.c, owned, this.rand), LOOT_DROP, "a loot orb");
+        }
       }
       let w = bySid.get(e.id);
       if (!w) {
@@ -3124,6 +3212,10 @@ export class GameServer {
     }
   }
 }
+
+/** A victim must be this long to drop a loot orb, and cannot drop another for this long. */
+const LOOT_MIN_MASS = 300;
+const LOOT_AGAIN_MS = 10 * 60_000;
 
 /** The LOOT source byte for a catalog piece. */
 function lootSourceOf(id: string): number {

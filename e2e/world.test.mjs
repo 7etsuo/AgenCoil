@@ -579,3 +579,30 @@ test("a bold bot cuts across a bigger head it can beat to the crossing point", (
   }
   assert.ok(cut, "the bot went for the crossing point");
 });
+
+test("a loot orb is eaten by a player, never by a bot, and the eat carries its kind and band", () => {
+  const world = new World(false);
+  world.host = true;
+  const bot = world.spawnBot(new Set());
+  bot.x = 0;
+  bot.y = 0;
+  bot.angle = 0;
+  bot.invuln = 0;
+  bot.points = [];
+  world.ensureTrail(bot);
+  const orb = world.addFood({ x: 40, y: 0, v: 5, c: 2, r: 12, k: 5 });
+  for (let i = 0; i < 5; i++) world.step(1 / 40, 0, 0, false);
+  assert.ok(world.foodById.has(orb.id), "the bot ran over it and left it");
+  const p = place(world, "p", -30, 0, 0, 60);
+  bot.x = 5000;
+  bot.y = 5000;
+  const orb2 = world.addFood({ x: 10, y: 0, v: 5, c: 1, k: 5, r: 12 });
+  let eaten = null;
+  for (let i = 0; i < 40 && !eaten; i++) {
+    world.step(1 / 40, 0, 0, false);
+    eaten = world.eats.find((e) => e.k === 5 && e.id === p.id) ?? null;
+  }
+  assert.ok(eaten, "the player ate it");
+  assert.equal(eaten.c, 1, "the eat carries the loot band");
+  assert.ok(!world.foodById.has(orb2.id));
+});
