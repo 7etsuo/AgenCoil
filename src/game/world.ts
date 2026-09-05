@@ -27,8 +27,10 @@ import {
   type Snake,
   type SnakeBox,
   type Vec,
+  bandsOf,
   boostDrainOf,
   clamp,
+  foodColorOf,
   dist2,
   lengthOf,
   maxPointsOf,
@@ -525,23 +527,32 @@ export class World {
     return this.chasers;
   }
 
-  /** The glowing remains a snake leaves behind: worth most of its mass. */
+  /**
+   * The glowing remains a snake leaves behind: worth most of its mass, laid
+   * along the body about one orb per two body points so they read as orbs
+   * rather than a second snake, and coloured by the bands the snake wore,
+   * counted from the head the way the renderer paints them.
+   */
   pelletsFrom(s: Snake): Food[] {
     const out: Food[] = [];
-    const n = Math.round(clamp(8 + s.mass * 0.3, 8, 150));
+    const pts = s.points.length ? s.points : [{ x: s.x, y: s.y }];
+    const n = Math.round(clamp(Math.min(8 + s.mass * 0.3, pts.length / 2), 8, 150));
     // Only bots take the event multiplier: their mass is capped, so doubling
     // it cannot run away, while player remains fed back into players did.
     const mult = s.isBot ? this.remainsMult : 1;
     const each = Math.max(1, Math.min(REMAINS_CAP, s.mass * 0.85 * mult) / n);
-    const pts = s.points.length ? s.points : [{ x: s.x, y: s.y }];
+    const colors = bandsOf(s).map(foodColorOf);
+    const bandLen = Math.max(1, s.bands?.length ? 3 : SKINS[s.skin % SKINS.length]!.band);
     for (let i = 0; i < n; i++) {
-      const p = pts[((i / n) * (pts.length - 1)) | 0]!;
+      const j = ((i / n) * (pts.length - 1)) | 0;
+      const p = pts[j]!;
+      const fromHead = pts.length - 1 - j;
       const v = Math.round(each * randRange(0.7, 1.3) * 10) / 10;
       out.push({
         x: p.x + randRange(-9, 9),
         y: p.y + randRange(-9, 9),
         v,
-        c: this.skinFoodColor(s.skin),
+        c: colors[Math.floor(fromHead / bandLen) % colors.length]!,
         r: clamp(6 + Math.sqrt(v) * 2.4, 6, 17),
         k: 2,
       });

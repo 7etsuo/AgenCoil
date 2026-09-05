@@ -50,6 +50,8 @@ interface Sprite {
 export class Renderer {
   private stars: Vec[] = [];
   private foodSprites: Sprite[] = [];
+  /** Remains of a dead snake: a hot core inside a wide halo, drawn twice for the bloom. */
+  private remainsSprites: Sprite[] = [];
   private segmentSprites = new Map<string, Sprite>();
   private hexTile: HTMLCanvasElement | null = null;
   private hexPattern: CanvasPattern | null = null;
@@ -67,6 +69,7 @@ export class Renderer {
       if (p.x * p.x + p.y * p.y < ARENA_RADIUS * ARENA_RADIUS) this.stars.push(p);
     }
     this.foodSprites = FOOD_COLORS.map((c) => makeFoodSprite(c));
+    this.remainsSprites = FOOD_COLORS.map((c) => makeRemainsSprite(c));
     this.hexTile = makeHexTile();
     this.nebula = makeNebula();
   }
@@ -615,13 +618,31 @@ export class Renderer {
         tiny[f.c % sprites.length]!.push({ x: f.x, y: f.y, d: f.r * 0.9 });
         return;
       }
-      const wob = f.k === 3 || f.k === 4 ? 0.18 : f.k === 2 ? 0.14 : 0.09;
+      if (f.k === 2) {
+        // Remains: the snake's colour as an energy orb. A hot core in a wide
+        // halo, breathing slowly, with an additive pass for the bloom.
+        const orb = this.remainsSprites[f.c % this.remainsSprites.length]!;
+        const phase = f.x * 0.07 + f.y * 0.05;
+        const breathe = 0.9 + Math.sin(t * 2.2 + phase) * 0.1;
+        const size = orb.size * (f.r / 18) * 1.15 * breathe;
+        if (size < minDest) return;
+        const x = f.x + Math.sin(t * 1.3 + phase) * 1.5;
+        const y = f.y + Math.cos(t * 1.1 + phase) * 1.5;
+        ctx.globalCompositeOperation = "lighter";
+        ctx.globalAlpha = 0.32 + Math.sin(t * 2.2 + phase) * 0.1;
+        ctx.drawImage(orb.canvas, x - size * 0.8, y - size * 0.8, size * 1.6, size * 1.6);
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = "source-over";
+        ctx.drawImage(orb.canvas, x - size / 2, y - size / 2, size, size);
+        return;
+      }
+      const wob = f.k === 3 || f.k === 4 ? 0.18 : 0.09;
       const pulse = 1 - wob + Math.sin(t * (f.k >= 3 ? 6 : 2.6) + f.x * 0.07 + f.y * 0.05) * wob;
       const dest = spr.size * (f.r / 15) * pulse;
       if (dest < minDest) return;
-      if (f.k >= 2) {
+      if (f.k >= 3) {
         ctx.globalCompositeOperation = "lighter";
-        ctx.globalAlpha = (f.k === 2 ? 0.16 : 0.26) + Math.sin(t * 5 + f.x) * 0.08;
+        ctx.globalAlpha = 0.26 + Math.sin(t * 5 + f.x) * 0.08;
         ctx.drawImage(spr.canvas, f.x - dest, f.y - dest, dest * 2, dest * 2);
         ctx.globalAlpha = 1;
         ctx.globalCompositeOperation = "source-over";
@@ -1199,6 +1220,45 @@ function makeFoodSprite(color: string): Sprite {
   ctx.arc(cx, cy, 15, 0, Math.PI * 2);
   ctx.fillStyle = grd;
   ctx.fill();
+  return { canvas, size };
+}
+
+/**
+ * Remains of a dead snake: a 96 px sprite whose core (radius 18) burns
+ * white at the centre and fades through the colour to a dark rim, inside a
+ * halo reaching the sprite's edge. Drawn once plain and once additive.
+ */
+function makeRemainsSprite(color: string): Sprite {
+  const size = 96;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  const rgb = hexRgb(color);
+  const [r, g, b] = rgb;
+  const cx = 48;
+  const cy = 48;
+  let grd = ctx.createRadialGradient(cx, cy, 8, cx, cy, 47);
+  grd.addColorStop(0, `rgba(${r},${g},${b},0.5)`);
+  grd.addColorStop(0.35, `rgba(${r},${g},${b},0.2)`);
+  grd.addColorStop(1, `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, 0, size, size);
+  grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, 18);
+  grd.addColorStop(0, shade(rgb, 0.9));
+  grd.addColorStop(0.3, shade(rgb, 0.35));
+  grd.addColorStop(0.75, color);
+  grd.addColorStop(1, shade(rgb, -0.35));
+  ctx.beginPath();
+  ctx.arc(cx, cy, 18, 0, Math.PI * 2);
+  ctx.fillStyle = grd;
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(cx, cy, 17, Math.PI * 1.1, Math.PI * 1.6);
+  ctx.strokeStyle = "rgba(255,255,255,0.45)";
+  ctx.lineWidth = 1.6;
+  ctx.lineCap = "round";
+  ctx.stroke();
   return { canvas, size };
 }
 

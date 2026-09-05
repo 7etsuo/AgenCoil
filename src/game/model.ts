@@ -311,6 +311,31 @@ export const FOOD_COLORS = [
 /** Index into FOOD_COLORS used by chase orbs. */
 export const CHASE_COLOR = 3;
 
+const foodColorCache = new Map<string, number>();
+
+/** The orb palette entry nearest a colour, so a dead snake's remains wear its own bands. */
+export function foodColorOf(hex: string): number {
+  const hit = foodColorCache.get(hex);
+  if (hit !== undefined) return hit;
+  const rgb = (h: string): [number, number, number] => {
+    const n = parseInt(h.replace("#", ""), 16) || 0;
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const [r, g, b] = rgb(hex);
+  let best = 0;
+  let bestD = Infinity;
+  FOOD_COLORS.forEach((c, i) => {
+    const [cr, cg, cb] = rgb(c);
+    const d = (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2;
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  });
+  foodColorCache.set(hex, best);
+  return best;
+}
+
 export const BOT_NAMES = [
   "onyx",
   "mica",
