@@ -16,6 +16,7 @@ import {
   BOSS_HIT_MASS,
   BOSS_MASS,
   BOSS_NAME,
+  BOSS_RAM_HP,
   LANDMARKS,
   MAX_CUSTOM_BANDS,
   REMAINS_CAP,
@@ -1017,8 +1018,18 @@ export class World {
     return best;
   }
 
-  /** Boss hits landed this tick: attacker id and hit point, for the server to credit. */
-  bossHits: { attacker: string; x: number; y: number; hp: number; killed: boolean }[] = [];
+  /**
+   * Boss hits landed this tick, for the server to credit: a `cut` is a head
+   * touching the boss body, a `ram` is the boss head running into a snake.
+   */
+  bossHits: {
+    attacker: string;
+    kind: "cut" | "ram";
+    x: number;
+    y: number;
+    hp: number;
+    killed: boolean;
+  }[] = [];
   private tickN = 0;
 
   /** Spawn the Boss Hour snake near a landmark. */
@@ -1396,6 +1407,7 @@ export class World {
     const kills: { s: Snake; o: Snake }[] = [];
     this.tickN++;
     const hits: { s: Snake; o: Snake }[] = [];
+    const rams: { s: Snake; o: Snake }[] = [];
     for (const s of this.snakes) {
       if (!s.alive || s.invuln > 0 || !s.box) continue;
       if (!this.owned(s)) continue;
@@ -1413,6 +1425,14 @@ export class World {
         if (!World.nearBox(o.box, s.x, s.y, hitR + lag * o.box.boostSpeed)) continue;
         const headOn = this.touches(s, o, hitR, lag);
         if (headOn === null) continue;
+        // The boss never dies by its own head: running into a body or a head
+        // is a ram that costs it hit points and turns it away. Without this
+        // the boss could be baited into any body and killed in one touch,
+        // and its hit points meant nothing.
+        if (s.boss) {
+          rams.push({ s, o });
+          continue;
+        }
         // Touching the boss's body is a cut, not a death; its head still kills.
         if (o.boss && !headOn) {
           hits.push({ s, o });
@@ -1424,6 +1444,7 @@ export class World {
     }
     for (const k of kills) this.kill(k.s, "snake", k.o.id, k.o.name);
     for (const h of hits) this.bossHit(h.s, h.o);
+    for (const r of rams) this.bossRam(r.s, r.o);
   }
 
   /**
@@ -1491,8 +1512,40 @@ export class World {
       });
     }
     const killed = o.hp <= 0;
-    this.bossHits.push({ attacker: s.id, x: s.x, y: s.y, hp: o.hp, killed });
+    this.bossHits.push({ attacker: s.id, kind: "cut", x: s.x, y: s.y, hp: o.hp, killed });
     if (killed) this.kill(o, "snake", s.id, s.name);
+  }
+
+  /**
+   * The boss's head running into snake `o`: once per second per snake it
+   * costs the boss `BOSS_RAM_HP`, sheds a few remains at its head and turns
+   * it away for a moment. The snake it hit is credited like a cutter, so the
+   * final ram kills the boss with that snake named as the killer.
+   */
+  private bossRam(boss: Snake, o: Snake): void {
+    if (!boss.alive) return;
+    const marks = (boss.bossRamAt ??= new Map());
+    const last = marks.get(o.id);
+    if (last !== undefined && this.tickN - last < BOSS_HIT_EVERY) return;
+    marks.set(o.id, this.tickN);
+    boss.hp = Math.max(0, (boss.hp ?? 1) - BOSS_RAM_HP);
+    for (let i = 0; i < 3; i++) {
+      this.addFood({
+        x: boss.x + randRange(-30, 30),
+        y: boss.y + randRange(-30, 30),
+        v: 3,
+        c: this.skinFoodColor(boss.skin),
+        r: 7,
+        k: 2,
+      });
+    }
+    // Recoil: head away from what it hit and hold that line past the next
+    // think, so it does not grind along the body losing a point a second.
+    boss.wander = Math.atan2(boss.y - o.y, boss.x - o.x);
+    boss.think = 0.6;
+    const killed = boss.hp <= 0;
+    this.bossHits.push({ attacker: o.id, kind: "ram", x: boss.x, y: boss.y, hp: boss.hp, killed });
+    if (killed) this.kill(boss, "snake", o.id, o.name);
   }
 
   private kill(

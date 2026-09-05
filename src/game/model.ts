@@ -70,6 +70,8 @@ export const BOSS_HP = 60;
 export const BOSS_MINUTE = 30;
 export const BOSS_DURATION_S = 300;
 export const BOSS_HIT_MASS = 4;
+/** Hit points the boss loses when its own head runs into a snake. */
+export const BOSS_RAM_HP = 5;
 export const BOSS_NAME = "the leviathan";
 
 /** The boss hour: milliseconds until it next surfaces (0 while it is up), and whether it is up now. */
@@ -168,6 +170,8 @@ export interface Snake {
   finish?: number;
   /** Server side: last tick each attacker landed a boss hit. */
   bossHitAt?: Map<string, number>;
+  /** Server side: last tick the boss rammed each snake. */
+  bossRamAt?: Map<string, number>;
   /** Server side, refreshed every step: derived geometry and a box around the body. */
   box?: SnakeBox;
   /**

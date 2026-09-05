@@ -1763,7 +1763,10 @@ export class GameServer {
       const c = this.clientBySid(h.attacker);
       if (!c) continue;
       c.bossHits++;
-      this.events.log("feature", { key: c.key, s: h.killed ? "boss_kill" : "boss_hit" });
+      this.events.log("feature", {
+        key: c.key,
+        s: h.killed ? "boss_kill" : h.kind === "ram" ? "boss_ram" : "boss_hit",
+      });
       if (!h.killed) continue;
       // The final cut wears the crown until the next boss; everyone who hit it gets a chest.
       if (c.profile) {

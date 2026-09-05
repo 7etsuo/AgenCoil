@@ -58,6 +58,17 @@ function stepUntil(world, pred, maxSteps = 600) {
   return -1;
 }
 
+test("angle wrapping handles extreme and non-finite values without an unbounded loop", () => {
+  for (const a of [0, -Math.PI, Math.PI, 0.75, -0.75]) assert.equal(model.wrapAngle(a), a);
+  assert.ok(Math.abs(model.wrapAngle(2 * Math.PI + 0.75) - 0.75) < 1e-12);
+  assert.ok(Math.abs(model.wrapAngle(-2 * Math.PI - 0.75) + 0.75) < 1e-12);
+  for (const a of [Number.MAX_VALUE, -Number.MAX_VALUE, 1e20, -1e20]) {
+    const result = model.wrapAngle(a);
+    assert.ok(Number.isFinite(result) && Math.abs(result) <= Math.PI);
+  }
+  for (const a of [Infinity, -Infinity, NaN]) assert.equal(model.wrapAngle(a), 0);
+});
+
 test("a head-on collision kills both snakes", () => {
   const world = new World(false);
   world.host = true;
@@ -319,6 +330,75 @@ test("the boss takes a hit point when a player's head touches its body, and only
   b2.y = 0;
   const died = stepUntil(world2, () => !p.alive, 120);
   assert.ok(died >= 0, "the boss head kills");
+});
+
+/** A boss at the origin heading +x with its body trailing behind it. */
+function layBoss(world) {
+  const boss = world.spawnBoss({ x: 0, y: 0 });
+  boss.angle = 0;
+  boss.wander = 0;
+  boss.points = [];
+  for (let x = -600; x <= 0; x += 20) boss.points.push({ x, y: 0 });
+  boss.x = 0;
+  boss.y = 0;
+  return boss;
+}
+
+/**
+ * A long snake heading +y whose body lies across x = 60 from y -400 to 400:
+ * inside the boss head's contact radius from the first step, so the test does
+ * not depend on where the boss's random wander takes it.
+ */
+function layWall(world, id) {
+  const p = place(world, id, 60, 400, Math.PI / 2, 4000);
+  p.points = [];
+  for (let y = -400; y <= 400; y += 20) p.points.push({ x: 60, y });
+  return p;
+}
+
+test("the boss never dies by its own head: running into a body costs it hit points and turns it away", () => {
+  const world = new World(false);
+  world.host = true;
+  const boss = layBoss(world);
+  const p = layWall(world, "p");
+  const steps = stepUntil(world, () => boss.hp < model.BOSS_HP, 120);
+  assert.ok(steps >= 0, "the boss runs into the body");
+  assert.equal(boss.alive, true, "the boss survives running into a body");
+  assert.equal(boss.hp, model.BOSS_HP - model.BOSS_RAM_HP, "a ram costs BOSS_RAM_HP");
+  assert.equal(p.alive, true, "the body's owner is untouched");
+  const ram = world.bossHits.find((h) => h.kind === "ram");
+  assert.ok(ram && ram.attacker === "p" && !ram.killed, "the ram credits the body's owner");
+  assert.ok(Math.abs(boss.wander) > Math.PI / 2, "the boss turns away from what it hit");
+  assert.ok(!world.deaths.some((d) => d.snake === boss), "no death for the boss");
+  // A second later at most it can lose another point, not every tick.
+  const hp = boss.hp;
+  for (let i = 0; i < 10; i++) world.step(1 / 40, 0, 0, false);
+  assert.ok(boss.hp >= hp - model.BOSS_RAM_HP, "rams are rate limited");
+});
+
+test("a head-on with the boss kills the other snake and costs the boss a ram", () => {
+  const world = new World(false);
+  world.host = true;
+  const boss = layBoss(world);
+  const p = place(world, "p", 160, 0, Math.PI, 60);
+  const died = stepUntil(world, () => !p.alive, 120);
+  assert.ok(died >= 0, "the boss head kills");
+  assert.equal(boss.alive, true, "the boss survives the head-on");
+  assert.equal(boss.hp, model.BOSS_HP - model.BOSS_RAM_HP);
+});
+
+test("the final ram kills the boss and names the snake it hit as the killer", () => {
+  const world = new World(false);
+  world.host = true;
+  const boss = layBoss(world);
+  boss.hp = model.BOSS_RAM_HP;
+  layWall(world, "p");
+  const steps = stepUntil(world, () => !boss.alive, 120);
+  assert.ok(steps >= 0, "the boss dies on the last ram");
+  const death = world.deaths.find((d) => d.snake === boss);
+  assert.ok(death && death.killerId === "p", "the body's owner gets the kill");
+  const last = world.bossHits.find((h) => h.kind === "ram" && h.killed);
+  assert.ok(last && last.attacker === "p", "the final ram is credited");
 });
 
 test("the wisp turns at a bounded rate and never flips onto an aim point", () => {
