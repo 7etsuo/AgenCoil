@@ -4,6 +4,7 @@ import { ArrowLeft, Share2 } from "lucide-react";
 import { SKINS } from "@/game/model";
 import { DEFAULT_CUTOFFS, LEAGUES, LEAGUE_COLORS, leagueOf, titleOf } from "@/game/challenges";
 import { LEVEL_CAP, levelOf, xpInto } from "@/game/level";
+import { COSMETICS, RARITY_COLORS, SLOTS, cosmeticById } from "@/game/cosmetics";
 import { ACHIEVEMENTS } from "@/game/achievements";
 import { Crest } from "@/components/crest";
 import { serverHttpUrl } from "@/game/net";
@@ -41,6 +42,9 @@ interface PublicProfile {
   xp?: number;
   level?: number;
   scales?: number;
+  /** The wardrobe: what is on by slot, and every piece owned. */
+  equipped?: Record<string, string>;
+  wardrobe?: string[];
 }
 
 interface Rarity {
@@ -165,6 +169,29 @@ function ProfilePage() {
                     })()}
                     {p.scales !== undefined ? ` · ${p.scales.toLocaleString("en-US")} scales` : ""}
                   </p>
+                  {p.wardrobe && (
+                    <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-subtle">
+                      {SLOTS.map((slot) => {
+                        const c = p.equipped?.[slot] ? cosmeticById(p.equipped[slot]!) : undefined;
+                        return c ? (
+                          <span
+                            key={slot}
+                            className="rounded border px-1.5 py-0.5"
+                            style={{
+                              borderColor: RARITY_COLORS[c.rarity],
+                              color: RARITY_COLORS[c.rarity],
+                            }}
+                            title={`${slot}: ${c.name} (${c.rarity})`}
+                          >
+                            {c.name}
+                          </span>
+                        ) : null;
+                      })}
+                      <span>
+                        {p.wardrobe.length} of {COSMETICS.length} pieces
+                      </span>
+                    </p>
+                  )}
                   <div
                     className="mt-2 h-2 w-40 rounded-full"
                     style={{ background: bands.length ? stripe(bands) : "#3ee0c4" }}

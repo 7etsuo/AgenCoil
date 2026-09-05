@@ -39,6 +39,7 @@ import {
 } from "./challenges";
 import { recordTarget } from "./record";
 import { NOTICE_LEVEL, NOTICE_XP, xpInto } from "./level";
+import { SLOTS, cosmeticById, type Equipped, type Slot } from "./cosmetics";
 import {
   NetSession,
   defaultServerUrl,
@@ -158,6 +159,10 @@ export interface HudState {
   xpGain: { total: number; parts: string[]; scales: number } | null;
   /** A level just reached, for the card: the level and what it paid. */
   levelUp: { level: number; text: string } | null;
+  /** The wardrobe: what is on, every piece owned, and the server's last answer (WARDROBE_*; null before one). */
+  wardrobe: { equipped: Equipped; owned: string[]; status: number | null };
+  /** Pieces that just arrived, or paid scales as duplicates, for a toast: newest last. */
+  loot: { id: string; scales: number }[];
   /** Recent notable deaths, newest last. */
   feed: string[];
   /** Your rank when you died, and how many were in the arena. */
@@ -255,6 +260,8 @@ export class CoilEngine {
   private xpKnown = { xp: 0, rested: 0 };
   private xpGain: HudState["xpGain"] = null;
   private levelUp: { level: number; text: string; at: number } | null = null;
+  private wardrobe: HudState["wardrobe"] = { equipped: {}, owned: [], status: null };
+  private loot: { id: string; scales: number; at: number }[] = [];
   private lastBoostSound = 0;
   private hudListeners = new Set<(h: HudState) => void>();
   private hudAcc = 0;
@@ -540,6 +547,20 @@ export class CoilEngine {
           this.handleResult = { status, handle };
           this.emitHud();
         },
+        onWardrobe: (status, equipped, owned) => {
+          this.wardrobe = { equipped, owned, status };
+          this.emitHud();
+        },
+        onLoot: (id, _rarity, _source, scales) => {
+          const c = cosmeticById(id);
+          const name = c?.name ?? id;
+          this.loot = [...this.loot.slice(-4), { id, scales, at: performance.now() }];
+          this.pushFeed(
+            scales ? `${name} again: +${scales} scales` : `you found ${name} (${c?.rarity ?? "?"})`,
+          );
+          if (this.phase !== "dead") this.audio.record();
+          this.emitHud();
+        },
       });
       this.net.connect();
     } else {
@@ -669,6 +690,16 @@ export class CoilEngine {
     this.handleResult = null;
     this.net?.setHandle(raw);
     this.emitHud();
+  }
+
+  /** Put a wardrobe piece on (null takes the slot off); the arena answers with the wardrobe. */
+  equip(slot: Slot, id: string | null): void {
+    this.net?.wardrobe(id ? 1 : 2, SLOTS.indexOf(slot), id ?? "");
+  }
+
+  /** Buy a piece from this week's shelf; the arena answers with the wardrobe and the profile. */
+  buy(id: string): void {
+    this.net?.wardrobe(3, 0, id);
   }
 
   /** Send a quick reaction; also shown locally at once. */
@@ -998,6 +1029,8 @@ export class CoilEngine {
         this.levelUp && now - this.levelUp.at < 4000
           ? { level: this.levelUp.level, text: this.levelUp.text }
           : null,
+      wardrobe: this.wardrobe,
+      loot: this.loot.filter((l) => now - l.at < 6000).map((l) => ({ id: l.id, scales: l.scales })),
       feed: this.feed.map((f) => f.text),
       deathRank: this.deathRank,
       deathCount: this.deathCount,

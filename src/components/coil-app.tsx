@@ -54,7 +54,25 @@ import {
   HANDLE_OK,
   HANDLE_TAKEN,
   HANDLE_TOO_SOON,
+  WARDROBE_NOT_FOR_SALE,
+  WARDROBE_NOT_OWNED,
+  WARDROBE_OWNED,
+  WARDROBE_TOO_POOR,
+  WARDROBE_TOO_SOON,
+  WARDROBE_UNKNOWN,
+  WARDROBE_WRONG_SLOT,
 } from "@/game/protocol";
+import {
+  COSMETICS,
+  RARITIES,
+  RARITY_COLORS,
+  SLOTS,
+  cosmeticById,
+  priceOf,
+  shopFor,
+  sourceLabel,
+  type Slot,
+} from "@/game/cosmetics";
 
 /** What the arena said about the last name request, in the menu's words. */
 const HANDLE_NOTES: Record<number, string> = {
@@ -134,6 +152,174 @@ function XpBar({ xp, touch }: { xp: NonNullable<HudState["xp"]>; touch: boolean 
         )}
       </div>
     </div>
+  );
+}
+
+/** What the arena said to the last wardrobe request, in words. */
+function wardrobeMessage(status: number | null): string | null {
+  switch (status) {
+    case WARDROBE_NOT_OWNED:
+      return "you do not own that piece";
+    case WARDROBE_WRONG_SLOT:
+      return "that piece does not go there";
+    case WARDROBE_NOT_FOR_SALE:
+      return "that piece is not on this week's shelf";
+    case WARDROBE_TOO_POOR:
+      return "not enough scales";
+    case WARDROBE_OWNED:
+      return "you already own that piece";
+    case WARDROBE_TOO_SOON:
+      return "one at a time";
+    case WARDROBE_UNKNOWN:
+      return "the arena did not recognise that piece";
+    default:
+      return null;
+  }
+}
+
+/** The wardrobe: five slots, every piece by slot, owned ones to put on, locked ones with their source. */
+function WardrobeTab({
+  hud,
+  onEquip,
+}: {
+  hud: HudState;
+  onEquip: (slot: Slot, id: string | null) => void;
+}) {
+  const owned = new Set(hud.wardrobe.owned);
+  const eq = hud.wardrobe.equipped;
+  const message = wardrobeMessage(hud.wardrobe.status);
+  const counts = RARITIES.map((r) => ({
+    r,
+    n: hud.wardrobe.owned.filter((id) => cosmeticById(id)?.rarity === r).length,
+  })).filter((x) => x.n > 0);
+  if (hud.mode !== "online")
+    return (
+      <p className="mt-4 text-xs text-subtle">
+        the wardrobe lives on your arena profile: connect to see it
+      </p>
+    );
+  return (
+    <>
+      {SLOTS.map((slot) => {
+        const on = eq[slot];
+        const onPiece = on ? cosmeticById(on) : undefined;
+        return (
+          <div key={slot} className="mt-3">
+            <div className="flex items-center justify-between text-xs text-muted">
+              <span>
+                {slot} · {onPiece ? onPiece.name : "nothing on"}
+              </span>
+              {on && (
+                <button
+                  type="button"
+                  onClick={() => onEquip(slot, null)}
+                  className="text-subtle hover:text-fg"
+                >
+                  take off
+                </button>
+              )}
+            </div>
+            <div className="mt-1.5 grid grid-cols-4 gap-1.5 sm:grid-cols-5">
+              {COSMETICS.filter((c) => c.slot === slot).map((c) => {
+                const have = owned.has(c.id);
+                const isOn = on === c.id;
+                const color = RARITY_COLORS[c.rarity];
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    disabled={!have}
+                    onClick={() => have && onEquip(slot, isOn ? null : c.id)}
+                    title={have ? `${c.name} (${c.rarity})` : `${c.name}: ${sourceLabel(c)}`}
+                    className={`flex h-14 w-full flex-col items-center justify-center rounded-md border px-1 text-center text-[10px] leading-tight ${
+                      isOn
+                        ? "bg-elevated text-fg"
+                        : have
+                          ? "text-fg hover:bg-elevated/60"
+                          : "text-subtle opacity-55"
+                    }`}
+                    style={{
+                      borderColor: isOn ? "#e8eaee" : color,
+                      boxShadow: isOn ? `0 0 0 1px ${color}` : "none",
+                    }}
+                  >
+                    <span className="w-full truncate">{c.name}</span>
+                    <span className="w-full truncate" style={{ color }}>
+                      {have ? c.rarity : sourceLabel(c)}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+      {message && <p className="mt-2 text-xs text-[#ffb3c1]">{message}</p>}
+      <p className="mt-3 text-[11px] text-subtle">
+        {owned.size} of {COSMETICS.length} pieces
+        {counts.length ? " · " : ""}
+        {counts.map((x, i) => (
+          <span key={x.r}>
+            {i ? " · " : ""}
+            <span style={{ color: RARITY_COLORS[x.r] }}>
+              {x.n} {x.r}
+            </span>
+          </span>
+        ))}
+        {" · everyone in the arena sees what you wear; nothing here changes how you play"}
+      </p>
+    </>
+  );
+}
+
+/** This week's shelf: six shop pieces for scales; the shelf rolls with the week. */
+function ShopTab({ hud, onBuy }: { hud: HudState; onBuy: (id: string) => void }) {
+  const items = shopFor(isoWeek());
+  const owned = new Set(hud.wardrobe.owned);
+  const scales = hud.profile?.scales ?? 0;
+  const message = wardrobeMessage(hud.wardrobe.status);
+  if (hud.mode !== "online")
+    return (
+      <p className="mt-4 text-xs text-subtle">the shop is on the arena: connect to browse it</p>
+    );
+  return (
+    <>
+      <div className="mt-4 flex items-center justify-between text-xs text-muted">
+        <span>this week's shelf · rolls in {fmtDur(hud.clocks.weekMs)}</span>
+        <span className="text-fg">⬢ {fmtNum(scales)} scales</span>
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
+        {items.map((c) => {
+          const price = priceOf(c);
+          const have = owned.has(c.id);
+          const can = !have && scales >= price;
+          const color = RARITY_COLORS[c.rarity];
+          return (
+            <button
+              key={c.id}
+              type="button"
+              disabled={!can}
+              onClick={() => can && onBuy(c.id)}
+              className={`flex flex-col items-center gap-0.5 rounded-md border px-2 py-2 text-center ${
+                can ? "text-fg hover:bg-elevated/60" : "text-muted"
+              }`}
+              style={{ borderColor: color, opacity: have ? 0.6 : 1 }}
+            >
+              <span className="text-sm font-medium">{c.name}</span>
+              <span className="text-[10px]" style={{ color }}>
+                {c.rarity} · {c.slot}
+              </span>
+              <span className="text-xs">{have ? "owned" : `⬢ ${fmtNum(price)}`}</span>
+            </button>
+          );
+        })}
+      </div>
+      {message && <p className="mt-2 text-xs text-[#ffb3c1]">{message}</p>}
+      <p className="mt-3 text-[11px] text-subtle">
+        scales come from every life, quest steps, chests, the leviathan and each level; epics and
+        legendaries are never sold
+      </p>
+    </>
   );
 }
 
@@ -308,7 +494,7 @@ export function CoilApp() {
   const [deathFx, setDeathFx] = useState(0);
   const [party, setParty] = useState("");
   const [invited, setInvited] = useState(false);
-  const [tab, setTab] = useState<"look" | "goals" | "controls">("look");
+  const [tab, setTab] = useState<"look" | "wardrobe" | "shop" | "goals" | "controls">("look");
   const [crew, setCrew] = useState("");
   const [crewSaved, setCrewSaved] = useState(false);
   const [gifState, setGifState] = useState<"idle" | "busy" | "done">("idle");
@@ -915,6 +1101,23 @@ export function CoilApp() {
               </div>
             )}
             {/* The exit clocks that matter right now: the boss about to surface, the week about to close on a bank in reach. */}
+            {hud.loot.map((l, i) => {
+              const c = cosmeticById(l.id);
+              return (
+                <div
+                  key={`${l.id}-${i}`}
+                  className="snek-pop rounded-full border bg-bg/85 px-3 py-1 text-xs"
+                  style={{
+                    borderColor: RARITY_COLORS[c?.rarity ?? "common"],
+                    color: RARITY_COLORS[c?.rarity ?? "common"],
+                  }}
+                >
+                  {l.scales
+                    ? `${c?.name ?? l.id} again · +${l.scales} scales`
+                    : `found ${c?.name ?? l.id} · ${c?.rarity ?? ""}`}
+                </div>
+              );
+            })}
             {hud.mode === "online" && !hud.clocks.bossUp && hud.clocks.bossInMs < 5 * 60_000 && (
               <div className="rounded-full border border-[#ff5a6e]/50 bg-bg/80 px-3 py-1 text-xs text-[#ffb3c1]">
                 the leviathan surfaces in {fmtDur(hud.clocks.bossInMs)}
@@ -1211,7 +1414,11 @@ export function CoilApp() {
             )}
 
             <div className="mt-4 overflow-hidden rounded-lg border border-line bg-bg/60">
-              <SkinPreview bands={previewBands} boosting={trail > 0} />
+              <SkinPreview
+                bands={previewBands}
+                boosting={trail > 0}
+                loadout={hud?.wardrobe.equipped}
+              />
             </div>
             <label className="sr-only" htmlFor="nick">
               Nickname
@@ -1301,6 +1508,8 @@ export function CoilApp() {
               {(
                 [
                   ["look", "your look"],
+                  ["wardrobe", "wardrobe"],
+                  ["shop", "shop"],
                   ["goals", "goals"],
                   ["controls", "how to play"],
                 ] as const
@@ -1486,6 +1695,12 @@ export function CoilApp() {
                   </button>
                 </div>
               </>
+            )}
+            {tab === "wardrobe" && hud && (
+              <WardrobeTab hud={hud} onEquip={(slot, id) => engineRef.current?.equip(slot, id)} />
+            )}
+            {tab === "shop" && hud && (
+              <ShopTab hud={hud} onBuy={(id) => engineRef.current?.buy(id)} />
             )}
             {tab === "goals" && (
               <>

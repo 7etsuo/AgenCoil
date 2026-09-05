@@ -8,7 +8,8 @@ import { buildSync } from "esbuild";
 import WebSocket from "ws";
 import type { GameServer as GameServerT } from "./game-server.ts";
 import type * as ProtocolT from "../../src/game/protocol.ts";
-import { growthXp, killXp, levelOf } from "../../src/game/level.ts";
+import { growthXp, killXp, levelOf, xpForLevel } from "../../src/game/level.ts";
+import { cosmeticIndex } from "../../src/game/cosmetics.ts";
 
 // The server and the shared protocol use extensionless imports, which the
 // type stripper cannot resolve, so both are bundled the way the build does.
@@ -1497,6 +1498,154 @@ test("experience: growth is booked as the snake grows, a kill pays, levels pay s
     assert.equal(profile.trackClaimed, levelOf(profile.xp));
     await a.close();
     await b.close();
+  } finally {
+    await arena.stop();
+  }
+});
+/** Read a WARDROBE message: status, the five equipped ids, the owned ids. */
+function parseWardrobe(r: InstanceType<typeof Reader>): {
+  status: number;
+  equipped: string[];
+  owned: string[];
+} {
+  const status = r.u8();
+  const equipped = [r.str(), r.str(), r.str(), r.str(), r.str()];
+  const n = r.u16();
+  const owned: string[] = [];
+  for (let i = 0; i < n; i++) owned.push(r.str());
+  assert.equal(r.remaining, 0, "wardrobe fully consumed");
+  return { status, equipped, owned };
+}
+
+test("the wardrobe: protocol 6 entries carry the loadout, equips need ownership, a level pays its piece, the shelf sells", async () => {
+  const arena = await startArena();
+  try {
+    const url6 = arena.url.replace(/v=2$/, "v=6");
+    const p = new Player(url6);
+    await p.open();
+    p.send(ident("dev-ward", "dresser"));
+    await p.next(S2C.PROFILE);
+    const first = parseWardrobe(await p.next(S2C.WARDROBE));
+    assert.equal(first.status, 0);
+    assert.deepEqual(first.equipped, ["", "", "", "", ""]);
+    assert.deepEqual(first.owned, []);
+    p.send(hello("dresser", "dev-ward"));
+    await p.next(S2C.SPAWNED);
+    const game = arena.game as unknown as {
+      stopLoop(): void;
+      step(dt: number): void;
+      sendSnapshot(c: unknown): void;
+      clients: Set<{
+        sid: string | null;
+        profile: { xp: number; scales: number; wardrobe: Record<string, number> } | null;
+      }>;
+      profiles: { grantFresh(p: unknown, id: string): boolean };
+      clientBySid(sid: string): unknown;
+    };
+    game.stopLoop();
+    await sleep(60);
+    const world = arena.game.world;
+    world.clearBots();
+    world.desiredBots = 0;
+    const me = world.snakes.find((s) => s.name === "dresser")!;
+    const client = [...game.clients].find((c) => c.sid === me.id)!;
+    // A profile refresh carries the wardrobe too, so each request starts with a clean queue.
+    const wardrobe = (op: number, slot: number, id: string) => {
+      p.drain(S2C.WARDROBE);
+      p.send(new Writer().u8(C2S.WARDROBE).u8(op).u8(slot).str(id).finish());
+    };
+    // Nothing owned: an equip is refused.
+    p.drain(S2C.WARDROBE);
+    wardrobe(1, 0, "halo");
+    assert.equal(parseWardrobe(await p.next(S2C.WARDROBE)).status, 1, "not owned");
+    // Reaching level 5 hands out Horn Nubs and says so.
+    client.profile!.xp = xpForLevel(5) - 1;
+    p.drain(S2C.NOTICE);
+    p.drain(S2C.LOOT);
+    me.mass = me.mass + 300;
+    game.step(1 / 40);
+    const loot = await p.next(S2C.LOOT);
+    assert.equal(loot.str(), "horn_nubs");
+    loot.u8();
+    assert.equal(loot.u8(), 0, "source: the level track");
+    assert.equal(loot.u16(), 0, "not a duplicate");
+    const deadline = Date.now() + 2000;
+    let text = "";
+    while (Date.now() < deadline) {
+      const r = await p.next(S2C.NOTICE, 1000);
+      if (r.u8() === 18) {
+        text = r.str();
+        break;
+      }
+    }
+    assert.match(text, /^level 5 · \+\d+ scales · Horn Nubs$/);
+    // Equip it: the answer names it, and everyone gets the snake's full entry with the loadout.
+    await sleep(260);
+    p.drain(S2C.WARDROBE);
+    wardrobe(1, 0, "horn_nubs");
+    const w = parseWardrobe(await p.next(S2C.WARDROBE));
+    assert.equal(w.status, 0);
+    assert.equal(w.equipped[0], "horn_nubs");
+    assert.deepEqual(w.owned, ["horn_nubs"]);
+    assert.deepEqual(me.loadout, [cosmeticIndex("horn_nubs"), 0, 0, 0, 0]);
+    p.drain(S2C.SNAP);
+    game.sendSnapshot(client);
+    const snap = await p.next(S2C.SNAP);
+    snap.u32();
+    snap.u32();
+    const n = snap.u16();
+    let found = false;
+    for (let i = 0; i < n; i++) {
+      const e = protocol.readSnakeEntry(snap);
+      if (!e.full) continue;
+      snap.u8();
+      snap.u8();
+      snap.u8();
+      snap.u8();
+      const loadout = [snap.u8(), snap.u8(), snap.u8(), snap.u8(), snap.u8()];
+      if (e.name === "dresser") {
+        assert.deepEqual(loadout, [cosmeticIndex("horn_nubs"), 0, 0, 0, 0]);
+        found = true;
+      }
+    }
+    assert.ok(found, "the full entry after an equip carries the loadout");
+    // The wrong slot and a piece in the wrong place are refused; taking off works.
+    await sleep(260);
+    wardrobe(1, 1, "horn_nubs");
+    assert.equal(parseWardrobe(await p.next(S2C.WARDROBE)).status, 2, "wrong slot");
+    await sleep(260);
+    wardrobe(2, 0, "");
+    const off = parseWardrobe(await p.next(S2C.WARDROBE));
+    assert.equal(off.status, 0);
+    assert.equal(off.equipped[0], "");
+    assert.deepEqual(me.loadout, [0, 0, 0, 0, 0]);
+    // The shelf: too poor, then bought, then owned.
+    const shelf = (await import("../../src/game/cosmetics.ts")).shopFor(
+      (await import("../../src/game/challenges.ts")).isoWeek(),
+    );
+    const piece = shelf[0]!;
+    const price = piece.source.kind === "shop" ? piece.source.price : 0;
+    client.profile!.scales = price - 1;
+    await sleep(260);
+    wardrobe(3, 0, piece.id);
+    assert.equal(parseWardrobe(await p.next(S2C.WARDROBE)).status, 4, "too poor");
+    client.profile!.scales = price;
+    await sleep(260);
+    p.drain(S2C.LOOT);
+    wardrobe(3, 0, piece.id);
+    const bought = parseWardrobe(await p.next(S2C.WARDROBE));
+    assert.equal(bought.status, 0);
+    assert.ok(bought.owned.includes(piece.id));
+    assert.equal(client.profile!.scales, 0);
+    const l2 = await p.next(S2C.LOOT);
+    assert.equal(l2.str(), piece.id);
+    await sleep(260);
+    wardrobe(3, 0, piece.id);
+    assert.equal(parseWardrobe(await p.next(S2C.WARDROBE)).status, 7, "already owned");
+    await sleep(260);
+    wardrobe(3, 0, "halo");
+    assert.equal(parseWardrobe(await p.next(S2C.WARDROBE)).status, 3, "never sold");
+    await p.close();
   } finally {
     await arena.stop();
   }

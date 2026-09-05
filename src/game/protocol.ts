@@ -17,6 +17,8 @@ export const C2S = {
   CREW: 7,
   /** Choose the handle a linked player is named by. */
   HANDLE: 8,
+  /** The wardrobe: equip, unequip or buy a piece (op u8, slot u8, id str). */
+  WARDROBE: 9,
 } as const;
 
 export const S2C = {
@@ -56,6 +58,10 @@ export const S2C = {
   ACHIEVE: 22,
   /** Answer to a handle request: a status (HANDLE_*) and the handle now held. */
   HANDLE: 23,
+  /** The wardrobe: a status (WARDROBE_*), the five equipped ids, then the owned ids (u16 count). */
+  WARDROBE: 24,
+  /** A piece arriving: id, rarity, source, and the scales paid instead when already owned. */
+  LOOT: 25,
 } as const;
 
 export const HANDLE_OK = 0;
@@ -64,6 +70,22 @@ export const HANDLE_TAKEN = 2;
 export const HANDLE_NOT_LINKED = 3;
 export const HANDLE_TOO_SOON = 4;
 export const HANDLE_UNAVAILABLE = 5;
+
+export const WARDROBE_OK = 0;
+export const WARDROBE_NOT_OWNED = 1;
+export const WARDROBE_WRONG_SLOT = 2;
+export const WARDROBE_NOT_FOR_SALE = 3;
+export const WARDROBE_TOO_POOR = 4;
+export const WARDROBE_UNKNOWN = 5;
+export const WARDROBE_TOO_SOON = 6;
+export const WARDROBE_OWNED = 7;
+/** Where a piece came from, on LOOT. */
+export const LOOT_LEVEL = 0;
+export const LOOT_SHOP = 1;
+export const LOOT_BOSS = 2;
+export const LOOT_DROP = 3;
+export const LOOT_FEAT = 4;
+export const LOOT_SEASON = 5;
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();

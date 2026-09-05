@@ -38,6 +38,17 @@ import {
   xpToNext,
 } from "../../src/game/level";
 import {
+  DUPLICATE_SCALES,
+  SLOTS,
+  cosmeticById,
+  itemForFeat,
+  itemsForSeasonTier,
+  itemsUpToLevel,
+  shopFor,
+  type Equipped,
+  type Slot,
+} from "../../src/game/cosmetics";
+import {
   LEAGUE_FEATS,
   seasonFeats,
   totalsUnlocked,
@@ -122,6 +133,9 @@ export interface Profile {
   seen: number;
   scales: number;
   trackClaimed: number;
+  /** The wardrobe: piece id to the unix second it arrived, and what is on, by slot. */
+  wardrobe: Record<string, number>;
+  equipped: Equipped;
 }
 
 export interface Rival {
@@ -189,6 +203,21 @@ export interface PublicProfile {
   xp: number;
   level: number;
   scales: number;
+  /** The wardrobe: what is on, and every piece owned. */
+  equipped: Equipped;
+  wardrobe: string[];
+}
+
+/** What is on, by slot: only catalog ids in their own slot survive. */
+function parseEquipped(v: unknown): Equipped {
+  const out: Equipped = {};
+  if (!v || typeof v !== "object") return out;
+  const o = v as Record<string, unknown>;
+  for (const slot of SLOTS) {
+    const id = o[slot];
+    if (typeof id === "string" && cosmeticById(id)?.slot === slot) out[slot] = id;
+  }
+  return out;
 }
 
 function parseRuns(v: unknown): number[] {
@@ -342,7 +371,9 @@ export class ProfileStore {
              ADD COLUMN IF NOT EXISTS rested INTEGER NOT NULL DEFAULT 0,
              ADD COLUMN IF NOT EXISTS seen BIGINT NOT NULL DEFAULT 0,
              ADD COLUMN IF NOT EXISTS scales INTEGER NOT NULL DEFAULT 0,
-             ADD COLUMN IF NOT EXISTS track_claimed INTEGER NOT NULL DEFAULT 0`,
+             ADD COLUMN IF NOT EXISTS track_claimed INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS wardrobe JSONB NOT NULL DEFAULT '{}',
+             ADD COLUMN IF NOT EXISTS equipped JSONB NOT NULL DEFAULT '{}'`,
         );
         // Profiles from before levels are seeded once from their lifetime
         // totals through the same shape as the live formula, so nobody who
@@ -440,6 +471,8 @@ export class ProfileStore {
       scales: 0,
       // Level 1 is where a profile starts, not a level it reached.
       trackClaimed: 1,
+      wardrobe: {},
+      equipped: {},
     };
   }
 
@@ -517,13 +550,15 @@ export class ProfileStore {
             seen: string | number;
             scales: number;
             track_claimed: number;
+            wardrobe: unknown;
+            equipped: unknown;
           }>(
             `SELECT name, best, kills, games, survive, unlocks, day, progress, skin, bands, best_x, best_y,
                   week, week_best, week_done, earned, flagged, streak, streak_last, freezes, eaten,
                   near_total, bounty_total, prev_tier, season, season_best, shards, chests, crew,
                   crown_until, sub, handle, avatar, achv, week_runs, week_lives, banked_tier,
                   season_tier, seasons, pending, handle_chosen, rivals, xp, rested, seen, scales,
-                  track_claimed
+                  track_claimed, wardrobe, equipped
            FROM agencoil_profiles WHERE key = $1`,
             [key],
           ),
@@ -586,6 +621,8 @@ export class ProfileStore {
             seen: Math.max(0, Number(r.seen) || 0),
             scales: Math.max(0, Number(r.scales) || 0),
             trackClaimed: Math.max(0, Number(r.track_claimed) || 0),
+            wardrobe: parseAchv(r.wardrobe),
+            equipped: parseEquipped(r.equipped),
           };
         }
       } catch (err) {
@@ -953,6 +990,71 @@ export class ProfileStore {
     this.markDirty(p.key);
   }
 
+  /** Give a piece the profile lacks. False when it is already owned or unknown. */
+  grantFresh(p: Profile, id: string, now = Date.now()): boolean {
+    if (!cosmeticById(id) || p.wardrobe[id]) return false;
+    p.wardrobe[id] = Math.floor(now / 1000);
+    this.markDirty(p.key);
+    return true;
+  }
+
+  /** Loot: a piece, or scales by rarity when the profile already owns it. */
+  grant(p: Profile, id: string, now = Date.now()): { fresh: boolean; scales: number } {
+    const c = cosmeticById(id);
+    if (!c) return { fresh: false, scales: 0 };
+    if (this.grantFresh(p, id, now)) return { fresh: true, scales: 0 };
+    const scales = DUPLICATE_SCALES[c.rarity];
+    p.scales += scales;
+    this.markDirty(p.key);
+    return { fresh: false, scales };
+  }
+
+  /** Put a piece on, or take a slot off with null. False when not owned or in the wrong slot. */
+  equip(p: Profile, slot: Slot, id: string | null): boolean {
+    if (id === null) {
+      if (p.equipped[slot]) {
+        delete p.equipped[slot];
+        this.markDirty(p.key);
+      }
+      return true;
+    }
+    const c = cosmeticById(id);
+    if (!c || c.slot !== slot || !p.wardrobe[id]) return false;
+    if (p.equipped[slot] !== id) {
+      p.equipped[slot] = id;
+      this.markDirty(p.key);
+    }
+    return true;
+  }
+
+  /** Buy from this week's shelf. */
+  buy(p: Profile, id: string, week = isoWeek()): "ok" | "not_for_sale" | "owned" | "too_poor" {
+    const c = cosmeticById(id);
+    if (!c || c.source.kind !== "shop" || !shopFor(week).some((x) => x.id === id))
+      return "not_for_sale";
+    if (p.wardrobe[id]) return "owned";
+    if (p.scales < c.source.price) return "too_poor";
+    p.scales -= c.source.price;
+    this.grantFresh(p, id);
+    return "ok";
+  }
+
+  /**
+   * Every level-track, feat and season piece the profile has earned but not
+   * been given (the migration, a missed moment): granted now, ids returned.
+   */
+  claimItems(p: Profile): string[] {
+    const out: string[] = [];
+    for (const c of itemsUpToLevel(levelOf(p.xp))) if (this.grantFresh(p, c.id)) out.push(c.id);
+    for (const feat of Object.keys(p.achv)) {
+      const c = itemForFeat(feat);
+      if (c && this.grantFresh(p, c.id)) out.push(c.id);
+    }
+    const best = Math.max(0, ...p.seasons.map(([, tier]) => tier));
+    for (const c of itemsForSeasonTier(best)) if (this.grantFresh(p, c.id)) out.push(c.id);
+    return out;
+  }
+
   /** Pay the level track for every level reached but not yet paid; returns the scales paid. */
   claimTrack(p: Profile): number {
     const level = levelOf(p.xp);
@@ -1275,6 +1377,8 @@ export class ProfileStore {
       xp: p.xp,
       level: levelOf(p.xp),
       scales: p.scales,
+      equipped: p.equipped,
+      wardrobe: Object.keys(p.wardrobe),
     };
   }
 
@@ -1426,10 +1530,10 @@ export class ProfileStore {
              streak, streak_last, freezes, eaten, near_total, bounty_total, prev_tier, season, season_best,
              shards, chests, crew, crown_until, sub, handle, avatar, achv,
              week_runs, week_lives, banked_tier, season_tier, seasons, pending, handle_chosen, rivals,
-             xp, rested, seen, scales, track_claimed, updated)
+             xp, rested, seen, scales, track_claimed, wardrobe, equipped, updated)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
              $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35,
-             $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, now())
+             $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, now())
            ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, best = GREATEST(agencoil_profiles.best, EXCLUDED.best),
              kills = GREATEST(agencoil_profiles.kills, EXCLUDED.kills),
              games = GREATEST(agencoil_profiles.games, EXCLUDED.games),
@@ -1451,6 +1555,7 @@ export class ProfileStore {
              xp = GREATEST(agencoil_profiles.xp, EXCLUDED.xp), rested = EXCLUDED.rested,
              seen = GREATEST(agencoil_profiles.seen, EXCLUDED.seen), scales = EXCLUDED.scales,
              track_claimed = GREATEST(agencoil_profiles.track_claimed, EXCLUDED.track_claimed),
+             wardrobe = agencoil_profiles.wardrobe || EXCLUDED.wardrobe, equipped = EXCLUDED.equipped,
              updated = now()`,
             [
               p.key,
@@ -1501,6 +1606,8 @@ export class ProfileStore {
               p.seen,
               p.scales,
               p.trackClaimed,
+              JSON.stringify(p.wardrobe),
+              JSON.stringify(p.equipped),
             ],
           ),
         );

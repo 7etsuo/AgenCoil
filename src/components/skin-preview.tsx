@@ -1,10 +1,21 @@
 import { useEffect, useRef } from "react";
+import type { Equipped } from "@/game/cosmetics";
+import { drawAuraItem, drawBodyItem, drawEyes, drawHeadItem, type Seg } from "@/game/wardrobe-draw";
 
 /**
- * A small live snake in the chosen colours, wiggling across a strip. Pure
- * canvas, no game state: it exists so the menu shows what you will look like.
+ * A small live snake in the chosen colours, wiggling across a strip, wearing
+ * the wardrobe pieces handed in. Pure canvas, no game state: it exists so the
+ * menu shows exactly what the arena will draw.
  */
-export function SkinPreview({ bands, boosting = false }: { bands: string[]; boosting?: boolean }) {
+export function SkinPreview({
+  bands,
+  boosting = false,
+  loadout,
+}: {
+  bands: string[];
+  boosting?: boolean;
+  loadout?: Equipped;
+}) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     const canvas = ref.current;
@@ -35,6 +46,9 @@ export function SkinPreview({ bands, boosting = false }: { bands: string[]; boos
         pts.push({ x, y });
       }
       const head = pts[n - 1]!;
+      const prev0 = pts[n - 2]!;
+      const heading = Math.atan2(head.y - prev0.y, head.x - prev0.x);
+      if (loadout?.aura) drawAuraItem(ctx, loadout.aura, head.x, head.y, r, t);
       if (boosting) {
         ctx.beginPath();
         pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
@@ -74,27 +88,37 @@ export function SkinPreview({ bands, boosting = false }: { bands: string[]; boos
         ctx.lineWidth = 1;
         ctx.stroke();
       }
-      // Eyes looking along the path.
-      const prev = pts[n - 2]!;
-      const ang = Math.atan2(head.y - prev.y, head.x - prev.x);
-      const ex = Math.cos(ang);
-      const ey = Math.sin(ang);
-      for (const side of [-1, 1]) {
-        const cx = head.x + ex * r * 0.36 - ey * side * r * 0.5;
-        const cy = head.y + ey * r * 0.36 + ex * side * r * 0.5;
-        ctx.beginPath();
-        ctx.arc(cx, cy, r * 0.4, 0, Math.PI * 2);
-        ctx.fillStyle = "#fff";
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(cx + ex * r * 0.16, cy + ey * r * 0.16, r * 0.2, 0, Math.PI * 2);
-        ctx.fillStyle = "#101318";
-        ctx.fill();
+      // Body pieces ride on the discs, counted from the head, with the tangent toward it.
+      if (loadout?.body) {
+        const segs: Seg[] = [];
+        for (let i = n - 1; i >= 0; i--) {
+          const p = pts[i]!;
+          const q = pts[Math.min(n - 1, i + 1)]!;
+          const o = pts[Math.max(0, i - 1)]!;
+          const dx = q.x - o.x;
+          const dy = q.y - o.y;
+          const d = Math.hypot(dx, dy) || 1;
+          segs.push({ x: p.x, y: p.y, tx: dx / d, ty: dy / d, i: n - 1 - i });
+        }
+        drawBodyItem(ctx, loadout.body, segs, r, t);
       }
+      if (loadout?.head) drawHeadItem(ctx, loadout.head, head.x, head.y, r, heading, t, boosting);
+      // Eyes looking along the path, in the piece worn on them.
+      drawEyes(
+        ctx,
+        loadout?.eyes,
+        head.x,
+        head.y,
+        r,
+        heading,
+        Math.cos(heading),
+        Math.sin(heading),
+        t,
+      );
       raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [bands, boosting]);
+  }, [bands, boosting, loadout]);
   return <canvas ref={ref} className="h-16 w-full" aria-hidden="true" />;
 }

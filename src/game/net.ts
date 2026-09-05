@@ -18,6 +18,7 @@ import {
   wrapAngle,
 } from "./model";
 import { C2S, Reader, S2C, Writer, readFood, readSnakeEntry, writeBands } from "./protocol";
+import { SLOTS, type Equipped } from "./cosmetics";
 import { World } from "./world";
 import { DEFAULT_CUTOFFS, LEAGUES } from "./challenges";
 
@@ -169,6 +170,10 @@ export interface NetHooks {
   onHandle: (status: number, handle: string) => void;
   /** A known snake's league byte rose on a full entry: a promotion, seen as it happens. */
   onLeague: (nid: number, from: number, to: number) => void;
+  /** The wardrobe: the server's answer (WARDROBE_*), what is on, and every piece owned. */
+  onWardrobe: (status: number, equipped: Equipped, owned: string[]) => void;
+  /** A piece arriving: id, rarity index, source (LOOT_*), and the scales paid instead for a duplicate. */
+  onLoot: (id: string, rarity: number, source: number, scales: number) => void;
 }
 
 interface Snap {
@@ -202,7 +207,7 @@ interface Look {
 const STALE_SNAKE_MS = 2500;
 /** Snapshots are "coming" when the last one is younger than this; a stall drops nothing. */
 const STALE_STREAM_MS = 1000;
-const PROTO = 5;
+const PROTO = 6;
 const INPUT_HZ = 30;
 /** A predicted eat the server has not confirmed by then is put back. */
 const EAT_CONFIRM_MS = 700;
@@ -542,6 +547,12 @@ export class NetSession {
   identify(identity: { origin: string; ticket: string } | null): void {
     this.identity = identity;
     if (identity) this.sendIdent();
+  }
+
+  /** Equip (1), unequip (2) or buy (3) a wardrobe piece; the answer arrives as `onWardrobe`. */
+  wardrobe(op: number, slot: number, id: string): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(new Writer().u8(C2S.WARDROBE).u8(op).u8(slot).str(id.slice(0, 32)).finish());
   }
 
   /** Ask for the handle this account is named by; the answer arrives as `onHandle`. */
@@ -1021,6 +1032,26 @@ export class NetSession {
         this.hooks.onHandle(status, r.str());
         break;
       }
+      case S2C.WARDROBE: {
+        const status = r.u8();
+        const equipped: Equipped = {};
+        for (const slot of SLOTS) {
+          const id = r.str();
+          if (id) equipped[slot] = id;
+        }
+        const n = r.u16();
+        const owned: string[] = [];
+        for (let i = 0; i < n; i++) owned.push(r.str());
+        this.hooks.onWardrobe(status, equipped, owned);
+        break;
+      }
+      case S2C.LOOT: {
+        const id = r.str();
+        const rarity = r.u8();
+        const source = r.u8();
+        this.hooks.onLoot(id, rarity, source, r.u16());
+        break;
+      }
       case S2C.PONG: {
         r.u32();
         this.rttMs = Math.round(performance.now() - this.pingSent);
@@ -1067,6 +1098,8 @@ export class NetSession {
       const league = e.full && this.serverVersion >= 3 ? r.u8() : 0;
       const might = e.full && this.serverVersion >= 3 ? r.u8() : 0;
       const finish = e.full && this.serverVersion >= 4 ? r.u8() : 0;
+      const loadout =
+        e.full && this.serverVersion >= 6 ? [r.u8(), r.u8(), r.u8(), r.u8(), r.u8()] : undefined;
       const id = String(e.nid);
       if (e.nid === this.selfNid) {
         this.serverSelf = {
@@ -1087,6 +1120,7 @@ export class NetSession {
           me.league = league;
           me.might = might;
           me.finish = finish;
+          me.loadout = loadout;
         }
         if (me && e.full && e.points && e.points.length > 1 && this.awaitingBody) {
           // A reattached snake gets its real body back instead of the
@@ -1110,6 +1144,7 @@ export class NetSession {
           league,
           might,
           finish,
+          loadout,
           bands: e.bands,
           x: e.x,
           y: e.y,
@@ -1145,6 +1180,7 @@ export class NetSession {
         s.league = league;
         s.might = might;
         s.finish = finish;
+        s.loadout = loadout;
       }
       const buf = this.buffers.get(id) ?? [];
       buf.push({

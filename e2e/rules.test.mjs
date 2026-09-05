@@ -14,6 +14,7 @@ const root = new URL("..", import.meta.url).pathname;
 
 let rules;
 let level;
+let cosmetics;
 let crest;
 let record;
 let model;
@@ -23,7 +24,7 @@ before(async () => {
   const entry = join(dir, "entry.ts");
   writeFileSync(
     entry,
-    `export * as rules from "${root}src/game/challenges.ts"; export * as level from "${root}src/game/level.ts"; export * as crest from "${root}src/game/crest.ts"; export * as record from "${root}src/game/record.ts"; export * as model from "${root}src/game/model.ts"; export { ProfileStore } from "${root}game-server/src/profiles.ts";`,
+    `export * as rules from "${root}src/game/challenges.ts"; export * as level from "${root}src/game/level.ts"; export * as cosmetics from "${root}src/game/cosmetics.ts"; export * as crest from "${root}src/game/crest.ts"; export * as record from "${root}src/game/record.ts"; export * as model from "${root}src/game/model.ts"; export { ProfileStore } from "${root}game-server/src/profiles.ts";`,
   );
   // Emitted under the server's node_modules so the external "pg" resolves.
   const outDir = join(root, "game-server", "node_modules", ".cache");
@@ -42,6 +43,7 @@ before(async () => {
   const mod = await import(pathToFileURL(out).href);
   rules = mod.rules;
   level = mod.level;
+  cosmetics = mod.cosmetics;
   crest = mod.crest;
   record = mod.record;
   model = mod.model;
@@ -749,4 +751,124 @@ test("the store books experience through the rested pool, stops at the cap, and 
   fresh.seen = Date.now() - 100 * 3600_000;
   assert.equal(store.touchRested(fresh), 0);
   assert.equal(level.levelOf(fresh.xp), 60);
+});
+
+test("the catalog is forty pieces with stable wire indexes, one slot each, and a fixed shelf per week", () => {
+  const c = cosmetics;
+  assert.equal(c.COSMETICS.length, 40);
+  assert.equal(new Set(c.COSMETICS.map((x) => x.id)).size, 40, "ids are unique");
+  assert.deepEqual(
+    Object.fromEntries(c.SLOTS.map((s) => [s, c.COSMETICS.filter((x) => x.slot === s).length])),
+    { head: 10, body: 12, eyes: 5, aura: 6, name: 7 },
+  );
+  c.COSMETICS.forEach((x, i) => {
+    assert.equal(c.cosmeticIndex(x.id), i + 1, "the wire index is the catalog position plus one");
+    assert.equal(c.cosmeticAt(i + 1), x);
+    assert.ok(c.RARITIES.includes(x.rarity));
+    assert.ok(c.sourceLabel(x).length > 0);
+  });
+  assert.equal(c.cosmeticIndex("nothing"), 0);
+  assert.equal(c.cosmeticAt(0), undefined);
+  assert.equal(c.cosmeticAt(41), undefined);
+  // A loadout round trips; a piece in the wrong slot is dropped on the way back.
+  const eq = { head: "halo", body: "plate_armor", name: "gold_name" };
+  assert.deepEqual(c.equippedOf(c.loadoutOf(eq)), eq);
+  assert.deepEqual(c.equippedOf([c.cosmeticIndex("halo"), c.cosmeticIndex("halo"), 0, 0, 0]), {
+    head: "halo",
+  });
+  // The shelf: six shop pieces, the same for everyone in a week, different across weeks.
+  const w1 = c.shopFor("2026-W36").map((x) => x.id);
+  const w2 = c.shopFor("2026-W37").map((x) => x.id);
+  assert.equal(w1.length, c.SHOP_SLOTS);
+  assert.deepEqual(
+    w1,
+    c.shopFor("2026-W36").map((x) => x.id),
+  );
+  assert.ok(w1.every((id) => c.cosmeticById(id).source.kind === "shop"));
+  assert.notDeepEqual(w1, w2);
+  assert.ok(c.priceOf(c.cosmeticById("royal_name")) === 900);
+  assert.equal(c.priceOf(c.cosmeticById("halo")), 0, "level pieces are never sold");
+  // The level track: pieces every fifth level to 50, then 52, 55, 58, 60.
+  assert.deepEqual(
+    [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 52, 55, 58, 60].map((l) => c.itemsForLevel(l).length),
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+  );
+  assert.equal(c.itemsForLevel(7).length, 0);
+  assert.equal(c.itemsUpToLevel(43).length, 8, "the owner's seed reaches Chain Links");
+  assert.equal(c.itemForFeat("hitman").id, "bone_segments");
+  assert.deepEqual(
+    c
+      .itemsForSeasonTier(5)
+      .map((x) => x.id)
+      .sort(),
+    ["diamond_crown", "gold_name", "platinum_sheen"],
+  );
+  assert.deepEqual(c.itemsForSeasonTier(2), []);
+  // Nothing legendary ever drops.
+  assert.equal(c.dropPool("legendary").length, 0);
+  assert.ok(c.dropPool().every((x) => x.source.kind === "drop" || x.source.kind === "shop"));
+});
+
+test("loot rolls follow their tables: boss shares, a guaranteed set piece, kill bands without legendaries", () => {
+  const c = cosmetics;
+  let seed = 12345;
+  const rand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  const N = 20000;
+  const count = { scales: 0, spines: 0, dread: 0, fangs: 0, other: 0 };
+  for (let i = 0; i < N; i++) {
+    const r = c.rollBossParticipant(new Set(), rand);
+    if (r.kind === "scales") count.scales++;
+    else if (r.id === "leviathan_spines") count.spines++;
+    else if (r.id === "leviathan_dread") count.dread++;
+    else if (r.id === "leviathan_fangs") count.fangs++;
+    else {
+      count.other++;
+      const piece = c.cosmeticById(r.id);
+      assert.ok(piece.source.kind === "drop" || piece.source.kind === "shop");
+      assert.ok(piece.rarity === "common" || piece.rarity === "rare");
+    }
+  }
+  const near = (n, pct, tol) => assert.ok(Math.abs(n / N - pct / 100) < tol, `${n / N} vs ${pct}%`);
+  near(count.scales, 55, 0.02);
+  near(count.other, 35, 0.02);
+  near(count.spines, 6, 0.01);
+  near(count.dread, 3, 0.01);
+  near(count.fangs, 1, 0.005);
+  for (let i = 0; i < 1000; i++) {
+    const r = c.rollBossFinal(rand);
+    assert.ok(["leviathan_spines", "leviathan_dread", "leviathan_fangs"].includes(r.id));
+  }
+  // A duplicate-aware drop prefers what the profile lacks.
+  const owned = new Set(
+    c
+      .dropPool("common")
+      .map((x) => x.id)
+      .slice(0, 3),
+  );
+  for (let i = 0; i < 200; i++) {
+    const id = c.dropOf("common", owned, rand);
+    assert.ok(!owned.has(id), "prefers a piece not yet owned");
+  }
+  // Kill loot: no orb under 300, then 8%, 20%, 40% by the victim's length.
+  assert.equal(c.killLootChance(299), 0);
+  assert.equal(c.killLootChance(300), 0.08);
+  assert.equal(c.killLootChance(999), 0.08);
+  assert.equal(c.killLootChance(1000), 0.2);
+  assert.equal(c.killLootChance(5000), 0.4);
+  assert.equal(c.killLootChance(250000), 0.4);
+  const byRarity = { common: 0, uncommon: 0, rare: 0, epic: 0, legendary: 0 };
+  for (let i = 0; i < N; i++)
+    byRarity[c.cosmeticById(c.rollKillLoot(2, new Set(), rand).id).rarity]++;
+  assert.equal(byRarity.legendary, 0);
+  near(byRarity.common, 20, 0.02);
+  near(byRarity.uncommon, 35, 0.02);
+  near(byRarity.rare, 34, 0.02);
+  near(byRarity.epic, 11, 0.015);
+  const low = { common: 0, uncommon: 0, rare: 0, epic: 0, legendary: 0 };
+  for (let i = 0; i < N; i++) low[c.cosmeticById(c.rollKillLoot(0, new Set(), rand).id).rarity]++;
+  assert.equal(low.epic + low.legendary, 0, "the smallest band never drops an epic");
+  near(low.common, 75, 0.02);
 });

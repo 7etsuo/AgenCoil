@@ -64,6 +64,12 @@ import {
   HANDLE_TAKEN,
   HANDLE_TOO_SOON,
   HANDLE_UNAVAILABLE,
+  LOOT_BOSS,
+  LOOT_DROP,
+  LOOT_FEAT,
+  LOOT_LEVEL,
+  LOOT_SEASON,
+  LOOT_SHOP,
   Reader,
   S2C,
   Writer,
@@ -71,6 +77,14 @@ import {
   writeBands,
   writeFood,
   writeSnakeEntry,
+  WARDROBE_NOT_FOR_SALE,
+  WARDROBE_NOT_OWNED,
+  WARDROBE_OK,
+  WARDROBE_OWNED,
+  WARDROBE_TOO_POOR,
+  WARDROBE_TOO_SOON,
+  WARDROBE_UNKNOWN,
+  WARDROBE_WRONG_SLOT,
 } from "../../src/game/protocol";
 import { DailyBoard } from "./daily";
 import { ProfileStore, rollLine, type Profile } from "./profiles";
@@ -114,6 +128,15 @@ import {
   levelOf,
   lifeScales,
 } from "../../src/game/level";
+import {
+  RARITIES,
+  SLOTS,
+  cosmeticById,
+  itemForFeat,
+  itemsForLevel,
+  loadoutOf,
+  priceOf,
+} from "../../src/game/cosmetics";
 import { playGateFromEnv } from "./play-gate";
 import { chosenHandle, cleanHandle, identityGateFromEnv, type Identity } from "./identity";
 import { lifeFeats } from "../../src/game/achievements";
@@ -208,6 +231,8 @@ interface Client {
   linkTries: number;
   /** When the player last asked for a handle that reached the database. */
   lastHandleAt: number;
+  /** When the last wardrobe request was handled. */
+  lastWardrobeAt: number;
   /** When this socket last asked to spawn. */
   lastSpawnAt: number;
   /** When any message last arrived; 0 until the first. */
@@ -923,7 +948,7 @@ export class GameServer {
     // finish byte, 5 a level byte and a flags byte (crown, linked) per board row.
     const params = new URL(req.url ?? "/", "http://x").searchParams;
     const asked = Number(params.get("v"));
-    const proto = Number.isFinite(asked) ? Math.max(1, Math.min(5, Math.floor(asked))) : 1;
+    const proto = Number.isFinite(asked) ? Math.max(1, Math.min(6, Math.floor(asked))) : 1;
     // The owner's headless agents carry a signed pass: no per-address caps, no human gate.
     const trusted = checkAgentPass(params.get("agent"), process.env.AGENT_SECRET || this.secret);
     const now = Date.now();
@@ -1021,6 +1046,7 @@ export class GameServer {
       linking: null,
       linkTries: 0,
       lastHandleAt: 0,
+      lastWardrobeAt: 0,
       lastSpawnAt: 0,
       lastSeenAt: 0,
       killerNid: 0,
@@ -1117,6 +1143,7 @@ export class GameServer {
       else if (type === C2S.INPUT) this.onInput(client, r);
       else if (type === C2S.EMOTE) this.onEmote(client, r.u8());
       else if (type === C2S.CREW) this.onCrew(client, r.str());
+      else if (type === C2S.WARDROBE) this.onWardrobe(client, r);
       else if (type === C2S.HANDLE)
         void this.onSetHandle(client, r.str()).catch((err) => {
           console.error("[handle] failed:", (err as Error)?.message ?? err);
@@ -1369,8 +1396,15 @@ export class GameServer {
           0,
           `level ${levelOf(client.profile.xp)} · +${owed} scales for the levels so far`,
         );
+      const pieces = this.profiles.claimItems(client.profile);
+      for (const id of pieces) this.sendLoot(client, id, lootSourceOf(id), 0);
+      if (pieces.length) {
+        this.notice(client, 0, `wardrobe: ${pieces.map(pieceName).join(", ")} earned`);
+        this.sendWardrobe(client, WARDROBE_OK);
+      }
     }
     snake.level = client.profile ? levelOf(client.profile.xp) : 0;
+    snake.loadout = loadoutOf(client.profile?.equipped);
     snake.league = client.profile ? leagueOf(client.profile.weekBest, this.cutoffs) + 1 : 0;
     snake.might = client.profile ? Object.keys(client.profile.achv).length : 0;
     snake.finish = client.profile?.prevTier ?? 0;
@@ -1705,6 +1739,7 @@ export class GameServer {
         .u32(c.progress)
         .u8(c.done ? 1 : 0);
     client.ws.send(w.finish());
+    this.sendWardrobe(client, WARDROBE_OK);
     // Rewards a week or season roll queued are told now, while the player is looking.
     const pending = this.profiles.drainPending(p);
     for (const line of pending.lines) {
@@ -1860,6 +1895,12 @@ export class GameServer {
   private achieve(client: Client, id: string, life: Life | null = client.life): void {
     this.events.log("achievement", { key: client.key, s: id });
     this.grantXp(client, XP_ACHIEVEMENT, "other", life);
+    // Some feats carry a wardrobe piece.
+    const piece = itemForFeat(id);
+    if (piece && client.profile && this.profiles.grantFresh(client.profile, piece.id)) {
+      this.sendLoot(client, piece.id, LOOT_FEAT, 0);
+      this.sendWardrobe(client, WARDROBE_OK);
+    }
     if (!client.v2 || !client.alive) return;
     client.ws.send(new Writer().u8(S2C.ACHIEVE).str(id).finish());
   }
@@ -1882,6 +1923,95 @@ export class GameServer {
       }
     }
     return id;
+  }
+
+  /** A wardrobe request: equip (1), unequip (2) or buy (3) a piece. */
+  private onWardrobe(client: Client, r: Reader): void {
+    const op = r.u8();
+    const slotIdx = r.u8();
+    const id = r.remaining
+      ? r
+          .str()
+          .replace(/[^a-z0-9_]/g, "")
+          .slice(0, 32)
+      : "";
+    const p = client.profile;
+    if (!p || !client.v2) return;
+    const now = Date.now();
+    if (now - client.lastWardrobeAt < 250) {
+      this.sendWardrobe(client, WARDROBE_TOO_SOON);
+      return;
+    }
+    client.lastWardrobeAt = now;
+    const slot = SLOTS[slotIdx];
+    const piece = cosmeticById(id);
+    let status = WARDROBE_OK;
+    if (op === 1) {
+      if (!slot || !piece) status = WARDROBE_UNKNOWN;
+      else if (piece.slot !== slot) status = WARDROBE_WRONG_SLOT;
+      else if (!this.profiles.equip(p, slot, id)) status = WARDROBE_NOT_OWNED;
+    } else if (op === 2) {
+      if (!slot) status = WARDROBE_UNKNOWN;
+      else this.profiles.equip(p, slot, null);
+    } else if (op === 3) {
+      const res = this.profiles.buy(p, id);
+      status =
+        res === "ok"
+          ? WARDROBE_OK
+          : res === "too_poor"
+            ? WARDROBE_TOO_POOR
+            : res === "owned"
+              ? WARDROBE_OWNED
+              : WARDROBE_NOT_FOR_SALE;
+      if (res === "ok" && piece) {
+        this.sendLoot(client, id, LOOT_SHOP, 0);
+        this.events.log("feature", { key: client.key, s: "buy", n: priceOf(piece) });
+      }
+    } else status = WARDROBE_UNKNOWN;
+    if (status === WARDROBE_OK && op !== 3) this.redress(client);
+    this.sendWardrobe(client, status);
+    if (op === 3 && status === WARDROBE_OK) void this.sendProfile(client);
+  }
+
+  /** The live snake wears what the profile has on; everyone gets its full entry again. */
+  private redress(client: Client): void {
+    const s = client.sid ? this.bySid.get(client.sid) : undefined;
+    if (!s) return;
+    s.loadout = loadoutOf(client.profile?.equipped);
+    for (const o of this.clients) o.refresh.add(s.id);
+  }
+
+  /** What is on and what is owned, for clients that know the wardrobe. */
+  private sendWardrobe(client: Client, status: number): void {
+    const p = client.profile;
+    if (!p || client.proto < 6 || !client.alive) return;
+    const w = new Writer().u8(S2C.WARDROBE).u8(status);
+    for (const slot of SLOTS) w.str(p.equipped[slot] ?? "");
+    const owned = Object.keys(p.wardrobe).slice(0, 65535);
+    w.u16(owned.length);
+    for (const id of owned) w.str(id);
+    client.ws.send(w.finish());
+  }
+
+  /** A piece arriving, or the scales paid instead when it was already owned. */
+  private sendLoot(client: Client, id: string, source: number, scales: number): void {
+    const c = cosmeticById(id);
+    if (!c) return;
+    this.events.log("feature", {
+      key: client.key,
+      s: scales ? "loot_dup" : "loot",
+      meta: { id, source },
+    });
+    if (client.proto < 6 || !client.alive) return;
+    client.ws.send(
+      new Writer()
+        .u8(S2C.LOOT)
+        .str(id)
+        .u8(Math.max(0, RARITIES.indexOf(c.rarity)))
+        .u8(source)
+        .u16(Math.min(65535, scales))
+        .finish(),
+    );
   }
 
   private notice(client: Client, kind: number, text: string): void {
@@ -2350,7 +2480,13 @@ export class GameServer {
     const p = c.profile;
     if (!p) return;
     const paid = this.profiles.claimTrack(p);
-    this.notice(c, NOTICE_LEVEL, `level ${level} · +${paid} scales`);
+    const pieces: string[] = [];
+    for (const piece of itemsForLevel(level))
+      if (this.profiles.grantFresh(p, piece.id)) pieces.push(piece.id);
+    for (const id of pieces) this.sendLoot(c, id, LOOT_LEVEL, 0);
+    if (pieces.length) this.sendWardrobe(c, WARDROBE_OK);
+    const extra = pieces.length ? ` · ${pieces.map(pieceName).join(", ")}` : "";
+    this.notice(c, NOTICE_LEVEL, `level ${level} · +${paid} scales${extra}`);
     this.events.log("feature", { key: c.key, s: "level", n: level });
     const s = c.sid ? this.bySid.get(c.sid) : undefined;
     if (s) {
@@ -2732,6 +2868,8 @@ export class GameServer {
       if (full && c.proto >= 2) w.u8(Math.min(255, s.level ?? 0));
       if (full && c.proto >= 3) w.u8(s.league ?? 0).u8(Math.min(255, s.might ?? 0));
       if (full && c.proto >= 4) w.u8(s.finish ?? 0);
+      // Protocol 6: the wardrobe, five catalog indexes.
+      if (full && c.proto >= 6) for (let k = 0; k < 5; k++) w.u8(s.loadout?.[k] ?? 0);
       c.known.add(s.id);
     }
     const gone: number[] = [];
@@ -2985,6 +3123,28 @@ export class GameServer {
       c.ws.send(w.finish());
     }
   }
+}
+
+/** The LOOT source byte for a catalog piece. */
+function lootSourceOf(id: string): number {
+  switch (cosmeticById(id)?.source.kind) {
+    case "level":
+      return LOOT_LEVEL;
+    case "shop":
+      return LOOT_SHOP;
+    case "boss":
+      return LOOT_BOSS;
+    case "feat":
+      return LOOT_FEAT;
+    case "season":
+      return LOOT_SEASON;
+    default:
+      return LOOT_DROP;
+  }
+}
+
+function pieceName(id: string): string {
+  return cosmeticById(id)?.name ?? id;
 }
 
 export function makeHelloPayload(

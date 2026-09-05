@@ -15,7 +15,9 @@ import {
 } from "../../src/game/achievements.ts";
 import type { ProfileStore as ProfileStoreT } from "./profiles.ts";
 import { LEAGUE_BANK_RUNS, LEAGUES, titleOf } from "../../src/game/challenges.ts";
-import { levelOf, seedXp } from "../../src/game/level.ts";
+import { levelOf, seedXp, xpForLevel } from "../../src/game/level.ts";
+import { DUPLICATE_SCALES, shopFor } from "../../src/game/cosmetics.ts";
+import { isoWeek } from "../../src/game/challenges.ts";
 
 // profiles.ts uses extensionless imports, which the type stripper cannot
 // resolve, so bundle it the way the server build does.
@@ -402,4 +404,60 @@ test("the character level is seeded once from lifetime totals, persists, and onl
   } finally {
     await db.close();
   }
+});
+test("the wardrobe: pieces are granted once, duplicates pay scales, equips need ownership and the right slot, the shelf sells", async () => {
+  const store = new ProfileStore();
+  const p = await store.load("dev-wardrobe", "dresser");
+  assert.equal(store.grantFresh(p, "halo"), true);
+  assert.equal(store.grantFresh(p, "halo"), false, "already owned");
+  assert.equal(store.grantFresh(p, "not_a_piece"), false);
+  assert.deepEqual(store.grant(p, "halo"), { fresh: false, scales: DUPLICATE_SCALES.rare });
+  assert.equal(p.scales, DUPLICATE_SCALES.rare);
+  assert.deepEqual(store.grant(p, "antennae"), { fresh: true, scales: 0 });
+  assert.equal(store.equip(p, "head", "halo"), true);
+  assert.equal(p.equipped.head, "halo");
+  assert.equal(store.equip(p, "body", "halo"), false, "a head piece cannot go on the body");
+  assert.equal(store.equip(p, "body", "plate_armor"), false, "not owned");
+  assert.equal(store.equip(p, "head", null), true);
+  assert.equal(p.equipped.head, undefined);
+  // The shelf: only this week's pieces, once, for scales.
+  const shelf = shopFor(isoWeek());
+  const piece = shelf[0]!;
+  const price = piece.source.kind === "shop" ? piece.source.price : 0;
+  p.scales = price - 1;
+  assert.equal(store.buy(p, piece.id), "too_poor");
+  p.scales = price;
+  assert.equal(store.buy(p, piece.id), "ok");
+  assert.equal(p.scales, 0);
+  assert.ok(p.wardrobe[piece.id]);
+  assert.equal(store.buy(p, piece.id), "owned");
+  assert.equal(store.buy(p, "halo"), "not_for_sale", "level pieces are never sold");
+  const offShelf = shopFor("2000-W01").find((x) => !shelf.some((y) => y.id === x.id));
+  if (offShelf) assert.equal(store.buy(p, offShelf.id), "not_for_sale", "not on this week's shelf");
+});
+
+test("the claim hands out every level, feat and season piece reached but not yet given, once", async () => {
+  const store = new ProfileStore();
+  const p = await store.load("dev-claim", "veteran");
+  p.xp = xpForLevel(43);
+  p.achv = { hitman: 1, payback: 1 };
+  p.seasons = [[1, 4]];
+  const got = store.claimItems(p);
+  assert.equal(levelOf(p.xp), 43);
+  assert.deepEqual(got.sort(), [
+    "angry_brows",
+    "back_spikes",
+    "bone_segments",
+    "chain_links",
+    "dorsal_ridge",
+    "gold_name",
+    "halo",
+    "horn_nubs",
+    "plate_armor",
+    "platinum_sheen",
+    "star_eyes",
+    "vendetta_eyes",
+  ]);
+  assert.deepEqual(store.claimItems(p), [], "nothing twice");
+  assert.equal(p.scales, 0, "a claim never pays duplicate scales");
 });

@@ -23,6 +23,19 @@ import {
 import { pathLength, type World } from "./world";
 import { LEAGUES, LEAGUE_COLORS, LEAGUE_SHAPES } from "./challenges";
 import { crestPath, drawCrest } from "./crest";
+import { cosmeticAt, equippedOf } from "./cosmetics";
+import {
+  coversGrowth,
+  drawAuraItem,
+  drawBodyItem,
+  drawEyes,
+  drawGrowth,
+  drawHeadItem,
+  growthGlow,
+  nameStyle,
+  wantsSegs,
+  type Seg,
+} from "./wardrobe-draw";
 
 const HEX = 44;
 const SPRITE = 64;
@@ -713,6 +726,7 @@ export class Renderer {
     const r = radiusOf(s.mass);
     const pts = s.points;
     if (pts.length < 2) return;
+    const eq = s.loadout ? equippedOf(s.loadout) : undefined;
     const span = view + lengthOf(s.mass) + r;
     if (dist2(s.x, s.y, cam.x, cam.y) > span * span) return;
 
@@ -736,6 +750,18 @@ export class Renderer {
       ctx.globalAlpha = 0.18 + Math.sin(this.time * 3) * 0.06;
       ctx.strokeStyle = "#ff5a6e";
       ctx.lineWidth = r * 3.6;
+      ctx.stroke();
+      ctx.globalCompositeOperation = "source-over";
+      ctx.globalAlpha = 1;
+    }
+    // Growth armour's last stage: a slow additive pulse along the whole body.
+    const glowA = s.boss ? 0 : growthGlow(s.mass, this.time);
+    if (glowA > 0 && !invisible) {
+      tracePath(0, 0);
+      ctx.globalCompositeOperation = "lighter";
+      ctx.globalAlpha = glowA;
+      ctx.strokeStyle = fill;
+      ctx.lineWidth = r * 3.2;
       ctx.stroke();
       ctx.globalCompositeOperation = "source-over";
       ctx.globalAlpha = 1;
@@ -800,12 +826,21 @@ export class Renderer {
     total += Math.hypot(s.x - pts[len - 1]!.x, s.y - pts[len - 1]!.y);
     const bandUnits = bandLen * step;
 
+    // Body pieces and growth armour need the discs with their tangents;
+    // they are collected only when something will draw on them.
+    const segs: Seg[] | null = wantsSegs(eq?.body, s.mass) ? [] : null;
     let walked = 0;
     let next = 0;
+    let tx = Math.cos(s.angle);
+    let ty = Math.sin(s.angle);
     for (let i = 0; i < len; i++) {
       const a = pts[i]!;
       const b = i + 1 < len ? pts[i + 1]! : { x: s.x, y: s.y };
       const segLen = Math.hypot(b.x - a.x, b.y - a.y);
+      if (segLen > 0) {
+        tx = (b.x - a.x) / segLen;
+        ty = (b.y - a.y) / segLen;
+      }
       while (next <= walked + segLen) {
         const t = segLen > 0 ? (next - walked) / segLen : 0;
         const px = a.x + (b.x - a.x) * t;
@@ -814,15 +849,22 @@ export class Renderer {
           const fromHead = Math.max(0, total - next);
           const band = ((fromHead / bandUnits) | 0) % nBands;
           ctx.drawImage(sprites[band]!.canvas, px - half, py - half, size, size);
+          if (segs) segs.push({ x: px, y: py, tx, ty, i: Math.round(fromHead / step) });
         }
         next += step;
       }
       walked += segLen;
     }
+    if (segs && segs.length) {
+      segs.reverse();
+      drawGrowth(ctx, s.mass, segs, r, coversGrowth(eq?.body));
+      if (eq?.body) drawBodyItem(ctx, eq.body, segs, r, this.time);
+    }
     if (s.x >= x0 - r && s.x <= x1 + r && s.y >= y0 - r && s.y <= y1 + r) {
       const hs = size * 1.06;
-      // Last week's finish glows behind the head, under everything else.
-      if ((s.finish ?? 0) >= 3) this.drawFinishAura(ctx, s, r);
+      // An aura piece, or last week's finish, glows behind the head under everything else.
+      if (eq?.aura) drawAuraItem(ctx, eq.aura, s.x, s.y, r, this.time);
+      else if ((s.finish ?? 0) >= 3) this.drawFinishAura(ctx, s, r);
       // Squash along the heading for 220 ms after a boost starts.
       if (s.boosting && !this.boostSince.has(s.id)) this.boostSince.set(s.id, this.time);
       if (!s.boosting) this.boostSince.delete(s.id);
@@ -845,7 +887,20 @@ export class Renderer {
       if (s.crown) this.drawCrown(ctx, s, r);
       if (s.boss) this.drawBossMarks(ctx, s, r);
       this.drawEvolution(ctx, s, r);
-      this.drawEyes(ctx, s, r, aim);
+      if (eq?.head) drawHeadItem(ctx, eq.head, s.x, s.y, r, s.angle, this.time, s.boosting);
+      // The eyes look where the player aims; the piece on them changes the pupils.
+      let lx = Math.cos(s.angle);
+      let ly = Math.sin(s.angle);
+      if (aim) {
+        const dx = aim.x - s.x;
+        const dy = aim.y - s.y;
+        const d = Math.hypot(dx, dy);
+        if (d > 4) {
+          lx = dx / d;
+          ly = dy / d;
+        }
+      }
+      drawEyes(ctx, eq?.eyes, s.x, s.y, r, s.angle, lx, ly, this.time);
     }
     ctx.globalAlpha = 1;
   }
@@ -900,52 +955,6 @@ export class Renderer {
         ctx.fillStyle = "rgba(255,255,255,0.35)";
         ctx.fill();
       }
-    }
-  }
-
-  private drawEyes(ctx: CanvasRenderingContext2D, s: Snake, r: number, aim: Vec | null): void {
-    const ex = Math.cos(s.angle);
-    const ey = Math.sin(s.angle);
-    const px = -ey;
-    const py = ex;
-    const eye = r * 0.4;
-    let lx = ex;
-    let ly = ey;
-    if (aim) {
-      const dx = aim.x - s.x;
-      const dy = aim.y - s.y;
-      const d = Math.hypot(dx, dy);
-      if (d > 4) {
-        lx = dx / d;
-        ly = dy / d;
-      }
-    }
-    for (const side of [-1, 1]) {
-      const cx = s.x + ex * r * 0.36 + px * side * r * 0.5;
-      const cy = s.y + ey * r * 0.36 + py * side * r * 0.5;
-      ctx.beginPath();
-      ctx.arc(cx, cy, eye, 0, Math.PI * 2);
-      ctx.fillStyle = "#ffffff";
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(cx, cy, eye, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(0,0,0,0.25)";
-      ctx.lineWidth = Math.max(0.6, r * 0.06);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(cx + lx * eye * 0.4, cy + ly * eye * 0.4, eye * 0.5, 0, Math.PI * 2);
-      ctx.fillStyle = "#101318";
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(
-        cx + lx * eye * 0.25 - eye * 0.18,
-        cy + ly * eye * 0.25 - eye * 0.22,
-        eye * 0.16,
-        0,
-        Math.PI * 2,
-      );
-      ctx.fillStyle = "rgba(255,255,255,0.85)";
-      ctx.fill();
     }
   }
 
@@ -1009,9 +1018,11 @@ export class Renderer {
       const tier = s.boss ? 0 : (s.league ?? 0);
       const nemesis = s.id === this.nemesisId;
       const target = s.id === this.targetId;
+      // A name piece dresses the tag: colour, an outline, a glow, a glyph before the name.
+      const style = s.loadout ? nameStyle(cosmeticAt(s.loadout[4] ?? 0)?.id, this.time) : null;
       const label = s.boss
         ? `BOSS · ${s.name}`
-        : `${target ? "◎ " : ""}${nemesis ? "⚔ " : ""}${s.crown ? "👑 " : ""}${s.linked ? "✓ " : ""}${s.name} · ${Math.floor(s.mass)}`;
+        : `${target ? "◎ " : ""}${nemesis ? "⚔ " : ""}${s.crown ? "👑 " : ""}${s.linked ? "✓ " : ""}${style?.glyph ? `${style.glyph} ` : ""}${s.name} · ${Math.floor(s.mass)}`;
       ctx.font = font;
       ctx.textAlign = "left";
       ctx.textBaseline = "bottom";
@@ -1032,11 +1043,11 @@ export class Renderer {
         ? "rgba(70,42,8,0.8)"
         : nemesis
           ? "rgba(70,12,20,0.78)"
-          : "rgba(7,9,15,0.5)";
+          : (style?.bg ?? "rgba(7,9,15,0.5)");
       roundRect(ctx, left, y - 16, width, 18, 9);
       ctx.fill();
-      if (rank === 1) {
-        ctx.strokeStyle = "#d7dde8";
+      if (rank === 1 || style?.border) {
+        ctx.strokeStyle = rank === 1 ? "#d7dde8" : style!.border!;
         ctx.lineWidth = 1;
         ctx.stroke();
       }
@@ -1059,7 +1070,27 @@ export class Renderer {
       ctx.font = font;
       ctx.textAlign = "left";
       ctx.textBaseline = "bottom";
-      ctx.fillStyle = target ? "#ffd28a" : nemesis ? "#ffb3c1" : "rgba(238,241,246,0.92)";
+      if (style?.outline) {
+        ctx.strokeStyle = style.outline;
+        ctx.lineWidth = 2.5;
+        ctx.lineJoin = "round";
+        ctx.strokeText(label, x, y);
+      }
+      if (style?.glow) {
+        ctx.globalCompositeOperation = "lighter";
+        ctx.globalAlpha = 0.4;
+        ctx.fillStyle = style.glow;
+        ctx.fillText(label, x - 0.7, y);
+        ctx.fillText(label, x + 0.7, y);
+        ctx.fillText(label, x, y - 0.7);
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = "source-over";
+      }
+      ctx.fillStyle = target
+        ? "#ffd28a"
+        : nemesis
+          ? "#ffb3c1"
+          : (style?.color ?? "rgba(238,241,246,0.92)");
       ctx.fillText(label, x, y);
     }
   }

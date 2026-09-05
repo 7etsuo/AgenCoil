@@ -124,6 +124,8 @@ class Agent {
       onWisp: () => undefined,
       onHandle: () => undefined,
       onLeague: () => undefined,
+      onWardrobe: () => undefined,
+      onLoot: () => undefined,
     };
     this.net = new NetSession(url, hooks);
     this.net.connect();

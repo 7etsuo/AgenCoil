@@ -144,6 +144,8 @@ export interface Snake {
   /** Cosmetics: boost trail and death effect ids (see challenges.ts). */
   trail?: number;
   deathFx?: number;
+  /** The wardrobe on the wire: catalog indexes for head, body, eyes, aura, name (0 empty; see cosmetics.ts). */
+  loadout?: number[];
   /** Last near-miss time per other snake id (server side, not on the wire). */
   nearMark?: Map<string, number>;
   /** Server side: distance moved per tick, newest last, for exact rewinds. */
