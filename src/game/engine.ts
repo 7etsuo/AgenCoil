@@ -131,6 +131,10 @@ export interface HudState {
   newBest: boolean;
   /** Time to the next day, week and boss, for the exit clocks. */
   clocks: { dayMs: number; weekMs: number; bossInMs: number; bossUp: boolean };
+  /** The player the game holds against you, with the ledger and whether their snake is here now. */
+  nemesis: { name: string; k: number; d: number; nid: number; inArena: boolean } | null;
+  /** The life that just ended was ended by your nemesis. */
+  nemesisKilledMe: boolean;
   firstLife: boolean;
   party: { name: string; mass: number }[];
   arenaMode: { id: number; secsLeft: number; secsToNext: number };
@@ -281,6 +285,8 @@ export class CoilEngine {
   private newBest = false;
   /** The day the "your streak starts now" line was said, so it is said once a day. */
   private streakSaid = "";
+  /** The nemesis snake last seen in the stats, so their arrival is announced once. */
+  private nemesisSeenNid = 0;
   /** The league legend has been shown once on this device (localStorage), or during this life. */
   private legendDone = readFlag("agencoil-hint-league");
   private legendShown = false;
@@ -339,6 +345,12 @@ export class CoilEngine {
             b.hp = s.boss.hp;
             b.hpMax = 100;
           }
+          // The nemesis walked in: say so once per visit.
+          if (s.nemesisNid && s.nemesisNid !== this.nemesisSeenNid && this.profile?.nemesis) {
+            const n = this.profile.nemesis;
+            this.pushFeed(`your nemesis ${n.name} is in the arena · they lead ${n.k}-${n.d}`);
+          }
+          this.nemesisSeenNid = s.nemesisNid;
         },
         onWisp: (x, y, bank, secsLeft) => {
           this.wispSrv = { x, y };
@@ -390,6 +402,22 @@ export class CoilEngine {
           }
           // A promotion of our own: the league byte drives the moment, the text is not needed.
           if (kind === 4) return;
+          // Payback: the kill slot says it, in red over the head.
+          if (kind === 5) {
+            this.killNotice = text;
+            this.killTimer = 2.6;
+            const me = this.world.player;
+            if (me)
+              this.floaters.push({
+                x: me.x,
+                y: me.y - radiusOf(me.mass) * 2.2,
+                text: "payback",
+                life: 1.1,
+                color: "#ffb3c1",
+              });
+            this.audio.kill();
+            return;
+          }
           // A roll card, kind 10 plus the tier it is about: shown until dismissed.
           if (kind >= 10 && kind <= 15) {
             this.roll = { text, tier: kind - 10 };
@@ -812,6 +840,12 @@ export class CoilEngine {
       record: { best: this.recordBest, passed: this.recordPassed },
       newBest: this.phase === "dead" && this.newBest,
       clocks: this.clocks(),
+      nemesis: this.nemesis(),
+      nemesisKilledMe:
+        this.phase === "dead" &&
+        this.killerId !== null &&
+        (this.stats?.nemesisNid ?? 0) > 0 &&
+        this.killerId === String(this.stats!.nemesisNid),
       // The live snake knows its league before the profile is resent.
       league: p?.league || (this.profile ? leagueOf(this.profile.weekBest) + 1 : 0),
       might: this.profile?.achv.length ?? 0,
@@ -1258,6 +1292,14 @@ export class CoilEngine {
     this.exposeDebug();
   }
 
+  /** The nemesis from the profile, and whether their snake is here now, from the stats. */
+  private nemesis(): HudState["nemesis"] {
+    const n = this.profile?.nemesis;
+    if (!n) return null;
+    const nid = this.online ? (this.stats?.nemesisNid ?? 0) : 0;
+    return { name: n.name, k: n.k, d: n.d, nid, inArena: nid > 0 };
+  }
+
   /** Time to the next day, week and boss, for the exit clocks. */
   private clocks(): HudState["clocks"] {
     const now = Date.now();
@@ -1700,9 +1742,13 @@ export class CoilEngine {
     if (this.phase === "menu") {
       // Spectate the current leader while online; drift around the centre
       // otherwise.
+      // Your nemesis, when they are here and their position is known; else the leader.
+      const nemNid = this.online ? (this.stats?.nemesisNid ?? 0) : 0;
+      const nemLive = nemNid ? world.snakes.find((s) => s.id === String(nemNid)) : undefined;
+      const nemRow = nemNid ? this.stats?.board.find((b) => b.nid === nemNid) : undefined;
       const top = this.online ? this.stats?.board[0] : undefined;
       const live = top ? world.snakes.find((s) => s.id === String(top.nid)) : undefined;
-      const target = live ?? top;
+      const target = nemLive ?? nemRow ?? live ?? top;
       if (target) {
         this.cam.x = lerp(this.cam.x, target.x, 1 - Math.pow(0.01, dt));
         this.cam.y = lerp(this.cam.y, target.y, 1 - Math.pow(0.01, dt));
@@ -1780,6 +1826,7 @@ export class CoilEngine {
       this.topRanks(),
       this.mapMarks(),
       this.promos,
+      this.online && this.stats?.nemesisNid ? String(this.stats.nemesisNid) : null,
     );
     const nowMs = performance.now();
     for (const [id, e] of this.emotes) if (e.until < nowMs) this.emotes.delete(id);

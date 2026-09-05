@@ -119,8 +119,10 @@ export class Renderer {
     ranks: ReadonlyMap<string, number> | null = null,
     marks: readonly MapMark[] = [],
     promos: ReadonlyMap<string, Promotion> | null = null,
+    nemesisId: string | null = null,
   ): void {
     this.promos = promos;
+    this.nemesisId = nemesisId;
     const shake = cam.trauma * cam.trauma;
     const ox = (Math.random() * 2 - 1) * shake * 14;
     const oy = (Math.random() * 2 - 1) * shake * 14;
@@ -642,6 +644,8 @@ export class Renderer {
 
   private boostSince = new Map<string, number>();
   private promos: ReadonlyMap<string, Promotion> | null = null;
+  /** The viewer's nemesis, whose tag and map dot are marked for them alone. */
+  private nemesisId: string | null = null;
 
   private segmentSprite(color: string, style?: SkinStyle): Sprite {
     const key = style ? `${style}|${color}` : color;
@@ -959,9 +963,10 @@ export class Renderer {
       const r = radiusOf(s.mass) * z;
       const rank = ranks?.get(s.id);
       const tier = s.boss ? 0 : (s.league ?? 0);
+      const nemesis = s.id === this.nemesisId;
       const label = s.boss
         ? `BOSS · ${s.name}`
-        : `${s.crown ? "👑 " : ""}${s.linked ? "✓ " : ""}${s.name} · ${Math.floor(s.mass)}`;
+        : `${nemesis ? "⚔ " : ""}${s.crown ? "👑 " : ""}${s.linked ? "✓ " : ""}${s.name} · ${Math.floor(s.mass)}`;
       ctx.font = font;
       ctx.textAlign = "left";
       ctx.textBaseline = "bottom";
@@ -972,7 +977,7 @@ export class Renderer {
       const y = sy - r - 10;
       const width = crestW + rankW + tw + pad * 2;
       const left = sx - width / 2;
-      ctx.fillStyle = "rgba(7,9,15,0.5)";
+      ctx.fillStyle = nemesis ? "rgba(70,12,20,0.78)" : "rgba(7,9,15,0.5)";
       roundRect(ctx, left, y - 16, width, 18, 9);
       ctx.fill();
       if (rank === 1) {
@@ -999,7 +1004,7 @@ export class Renderer {
       ctx.font = font;
       ctx.textAlign = "left";
       ctx.textBaseline = "bottom";
-      ctx.fillStyle = "rgba(238,241,246,0.92)";
+      ctx.fillStyle = nemesis ? "#ffb3c1" : "rgba(238,241,246,0.92)";
       ctx.fillText(label, x, y);
     }
   }
@@ -1081,6 +1086,21 @@ export class Renderer {
       ctx.arc(cx + ghost.x * k, cy + ghost.y * k, 2.5, 0, Math.PI * 2);
       ctx.strokeStyle = "rgba(232,234,238,0.6)";
       ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    // The nemesis, when known: a hollow diamond in the same red as their tag.
+    const nem = this.nemesisId ? snakes.find((s) => s.id === this.nemesisId) : undefined;
+    if (nem) {
+      const mx = cx + nem.x * k;
+      const my = cy + nem.y * k;
+      ctx.beginPath();
+      ctx.moveTo(mx, my - 5);
+      ctx.lineTo(mx + 5, my);
+      ctx.lineTo(mx, my + 5);
+      ctx.lineTo(mx - 5, my);
+      ctx.closePath();
+      ctx.strokeStyle = "#ffb3c1";
+      ctx.lineWidth = 1.4;
       ctx.stroke();
     }
     for (const l of LANDMARKS) {

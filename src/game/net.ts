@@ -60,6 +60,8 @@ export interface StatsInfo {
   mode: { id: number; secsLeft: number; secsToNext: number };
   /** The Boss Hour snake: hit points in percent and where it is. */
   boss: { hp: number; x: number; y: number } | null;
+  /** The wire id of your nemesis's snake while it is alive here, else 0. */
+  nemesisNid: number;
 }
 
 export interface ProfileInfo {
@@ -103,6 +105,8 @@ export interface ProfileInfo {
   /** The streak after today's first life, and whether it is already played. */
   streakNext: number;
   playedToday: boolean;
+  /** The player the game holds against you: their kills on you, yours on them. */
+  nemesis: { name: string; k: number; d: number } | null;
 }
 
 export interface ChallengeInfo {
@@ -701,6 +705,7 @@ export class NetSession {
           party: [],
           mode: { id: 0, secsLeft: 0, secsToNext: 0 },
           boss: null,
+          nemesisNid: 0,
         };
         const nb = r.u8();
         for (let i = 0; i < nb; i++) {
@@ -736,6 +741,7 @@ export class NetSession {
             const by = r.f32();
             s.boss = hp === 255 ? null : { hp, x: bx, y: by };
           }
+          if (r.remaining >= 2) s.nemesisNid = r.u16();
         }
         this.hooks.onStats(s);
         break;
@@ -845,6 +851,7 @@ export class NetSession {
           seasons: [],
           streakNext: 0,
           playedToday: false,
+          nemesis: null,
         };
         if (r.remaining >= 14) {
           p.bestX = r.f32();
@@ -891,6 +898,12 @@ export class NetSession {
         if (r.remaining >= 3) {
           p.streakNext = r.u16();
           p.playedToday = r.u8() === 1;
+        }
+        if (r.remaining >= 3) {
+          const name = r.str();
+          const k = r.u8();
+          const d = r.u8();
+          p.nemesis = name ? { name, k, d } : null;
         }
         this.hooks.onProfile(p);
         break;

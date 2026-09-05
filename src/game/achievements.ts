@@ -109,6 +109,7 @@ export const ACHIEVEMENTS: readonly Achievement[] = [
   feat("league_diamond", "Diamond Week", "bank a Diamond finish in one week", "💎"),
   feat("season_gold", "Season Gold", "finish a season in Gold or better", "🏅"),
   feat("season_diamond", "Season Diamond", "finish a season in Diamond", "👑"),
+  feat("payback", "Payback", "take down your nemesis", "⚔️"),
 ];
 
 /** The feat for banking a weekly tier, by tier (1 Bronze to 5 Diamond); Bronze has none. */

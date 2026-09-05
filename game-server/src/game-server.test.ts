@@ -115,6 +115,12 @@ class Player {
     }
   }
 
+  /** Forget every queued message of one type, so the next one is fresh. */
+  drain(type: number): void {
+    for (let i = this.queue.length - 1; i >= 0; i--)
+      if (this.queue[i]![0] === type) this.queue.splice(i, 1);
+  }
+
   close(): Promise<void> {
     return new Promise((resolve) => {
       this.ws.once("close", () => resolve());
@@ -276,10 +282,8 @@ test("a life ended by a lost connection is still booked on the profile", async (
     again.send(ident("dev-left", "leaver"));
     const profile = parseProfile(await again.next(S2C.PROFILE));
     // The snake keeps moving in its grace window and may eat a stray orb, so a few units of drift are fine.
-    assert.ok(
-      profile.best >= 777 && profile.best < 800,
-      `the best length of the abandoned run (${profile.best})`,
-    );
+    const best = Number(profile.best);
+    assert.ok(best >= 777 && best < 800, `the best length of the abandoned run (${best})`);
     assert.equal(profile.weekBest, profile.best);
     assert.equal(profile.weekLives, 1, "the life counts");
     assert.deepEqual(profile.weekRuns, [1, 1, 0, 0, 0], "and it was a Silver run");
@@ -424,6 +428,133 @@ test("a signed-in player is linked on connect and chooses the handle they are na
   } finally {
     await site.close();
     await other.close();
+    await arena.stop();
+  }
+});
+
+/** Read a protocol 5 STATS2 message down to its nemesis id. */
+function parseStats2(r: InstanceType<typeof Reader>): { nemesisNid: number } {
+  r.f32();
+  r.u16();
+  r.u16();
+  r.u16();
+  r.u16();
+  const nb = r.u8();
+  for (let i = 0; i < nb; i++) {
+    r.u16();
+    r.str();
+    r.u32();
+    r.f32();
+    r.f32();
+    r.u32();
+    r.u8();
+    r.u8();
+    r.u8();
+  }
+  const nd = r.u8();
+  for (let i = 0; i < nd; i++) {
+    r.str();
+    r.u32();
+  }
+  const np = r.u8();
+  for (let i = 0; i < np; i++) {
+    r.str();
+    r.u32();
+  }
+  r.u8();
+  r.u16();
+  r.u16();
+  r.u8();
+  r.f32();
+  r.f32();
+  const nemesisNid = r.u16();
+  assert.equal(r.remaining, 0, "stats fully consumed");
+  return { nemesisNid };
+}
+
+test("a rival who pops you twice is your nemesis, the stats say when they are here, and taking them down is payback", async () => {
+  const arena = await startArena();
+  try {
+    const url5 = arena.url.replace(/v=2$/, "v=5");
+    const hunter = await joinArena(url5, "dev-hunter", "hunter");
+    const prey = await joinArena(url5, "dev-prey", "prey");
+    const game = arena.game as unknown as {
+      stopLoop(): void;
+      step(dt: number): void;
+      nids: Map<string, number>;
+    };
+    const world = arena.game.world;
+    game.stopLoop();
+    await sleep(60);
+    world.clearBots();
+    world.desiredBots = 0;
+    const snakeOf = (name: string) => world.snakes.find((s) => s.name === name && s.alive)!;
+    /** A long wall driving north across the runner's path, and the runner heading east into it. */
+    const arrange = (wallName: string, runnerName: string) => {
+      const wall = snakeOf(wallName);
+      const runner = snakeOf(runnerName);
+      for (const [s, x, y, angle, mass] of [
+        [wall, 0, 300, Math.PI / 2, 400],
+        [runner, -300, 0, 0, 40],
+      ] as const) {
+        s.mass = mass;
+        s.x = x;
+        s.y = y;
+        s.angle = angle;
+        s.invuln = 0;
+        s.points = [];
+        world.ensureTrail(s);
+        world.inputs.get(s.id)!.angle = angle;
+      }
+      return runner.id;
+    };
+    const runUntilDead = (id: string) => {
+      for (let i = 0; i < 400 && world.snakes.some((s) => s.id === id && s.alive); i++)
+        game.step(1 / 40);
+      assert.ok(!world.snakes.some((s) => s.id === id && s.alive), "the runner died");
+    };
+    const respawn = async (p: Player, name: string, key: string) => {
+      p.send(hello(name, key, "", true));
+      await p.next(S2C.SPAWNED);
+    };
+    // Twice the prey runs into the hunter's body.
+    for (let n = 0; n < 2; n++) {
+      const runner = arrange("hunter", "prey");
+      prey.drain(S2C.PROFILE);
+      runUntilDead(runner);
+      const profile = parseProfile(await prey.next(S2C.PROFILE));
+      assert.deepEqual(
+        profile.nemesis,
+        n === 0 ? { name: "", k: 0, d: 0 } : { name: "hunter", k: 2, d: 0 },
+      );
+      await respawn(prey, "prey", "dev-prey");
+    }
+    // The stats now name the hunter's live snake as the prey's nemesis.
+    const hunterNid = game.nids.get(snakeOf("hunter").id)!;
+    let seen = 0;
+    for (let i = 0; i < 40 && !seen; i++) {
+      game.step(1 / 40);
+      const r = await prey.next(S2C.STATS2, 200).catch(() => null);
+      if (r) seen = parseStats2(r).nemesisNid;
+    }
+    assert.equal(seen, hunterNid, "the nemesis id is the hunter's");
+    // The hunter runs into the prey's body: payback.
+    runUntilDead(arrange("prey", "hunter"));
+    const notice = await (async () => {
+      const until = Date.now() + 3000;
+      while (Date.now() < until) {
+        const r = await prey.next(S2C.NOTICE, 1500);
+        const kind = r.u8();
+        const text = r.str();
+        if (kind === 5) return text;
+      }
+      throw new Error("no payback notice");
+    })();
+    assert.equal(notice, "payback · hunter · 1-2");
+    assert.equal((await prey.next(S2C.ACHIEVE)).str(), "payback");
+    await hunter.close();
+    await prey.close();
+  } finally {
     await arena.stop();
   }
 });
@@ -661,6 +792,7 @@ function parseProfile(r: InstanceType<typeof Reader>) {
   out.seasons = r.str();
   out.streakNext = r.u16();
   out.playedToday = r.u8() === 1;
+  out.nemesis = { name: r.str(), k: r.u8(), d: r.u8() };
   assert.equal(r.remaining, 0, "profile fully consumed");
   return out;
 }
@@ -724,6 +856,7 @@ test("protocol 4 full entries carry league, might and finish, protocol 5 board r
       stats.u8();
       stats.f32();
       stats.f32();
+      stats.u16();
       assert.equal(stats.remaining, 0, `protocol ${proto}: stats fully consumed`);
       const profile = parseProfile(await p.next(S2C.PROFILE));
       assert.equal(profile.bankedTier, 0);

@@ -683,6 +683,11 @@ export function CoilApp() {
               <div className="rounded-full border border-line bg-bg/70 px-3 py-1 text-xs text-muted">
                 {modeLabel}
               </div>
+              {hud.nemesis?.inArena && (
+                <div className="rounded-full border border-[#ff6b8a]/60 bg-bg/80 px-3 py-1 text-xs text-[#ffb3c1]">
+                  ⚔ {hud.nemesis.name} is here · they lead {hud.nemesis.k}-{hud.nemesis.d}
+                </div>
+              )}
               {hud.beat && !hud.beat.done && (
                 <div className="rounded-full border border-[#f0c14a]/60 bg-bg/80 px-3 py-1 text-xs text-[#f0c14a]">
                   beat {hud.beat.by} · {hud.score}/{hud.beat.target}
@@ -1003,6 +1008,11 @@ export function CoilApp() {
             )}
             {hud?.profile && (
               <div className="mt-3 flex flex-wrap gap-1.5 text-[11px]">
+                {hud.nemesis?.inArena && (
+                  <Chip tone="fire">
+                    ⚔ {hud.nemesis.name} is in the arena now · leads {hud.nemesis.k}-{hud.nemesis.d}
+                  </Chip>
+                )}
                 <Chip>Lv{levelOf(hud.profile.eaten)}</Chip>
                 {titleOf(hud.profile) && <Chip tone="gold">{titleOf(hud.profile)}</Chip>}
                 <Chip>best {hud.profile.best}</Chip>
@@ -1458,6 +1468,12 @@ export function CoilApp() {
                     minutes of a twist
                   </p>
                 )}
+                {hud?.nemesis && (
+                  <p className="mt-1 text-xs text-[#ffb3c1]">
+                    ⚔ nemesis: {hud.nemesis.name} · they lead {hud.nemesis.k}-{hud.nemesis.d}
+                    {hud.nemesis.inArena ? " · in the arena now" : " · take them down for payback"}
+                  </p>
+                )}
                 {hud && (
                   <p className="mt-1 text-xs text-subtle">
                     the leviathan surfaces every hour at :30
@@ -1618,11 +1634,20 @@ export function CoilApp() {
             <div className="w-full max-w-sm rounded-xl border border-line bg-surface/92 p-6 text-center">
               <p className="text-xs tracking-[0.2em] text-muted uppercase">down</p>
               <h2 className="mt-2 text-3xl font-semibold tracking-tight">
-                {hud.newBest ? "new best" : hud.nearWin ? "so close" : "you popped"}
+                {hud.newBest
+                  ? "new best"
+                  : hud.nemesisKilledMe && hud.nemesis
+                    ? `${hud.nemesis.name} again`
+                    : hud.nearWin
+                      ? "so close"
+                      : "you popped"}
               </h2>
               <p className="mt-2 text-sm text-muted">
                 {hud.nearWin ? `${hud.nearWin} · ` : ""}
                 {hud.deathReason}
+                {hud.nemesisKilledMe && hud.nemesis
+                  ? ` · they lead ${hud.nemesis.k}-${hud.nemesis.d}`
+                  : ""}
               </p>
               {hud.banked > 0 && (
                 <p className="mt-1 text-xs text-[#bfe9ff]">
@@ -1757,7 +1782,9 @@ export function CoilApp() {
                   onClick={() => engineRef.current?.respawn(false, true)}
                   className="mt-5 h-12 w-full rounded-lg border border-[#ff6b8a] bg-[#ff6b8a]/15 font-medium text-[#ffb3c1] active:scale-[0.98]"
                 >
-                  Rematch · spawn next to {hud.rematch.name}
+                  {hud.nemesis && hud.rematch.nid === hud.nemesis.nid
+                    ? `Rematch · ${hud.rematch.name} leads ${hud.nemesis.k}-${hud.nemesis.d}`
+                    : `Rematch · spawn next to ${hud.rematch.name}`}
                 </button>
               )}
               {hud.comebackLeft > 0 && (

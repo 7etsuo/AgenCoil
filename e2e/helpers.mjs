@@ -84,7 +84,12 @@ export async function openPlayer(browser, name, opts = {}) {
   await page.waitForFunction(() => Boolean(window.__coil), null, { timeout: 30_000 });
   await page.fill("#nick", name);
   await page.getByRole("button", { name: "Play", exact: true }).click();
-  await page.waitForTimeout(1200);
+  // Wait for the life to start rather than a fixed pause: the first page
+  // after a code change compiles on demand, and a fixed wait raced it.
+  await page
+    .waitForFunction(() => window.__coil?.phase === "play", null, { timeout: 8000 })
+    .catch(() => undefined);
+  await page.waitForTimeout(300);
   return { page, ctx, errors, dbg: () => page.evaluate(() => window.__coil) };
 }
 

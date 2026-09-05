@@ -98,6 +98,41 @@ export interface Profile {
   pending: string[];
   /** Achievements awarded by a roll, to toast on the next connection (not persisted). */
   pendingAchv: string[];
+  /** Players this one has traded deaths with lately: who popped whom, how often, and when last. */
+  rivals: Rival[];
+}
+
+export interface Rival {
+  /** The other profile's key. */
+  key: string;
+  name: string;
+  /** Times they took this player down, and times this player took them down. */
+  k: number;
+  d: number;
+  /** Unix milliseconds of the last death between them. */
+  at: number;
+}
+
+/** Rivals are remembered this long, and this many at most. */
+export const RIVAL_DAYS = 14;
+export const RIVAL_MAX = 8;
+
+function parseRivals(v: unknown): Rival[] {
+  if (!Array.isArray(v)) return [];
+  const out: Rival[] = [];
+  for (const e of v) {
+    if (!e || typeof e !== "object") continue;
+    const r = e as Record<string, unknown>;
+    if (typeof r.key !== "string" || !r.key) continue;
+    out.push({
+      key: r.key,
+      name: typeof r.name === "string" ? r.name.slice(0, 32) : "",
+      k: Math.max(0, Math.floor(Number(r.k) || 0)),
+      d: Math.max(0, Math.floor(Number(r.d) || 0)),
+      at: Math.max(0, Number(r.at) || 0),
+    });
+  }
+  return out.slice(0, RIVAL_MAX);
 }
 
 /** What the public profile page shows. */
@@ -269,7 +304,8 @@ export class ProfileStore {
              ADD COLUMN IF NOT EXISTS season_tier INTEGER NOT NULL DEFAULT 0,
              ADD COLUMN IF NOT EXISTS seasons JSONB NOT NULL DEFAULT '[]',
              ADD COLUMN IF NOT EXISTS pending JSONB NOT NULL DEFAULT '[]',
-             ADD COLUMN IF NOT EXISTS handle_chosen BOOLEAN NOT NULL DEFAULT false`,
+             ADD COLUMN IF NOT EXISTS handle_chosen BOOLEAN NOT NULL DEFAULT false,
+             ADD COLUMN IF NOT EXISTS rivals JSONB NOT NULL DEFAULT '[]'`,
         );
         await this.pool!.query(
           `CREATE INDEX IF NOT EXISTS agencoil_profiles_handle ON agencoil_profiles (handle) WHERE handle <> ''`,
@@ -353,6 +389,7 @@ export class ProfileStore {
       seasons: [],
       pending: [],
       pendingAchv: [],
+      rivals: [],
     };
   }
 
@@ -424,12 +461,13 @@ export class ProfileStore {
             seasons: unknown;
             pending: unknown;
             handle_chosen: boolean;
+            rivals: unknown;
           }>(
             `SELECT name, best, kills, games, survive, unlocks, day, progress, skin, bands, best_x, best_y,
                   week, week_best, week_done, earned, flagged, streak, streak_last, freezes, eaten,
                   near_total, bounty_total, prev_tier, season, season_best, shards, chests, crew,
                   crown_until, sub, handle, avatar, achv, week_runs, week_lives, banked_tier,
-                  season_tier, seasons, pending, handle_chosen
+                  season_tier, seasons, pending, handle_chosen, rivals
            FROM agencoil_profiles WHERE key = $1`,
             [key],
           ),
@@ -486,6 +524,7 @@ export class ProfileStore {
             seasons: parseSeasons(r.seasons),
             pending: parseStrings(r.pending),
             pendingAchv: [],
+            rivals: parseRivals(r.rivals),
           };
         }
       } catch (err) {
@@ -693,6 +732,50 @@ export class ProfileStore {
     if (p.weekDone >= WEEKLY_GOAL && !p.earned.includes(p.week)) p.earned.push(p.week);
     this.markDirty(p.key);
     return { completed, milestones, freezeEarned, chest, banked };
+  }
+
+  /**
+   * Book a player-on-player death on this profile: `killedBy` when the
+   * other took this player down, `killed` when this player took them down.
+   * Old rivals fall away after RIVAL_DAYS; the most recent RIVAL_MAX stay.
+   */
+  recordRival(
+    p: Profile,
+    key: string,
+    name: string,
+    kind: "killedBy" | "killed",
+    now = Date.now(),
+  ): void {
+    let r = p.rivals.find((x) => x.key === key);
+    if (!r) {
+      r = { key, name, k: 0, d: 0, at: now };
+      p.rivals.push(r);
+    }
+    if (kind === "killedBy") r.k++;
+    else r.d++;
+    r.name = name.slice(0, 32);
+    r.at = now;
+    p.rivals = p.rivals
+      .filter((x) => now - x.at < RIVAL_DAYS * 86_400_000)
+      .sort((a, b) => b.at - a.at)
+      .slice(0, RIVAL_MAX);
+    this.markDirty(p.key);
+  }
+
+  /**
+   * The rival the game holds against this player: the one furthest ahead
+   * in the ledger, needing at least two kills and a lead. The freshest
+   * breaks a tie.
+   */
+  nemesisOf(p: Profile, now = Date.now()): Rival | null {
+    let best: Rival | null = null;
+    for (const r of p.rivals) {
+      if (now - r.at >= RIVAL_DAYS * 86_400_000) continue;
+      if (r.k < 2 || r.k - r.d < 1) continue;
+      if (!best || r.k - r.d > best.k - best.d || (r.k - r.d === best.k - best.d && r.at > best.at))
+        best = r;
+    }
+    return best;
   }
 
   /** The feat a newly banked tier earns, if it is new to this profile. */
@@ -1144,10 +1227,10 @@ export class ProfileStore {
              skin, bands, best_x, best_y, week, week_best, week_done, earned, flagged,
              streak, streak_last, freezes, eaten, near_total, bounty_total, prev_tier, season, season_best,
              shards, chests, crew, crown_until, sub, handle, avatar, achv,
-             week_runs, week_lives, banked_tier, season_tier, seasons, pending, handle_chosen, updated)
+             week_runs, week_lives, banked_tier, season_tier, seasons, pending, handle_chosen, rivals, updated)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
              $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35,
-             $36, $37, $38, $39, $40, $41, $42, now())
+             $36, $37, $38, $39, $40, $41, $42, $43, now())
            ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, best = GREATEST(agencoil_profiles.best, EXCLUDED.best),
              kills = GREATEST(agencoil_profiles.kills, EXCLUDED.kills),
              games = GREATEST(agencoil_profiles.games, EXCLUDED.games),
@@ -1165,7 +1248,7 @@ export class ProfileStore {
              week_runs = EXCLUDED.week_runs, week_lives = EXCLUDED.week_lives,
              banked_tier = EXCLUDED.banked_tier, season_tier = EXCLUDED.season_tier,
              seasons = EXCLUDED.seasons, pending = EXCLUDED.pending,
-             handle_chosen = EXCLUDED.handle_chosen, updated = now()`,
+             handle_chosen = EXCLUDED.handle_chosen, rivals = EXCLUDED.rivals, updated = now()`,
             [
               p.key,
               p.name,
@@ -1209,6 +1292,7 @@ export class ProfileStore {
               JSON.stringify(p.seasons),
               JSON.stringify(p.pending),
               p.handleChosen,
+              JSON.stringify(p.rivals),
             ],
           ),
         );

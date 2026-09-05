@@ -225,6 +225,8 @@ const HANDLE_COOLDOWN_MS = 1000;
  * moment itself from the league byte), and a roll card at 10 plus the tier.
  */
 const NOTICE_PROMOTED = 4;
+/** The killer just took down their nemesis: the client shows it in the kill slot. */
+const NOTICE_PAYBACK = 5;
 const NOTICE_ROLL = 10;
 /**
  * The view rectangle a client may ask for, in world units from its centre.
@@ -1301,6 +1303,7 @@ export class GameServer {
     // What today's first life does to the streak, and whether it is played:
     // the client cannot tell from the streak alone.
     const streak = nextStreak(p.streak, p.streakLast, p.freezes, todayUtc());
+    const nemesis = this.profiles.nemesisOf(p);
     client.ws.send(
       new Writer()
         .u8(S2C.PROFILE)
@@ -1342,6 +1345,9 @@ export class GameServer {
         .str(p.seasons.map(([season, tier]) => `${season}:${tier}`).join(","))
         .u16(Math.min(65535, streak.streak))
         .u8(streak.playedToday ? 1 : 0)
+        .str(nemesis?.name ?? "")
+        .u8(Math.min(255, nemesis?.k ?? 0))
+        .u8(Math.min(255, nemesis?.d ?? 0))
         .finish(),
     );
     const list = this.profiles.challenges(p);
@@ -1853,6 +1859,25 @@ export class GameServer {
       const killerClient = d.killerId ? this.ownerOf(d.killerId) : null;
       const owner = this.ownerOf(s.id);
       const life = owner?.life ?? null;
+      // A death between two players goes in both ledgers; taking down the
+      // one the game holds against you is payback.
+      const victimP = owner?.profile ?? null;
+      const killerP = killerClient?.profile ?? null;
+      if (d.killerId?.startsWith("p") && victimP && killerP && victimP.key !== killerP.key) {
+        const payback = this.profiles.nemesisOf(killerP)?.key === victimP.key;
+        this.profiles.recordRival(victimP, killerP.key, d.killerName ?? "", "killedBy");
+        this.profiles.recordRival(killerP, victimP.key, s.name, "killed");
+        if (payback && killerClient) {
+          const r = killerP.rivals.find((x) => x.key === victimP.key);
+          this.notice(
+            killerClient,
+            NOTICE_PAYBACK,
+            `payback · ${s.name} · ${r?.d ?? 1}-${r?.k ?? 0}`,
+          );
+          if (this.profiles.award(killerP, "payback")) this.achieve(killerClient, "payback");
+          this.events.log("feature", { key: killerClient.key, s: "payback" });
+        }
+      }
       for (const c of this.clients) {
         if (c.known.has(s.id) || c.sid === s.id || (d.killerId && c.sid === d.killerId))
           c.ws.send(msg);
@@ -2193,6 +2218,17 @@ export class GameServer {
     }
   }
 
+  /** The wire id of a profile's nemesis while their snake is alive here, else 0. */
+  private nemesisNid(p: Profile): number {
+    const nem = this.profiles.nemesisOf(p);
+    if (!nem) return 0;
+    for (const o of this.clients) {
+      if (!o.sid || o.profile?.key !== nem.key) continue;
+      if (this.world.snakes.some((s) => s.id === o.sid && s.alive)) return this.nidOf(o.sid);
+    }
+    return 0;
+  }
+
   /** The ranking and boards are computed once, then each client gets its own line. */
   private sendStatsAll(): void {
     if (!this.clients.size) return;
@@ -2249,6 +2285,8 @@ export class GameServer {
         w.u8(b ? Math.round((100 * (b.hp ?? 0)) / (b.hpMax ?? 1)) : 255)
           .f32(b?.x ?? 0)
           .f32(b?.y ?? 0);
+        // The nemesis's live snake, so the client can mark it and say they are here.
+        w.u16(c.profile ? this.nemesisNid(c.profile) : 0);
       }
       c.ws.send(w.finish());
     }

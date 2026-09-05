@@ -116,6 +116,28 @@ test("a chosen handle is kept across sign-ins and cannot be taken; a derived one
   assert.equal(renamed.handle, "new_name");
 });
 
+test("rivals: two kills make a nemesis, paybacks erase the lead, old rivals fall away, eight at most", async () => {
+  const store = new ProfileStore();
+  const p = await store.load("dev-victim", "victim");
+  const t = Date.UTC(2026, 8, 4);
+  store.recordRival(p, "dev-a", "a", "killedBy", t);
+  assert.equal(store.nemesisOf(p, t), null, "one kill is not a grudge");
+  store.recordRival(p, "dev-a", "a", "killedBy", t + 1000);
+  assert.equal(store.nemesisOf(p, t + 1000)?.key, "dev-a");
+  store.recordRival(p, "dev-a", "a", "killed", t + 2000);
+  assert.equal(store.nemesisOf(p, t + 2000)?.key, "dev-a", "2-1 is still a lead");
+  store.recordRival(p, "dev-a", "a", "killed", t + 2500);
+  assert.equal(store.nemesisOf(p, t + 2500), null, "2-2 is even: no grudge");
+  store.recordRival(p, "dev-b", "b", "killedBy", t + 3000);
+  store.recordRival(p, "dev-b", "b", "killedBy", t + 4000);
+  store.recordRival(p, "dev-b", "b", "killedBy", t + 5000);
+  assert.equal(store.nemesisOf(p, t + 5000)?.key, "dev-b");
+  assert.equal(store.nemesisOf(p, t + 15 * 86_400_000), null, "forgotten after two weeks");
+  for (let i = 0; i < 10; i++) store.recordRival(p, `dev-x${i}`, `x${i}`, "killed", t + 6000 + i);
+  assert.equal(p.rivals.length, 8, "the most recent eight stay");
+  assert.ok(!p.rivals.some((r) => r.key === "dev-a"), "the oldest went first");
+});
+
 test("two accounts wanting one handle get distinct handles", async () => {
   const store = new ProfileStore();
   const a = await store.link(null, id, "a");
