@@ -86,7 +86,6 @@ import {
   type Cutoffs,
   isoWeek,
   leagueOf,
-  levelOf,
   nextStreak,
   rewardText,
   modeNow,
@@ -94,6 +93,27 @@ import {
   todayUtc,
   type LifeStats,
 } from "../../src/game/challenges";
+import {
+  NOTICE_LEVEL,
+  NOTICE_XP,
+  SCALES_BOSS,
+  SCALES_CHEST,
+  SCALES_QUEST,
+  XP_ACHIEVEMENT,
+  XP_BOSS_HIT,
+  XP_BOSS_HITS_MAX,
+  XP_BOSS_KILL,
+  XP_BOSS_PART,
+  XP_CHEST,
+  XP_CONTRACT,
+  XP_DAILY,
+  XP_MARK,
+  XP_QUEST,
+  growthXp,
+  killXp,
+  levelOf,
+  lifeScales,
+} from "../../src/game/level";
 import { playGateFromEnv } from "./play-gate";
 import { chosenHandle, cleanHandle, identityGateFromEnv, type Identity } from "./identity";
 import { lifeFeats } from "../../src/game/achievements";
@@ -244,7 +264,16 @@ interface Life {
   /** Contracts filled and marks outlived this life. */
   contracts: number;
   marks: number;
+  /** Length at spawn and the peak since, for growth XP, and how much growth is booked. */
+  startMass: number;
+  peak: number;
+  xpGrowth: number;
+  /** The life's experience by source and the scales it paid, for the death card. */
+  xp: Record<XpPart, number>;
+  scales: number;
 }
+
+type XpPart = "growth" | "kills" | "contracts" | "boss" | "other" | "rested";
 
 interface Token {
   sid: string;
@@ -1329,7 +1358,19 @@ export class GameServer {
     snake.rookie = (client.profile?.best ?? 0) < 100 || client.rough >= 2;
     snake.trail = client.trail;
     snake.deathFx = client.deathFx;
-    snake.level = client.profile ? levelOf(client.profile.eaten) : 0;
+    if (client.profile) {
+      // Time away since the profile was last seen becomes rested XP, and
+      // levels reached but never paid (the migration, a missed moment) pay now.
+      this.profiles.touchRested(client.profile, now);
+      const owed = this.profiles.claimTrack(client.profile);
+      if (owed)
+        this.notice(
+          client,
+          0,
+          `level ${levelOf(client.profile.xp)} · +${owed} scales for the levels so far`,
+        );
+    }
+    snake.level = client.profile ? levelOf(client.profile.xp) : 0;
     snake.league = client.profile ? leagueOf(client.profile.weekBest, this.cutoffs) + 1 : 0;
     snake.might = client.profile ? Object.keys(client.profile.achv).length : 0;
     snake.finish = client.profile?.prevTier ?? 0;
@@ -1344,6 +1385,11 @@ export class GameServer {
       tier: leagueOf(client.profile?.weekBest ?? 0, this.cutoffs),
       contracts: 0,
       marks: 0,
+      startMass: snake.mass,
+      peak: snake.mass,
+      xpGrowth: 0,
+      xp: { growth: 0, kills: 0, contracts: 0, boss: 0, other: 0, rested: 0 },
+      scales: 0,
     };
     client.combo = { n: 0, last: 0 };
     client.bountied = false;
@@ -1645,6 +1691,9 @@ export class GameServer {
         .str(nemesis?.name ?? "")
         .u8(Math.min(255, nemesis?.k ?? 0))
         .u8(Math.min(255, nemesis?.d ?? 0))
+        .u32(p.xp)
+        .u32(p.rested)
+        .u32(p.scales)
         .finish(),
     );
     const list = this.profiles.challenges(p);
@@ -1763,11 +1812,13 @@ export class GameServer {
       const c = this.clientBySid(h.attacker);
       if (!c) continue;
       c.bossHits++;
+      if (c.bossHits <= XP_BOSS_HITS_MAX) this.grantXp(c, XP_BOSS_HIT, "boss");
       this.events.log("feature", {
         key: c.key,
         s: h.killed ? "boss_kill" : h.kind === "ram" ? "boss_ram" : "boss_hit",
       });
       if (!h.killed) continue;
+      this.grantXp(c, XP_BOSS_KILL, "boss");
       // The final cut wears the crown until the next boss; everyone who hit it gets a chest.
       if (c.profile) {
         this.profiles.setCrown(c.profile, Date.now() + 3600_000);
@@ -1781,6 +1832,9 @@ export class GameServer {
         if (o.bossHits > 0 && o.profile) {
           this.notice(o, 2, this.profiles.openChest(o.profile));
           this.events.log("feature", { key: o.key, s: "chest" });
+          this.grantXp(o, XP_CHEST, "other");
+          if (o !== c) this.grantXp(o, XP_BOSS_PART, "boss");
+          this.profiles.addScales(o.profile, SCALES_BOSS);
           void this.sendProfile(o);
         }
         o.bossHits = 0;
@@ -1803,8 +1857,9 @@ export class GameServer {
   }
 
   /** Tell a v2 client it just earned an achievement. */
-  private achieve(client: Client, id: string): void {
+  private achieve(client: Client, id: string, life: Life | null = client.life): void {
     this.events.log("achievement", { key: client.key, s: id });
+    this.grantXp(client, XP_ACHIEVEMENT, "other", life);
     if (!client.v2 || !client.alive) return;
     client.ws.send(new Writer().u8(S2C.ACHIEVE).str(id).finish());
   }
@@ -2183,6 +2238,7 @@ export class GameServer {
     if (outcome === "done") {
       c.huntStreak++;
       if (c.life) c.life.contracts++;
+      this.grantXp(c, XP_CONTRACT, "contracts");
       const me = c.sid ? this.liveSnake(c.sid) : null;
       if (me) me.mass += h.reward;
       const streak = c.huntStreak > 1 ? ` · streak ${c.huntStreak}` : "";
@@ -2209,6 +2265,7 @@ export class GameServer {
     if (!me) return;
     me.mass += m.reward;
     if (c.life) c.life.marks++;
+    this.grantXp(c, XP_MARK, "contracts");
     this.notice(c, NOTICE_MARK_SURVIVED, `you shook off ${m.hunterName} · +${m.reward}`);
     this.events.log("feature", { key: c.key, s: "mark_survived", n: m.reward });
   }
@@ -2255,6 +2312,50 @@ export class GameServer {
       if (!s) continue;
       if (s.boosting) c.life.boosted = true;
       if (!c.life.boosted && s.mass > c.life.noboostLength) c.life.noboostLength = s.mass;
+      // Growth XP follows the peak, so shedding costs nothing and the
+      // increments sum to the closed form whatever path the length took.
+      if (s.mass > c.life.peak) c.life.peak = s.mass;
+      const due = growthXp(c.life.peak - c.life.startMass);
+      if (due > c.life.xpGrowth) {
+        this.grantXp(c, due - c.life.xpGrowth, "growth");
+        c.life.xpGrowth = due;
+      }
+    }
+  }
+
+  /**
+   * Book experience on a player's profile: the rested pool doubles it, the
+   * cap stops it, and a level crossed pays its track and is announced. The
+   * life keeps its breakdown for the death card; it is passed explicitly
+   * where the life record has already been detached from the client.
+   */
+  private grantXp(
+    c: Client,
+    n: number,
+    part: Exclude<XpPart, "rested">,
+    life: Life | null = c.life,
+  ): void {
+    const p = c.profile;
+    if (!p || !(n > 0)) return;
+    const r = this.profiles.addXp(p, n);
+    if (life) {
+      life.xp[part] += r.gained - r.bonus;
+      life.xp.rested += r.bonus;
+    }
+    if (r.to > r.from) this.onLevelUp(c, r.to);
+  }
+
+  /** A level reached: its track pays in scales, the player is told, and the snake's level byte changes for everyone. */
+  private onLevelUp(c: Client, level: number): void {
+    const p = c.profile;
+    if (!p) return;
+    const paid = this.profiles.claimTrack(p);
+    this.notice(c, NOTICE_LEVEL, `level ${level} · +${paid} scales`);
+    this.events.log("feature", { key: c.key, s: "level", n: level });
+    const s = c.sid ? this.bySid.get(c.sid) : undefined;
+    if (s) {
+      s.level = level;
+      for (const o of this.clients) o.refresh.add(s.id);
     }
   }
 
@@ -2366,6 +2467,8 @@ export class GameServer {
           this.events.log("feature", { key: killerClient.key, s: "payback" });
         }
       }
+      // A kill pays by the victim's length, capped, whoever the victim was.
+      if (d.reason === "snake" && killerClient) this.grantXp(killerClient, killXp(s.mass), "kills");
       // Contracts on the dead snake: the hunter who did it inside the clock
       // is paid; any other hunt on it is void.
       const now = Date.now();
@@ -2489,12 +2592,8 @@ export class GameServer {
       marks: life.marks,
     };
     const bestBefore = c.profile.best;
-    const { completed, milestones, freezeEarned, chest, banked } = this.profiles.recordLife(
-      c.profile,
-      stats,
-      { x: s.x, y: s.y },
-      this.cutoffs,
-    );
+    const { completed, milestones, freezeEarned, chest, banked, firstToday } =
+      this.profiles.recordLife(c.profile, stats, { x: s.x, y: s.y }, this.cutoffs);
     if (stats.length > bestBefore)
       this.events.log("feature", { key: c.key, s: "best", n: stats.length });
     if (banked) {
@@ -2504,17 +2603,40 @@ export class GameServer {
       if (feat) this.achieve(c, feat);
       this.events.log("banked", { key: c.key, s: name, n: stats.length });
     }
-    for (const ch of completed) this.notice(c, 2, `quest step done: ${ch.text}`);
+    for (const ch of completed) {
+      this.notice(c, 2, `quest step done: ${ch.text}`);
+      this.grantXp(c, XP_QUEST, "other", life);
+    }
     if (chest) {
       this.notice(c, 2, this.profiles.openChest(c.profile));
       this.events.log("feature", { key: c.key, s: "chest" });
+      this.grantXp(c, XP_CHEST, "other", life);
     }
+    if (firstToday) this.grantXp(c, XP_DAILY, "other", life);
+    const scales = lifeScales(stats) + completed.length * SCALES_QUEST + (chest ? SCALES_CHEST : 0);
+    this.profiles.addScales(c.profile, scales);
+    life.scales += scales;
     for (const m of milestones) this.notice(c, 2, `streak milestone: ${m} unlocked`);
     if (freezeEarned)
       this.notice(c, 0, "streak freeze banked: one missed day will not break your streak");
     const earned = this.profiles.awardTotals(c.profile);
     for (const id of lifeFeats(stats)) if (this.profiles.award(c.profile, id)) earned.push(id);
-    for (const id of earned) this.achieve(c, id);
+    for (const id of earned) this.achieve(c, id, life);
+    // The life's experience, summed for the death card: every part it came
+    // from, the rested bonus, and the scales it paid.
+    const x = life.xp;
+    const total = x.growth + x.kills + x.contracts + x.boss + x.other + x.rested;
+    if (total > 0 || life.scales > 0) {
+      const parts: string[] = [];
+      if (x.growth) parts.push(`growth ${x.growth}`);
+      if (x.kills) parts.push(`kills ${x.kills}`);
+      if (x.contracts) parts.push(`contracts ${x.contracts}`);
+      if (x.boss) parts.push(`boss ${x.boss}`);
+      if (x.other) parts.push(`bonus ${x.other}`);
+      if (x.rested) parts.push(`rested +${x.rested}`);
+      parts.push(`${life.scales} scales`);
+      this.notice(c, NOTICE_XP, `+${total} XP · ${parts.join(" · ")}`);
+    }
     void this.sendProfile(c);
   }
 
@@ -2857,6 +2979,8 @@ export class GameServer {
           .str(m?.hunterName ?? "");
         // The season's league ladder, so every client draws the same tiers.
         for (let i = 0; i < LEAGUES.length; i++) w.u32(Math.min(0xffffffff, this.cutoffs[i] ?? 0));
+        // Experience and the rested pool, for the bar along the bottom.
+        w.u32(c.profile?.xp ?? 0).u32(c.profile?.rested ?? 0);
       }
       c.ws.send(w.finish());
     }

@@ -15,6 +15,7 @@ import {
 } from "../../src/game/achievements.ts";
 import type { ProfileStore as ProfileStoreT } from "./profiles.ts";
 import { LEAGUE_BANK_RUNS, LEAGUES, titleOf } from "../../src/game/challenges.ts";
+import { levelOf, seedXp } from "../../src/game/level.ts";
 
 // profiles.ts uses extensionless imports, which the type stripper cannot
 // resolve, so bundle it the way the server build does.
@@ -354,4 +355,51 @@ test("banking follows the season's ladder: three lives over a tier's cutoff bank
     r = store.recordLife(p, lifeOf(450), undefined, ladder);
   assert.equal(r.banked, 5, "450 is Diamond on a ladder that puts Diamond at 400");
   assert.equal(p.bankedTier, 5);
+});
+test("the character level is seeded once from lifetime totals, persists, and only ever climbs", async () => {
+  const { PGlite } = (await import("../../node_modules/@electric-sql/pglite/dist/index.js")) as {
+    PGlite: new () => {
+      query(sql: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
+      close(): Promise<void>;
+    };
+  };
+  const db = new PGlite();
+  const pool = db as unknown as pg.Pool;
+  try {
+    // A store from before levels: the schema exists and holds the owner's totals.
+    const before = new ProfileStore(pool);
+    await before.load("dev-schema", "schema");
+    await db.query(
+      `INSERT INTO agencoil_profiles (key, name, best, kills, games, survive, eaten, chests, achv)
+       VALUES ('dev-owner', 'tetsuo', 121208, 1543, 908, 788, 10858260, 2,
+               '{"a":1,"b":1,"c":1,"d":1,"e":1,"f":1,"g":1,"h":1,"i":1,"j":1}'),
+              ('dev-new', 'newcomer', 0, 0, 0, 0, 0, 0, '{}')`,
+    );
+    const store = new ProfileStore(pool);
+    const owner = await store.load("dev-owner", "tetsuo");
+    const want = seedXp({ games: 908, eaten: 10858260, kills: 1543, achievements: 10, chests: 2 });
+    assert.ok(
+      Math.abs(owner.xp - want) <= 1,
+      `seeded by the same formula (${owner.xp} vs ${want})`,
+    );
+    assert.equal(levelOf(owner.xp), 43);
+    assert.equal(owner.trackClaimed, 0, "nothing paid yet: the first spawn pays the levels so far");
+    const newcomer = await store.load("dev-new", "newcomer");
+    assert.equal(newcomer.xp, 0, "no games, nothing to seed");
+    // Booked XP survives a flush and a fresh load, and a later boot does not seed again.
+    store.addXp(owner, 1000);
+    await (store as unknown as { flush(): Promise<void> }).flush();
+    const later = new ProfileStore(pool);
+    const again = await later.load("dev-owner", "tetsuo");
+    assert.equal(again.xp, owner.xp);
+    assert.equal(again.rested, owner.rested);
+    assert.equal(again.scales, owner.scales);
+    // A stale flush from another instance can never lower it.
+    again.xp -= 500;
+    await (later as unknown as { flush(): Promise<void> }).flush();
+    const third = await new ProfileStore(pool).load("dev-owner", "tetsuo");
+    assert.equal(third.xp, owner.xp);
+  } finally {
+    await db.close();
+  }
 });

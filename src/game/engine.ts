@@ -38,6 +38,7 @@ import {
   todayUtc,
 } from "./challenges";
 import { recordTarget } from "./record";
+import { NOTICE_LEVEL, NOTICE_XP, xpInto } from "./level";
 import {
   NetSession,
   defaultServerUrl,
@@ -151,6 +152,12 @@ export interface HudState {
   party: { name: string; mass: number }[];
   arenaMode: { id: number; secsLeft: number; secsToNext: number };
   killNotice: string | null;
+  /** Your character level: total XP, the level, XP into it, its cost, and the rested pool; null without a profile. */
+  xp: { xp: number; level: number; into: number; next: number; rested: number } | null;
+  /** The life that just ended: XP earned with its breakdown, and the scales it paid. */
+  xpGain: { total: number; parts: string[]; scales: number } | null;
+  /** A level just reached, for the card: the level and what it paid. */
+  levelUp: { level: number; text: string } | null;
   /** Recent notable deaths, newest last. */
   feed: string[];
   /** Your rank when you died, and how many were in the arena. */
@@ -244,6 +251,10 @@ export class CoilEngine {
   private deathCam: Vec = { x: 0, y: 0 };
   private deathMass = START_MASS;
   private killTimer = 0;
+  /** Experience as last reported (stats twice a second, the profile after each life). */
+  private xpKnown = { xp: 0, rested: 0 };
+  private xpGain: HudState["xpGain"] = null;
+  private levelUp: { level: number; text: string; at: number } | null = null;
   private lastBoostSound = 0;
   private hudListeners = new Set<(h: HudState) => void>();
   private hudAcc = 0;
@@ -363,6 +374,7 @@ export class CoilEngine {
         onStats: (s) => {
           this.stats = s;
           this.statsAt = performance.now();
+          if (s.xp >= this.xpKnown.xp) this.xpKnown = { xp: s.xp, rested: s.rested };
           const b = this.world.snakes.find((x) => x.boss);
           if (b && s.boss) {
             b.hp = s.boss.hp;
@@ -404,6 +416,7 @@ export class CoilEngine {
         },
         onProfile: (p) => {
           this.profile = p;
+          if (p.xp >= this.xpKnown.xp) this.xpKnown = { xp: p.xp, rested: p.rested };
           this.emitHud();
         },
         onChallenges: (c) => {
@@ -471,6 +484,38 @@ export class CoilEngine {
           if (kind === 8) {
             this.pushFeed(text);
             this.audio.near(0);
+            return;
+          }
+          // A level reached: a gold burst at the head, the sound of a
+          // promotion, the kill slot, and a card saying what it paid.
+          if (kind === NOTICE_LEVEL) {
+            const m = /^level (\d+)/.exec(text);
+            const level = m ? Number(m[1]) : 0;
+            const now = performance.now();
+            this.levelUp = { level, text, at: now };
+            this.killNotice = `level ${level}`;
+            this.killTimer = 2.6;
+            const me = this.world.player;
+            if (me && this.qualityScale >= 1) this.burst(me.x, me.y, "#f0c14a", 28, 160);
+            this.hitStopUntil = now + 250;
+            this.audio.rankUp();
+            this.pushFeed(text);
+            this.emitHud();
+            return;
+          }
+          // The life's experience line, for the death card.
+          if (kind === NOTICE_XP) {
+            const m = /^\+(\d+) XP(?: · (.*))?$/.exec(text);
+            if (m) {
+              const parts = m[2] ? m[2].split(" · ") : [];
+              const scales = parts.find((s) => /^\d+ scales$/.test(s));
+              this.xpGain = {
+                total: Number(m[1]),
+                parts: parts.filter((s) => s !== scales),
+                scales: scales ? Number(scales.split(" ")[0]) : 0,
+              };
+            }
+            this.emitHud();
             return;
           }
           // A roll card, kind 10 plus the tier it is about: shown until dismissed.
@@ -668,6 +713,8 @@ export class CoilEngine {
     this.kills = 0;
     this.streak = 0;
     this.killNotice = null;
+    this.xpGain = null;
+    this.levelUp = null;
     this.deathReason = null;
     this.killerName = null;
     this.killerId = null;
@@ -943,6 +990,14 @@ export class CoilEngine {
       party: this.stats?.party ?? [],
       arenaMode: this.stats?.mode ?? { id: 0, secsLeft: 0, secsToNext: 0 },
       killNotice: this.killNotice,
+      xp: this.profile
+        ? { ...xpInto(this.xpKnown.xp), xp: this.xpKnown.xp, rested: this.xpKnown.rested }
+        : null,
+      xpGain: this.xpGain,
+      levelUp:
+        this.levelUp && now - this.levelUp.at < 4000
+          ? { level: this.levelUp.level, text: this.levelUp.text }
+          : null,
       feed: this.feed.map((f) => f.text),
       deathRank: this.deathRank,
       deathCount: this.deathCount,

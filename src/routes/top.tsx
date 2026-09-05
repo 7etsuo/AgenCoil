@@ -14,6 +14,8 @@ interface Row {
   best: number;
   kills: number;
   games: number;
+  /** The character level; absent from an older server or a crew row. */
+  level?: number;
   skin: number;
   bands: string[];
 }
@@ -131,6 +133,9 @@ function TopPage() {
                     </span>
                   )}
                   {r.kills >= 50 && <span className="ml-2 text-xs text-[#f0c14a]">Hunter</span>}
+                  {kind !== "crew" && r.level ? (
+                    <span className="ml-2 text-[10px] text-subtle">Lv{r.level}</span>
+                  ) : null}
                 </span>
                 <span className="hidden text-xs text-subtle sm:inline">
                   {kind === "crew"

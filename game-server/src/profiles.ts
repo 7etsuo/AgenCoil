@@ -29,6 +29,15 @@ import {
   type LifeStats,
 } from "../../src/game/challenges";
 import {
+  LEVEL_CAP,
+  SEED_XP_SQL,
+  XP_MAX,
+  levelOf,
+  restedFor,
+  scalesForLevel,
+  xpToNext,
+} from "../../src/game/level";
+import {
   LEAGUE_FEATS,
   seasonFeats,
   totalsUnlocked,
@@ -103,6 +112,16 @@ export interface Profile {
   pendingAchv: string[];
   /** Players this one has traded deaths with lately: who popped whom, how often, and when last. */
   rivals: Rival[];
+  /**
+   * The character level: lifetime experience (never lowered), the rested
+   * pool, when the profile was last seen (unix ms), scales, and the last
+   * level whose track reward was paid.
+   */
+  xp: number;
+  rested: number;
+  seen: number;
+  scales: number;
+  trackClaimed: number;
 }
 
 export interface Rival {
@@ -166,6 +185,10 @@ export interface PublicProfile {
   crew: string;
   crowned: boolean;
   achv: Record<string, number>;
+  /** The character level, its experience and the scales held. */
+  xp: number;
+  level: number;
+  scales: number;
 }
 
 function parseRuns(v: unknown): number[] {
@@ -202,6 +225,8 @@ export interface TopEntry {
   best: number;
   kills: number;
   games: number;
+  /** The character level (0 for a crew row). */
+  level: number;
   skin: number;
   bands: string[];
   /** Linked account handle for a profile link, "" otherwise. */
@@ -312,7 +337,19 @@ export class ProfileStore {
              ADD COLUMN IF NOT EXISTS seasons JSONB NOT NULL DEFAULT '[]',
              ADD COLUMN IF NOT EXISTS pending JSONB NOT NULL DEFAULT '[]',
              ADD COLUMN IF NOT EXISTS handle_chosen BOOLEAN NOT NULL DEFAULT false,
-             ADD COLUMN IF NOT EXISTS rivals JSONB NOT NULL DEFAULT '[]'`,
+             ADD COLUMN IF NOT EXISTS rivals JSONB NOT NULL DEFAULT '[]',
+             ADD COLUMN IF NOT EXISTS xp BIGINT NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS rested INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS seen BIGINT NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS scales INTEGER NOT NULL DEFAULT 0,
+             ADD COLUMN IF NOT EXISTS track_claimed INTEGER NOT NULL DEFAULT 0`,
+        );
+        // Profiles from before levels are seeded once from their lifetime
+        // totals through the same shape as the live formula, so nobody who
+        // has played starts at 1; a seeded row is never touched again.
+        await this.pool!.query(
+          `UPDATE agencoil_profiles SET xp = ${SEED_XP_SQL} WHERE xp = 0 AND games > 0`,
+          [XP_MAX],
         );
         await this.pool!.query(
           `CREATE INDEX IF NOT EXISTS agencoil_profiles_handle ON agencoil_profiles (handle) WHERE handle <> ''`,
@@ -397,6 +434,12 @@ export class ProfileStore {
       pending: [],
       pendingAchv: [],
       rivals: [],
+      xp: 0,
+      rested: 0,
+      seen: 0,
+      scales: 0,
+      // Level 1 is where a profile starts, not a level it reached.
+      trackClaimed: 1,
     };
   }
 
@@ -469,12 +512,18 @@ export class ProfileStore {
             pending: unknown;
             handle_chosen: boolean;
             rivals: unknown;
+            xp: string | number;
+            rested: number;
+            seen: string | number;
+            scales: number;
+            track_claimed: number;
           }>(
             `SELECT name, best, kills, games, survive, unlocks, day, progress, skin, bands, best_x, best_y,
                   week, week_best, week_done, earned, flagged, streak, streak_last, freezes, eaten,
                   near_total, bounty_total, prev_tier, season, season_best, shards, chests, crew,
                   crown_until, sub, handle, avatar, achv, week_runs, week_lives, banked_tier,
-                  season_tier, seasons, pending, handle_chosen, rivals
+                  season_tier, seasons, pending, handle_chosen, rivals, xp, rested, seen, scales,
+                  track_claimed
            FROM agencoil_profiles WHERE key = $1`,
             [key],
           ),
@@ -532,6 +581,11 @@ export class ProfileStore {
             pending: parseStrings(r.pending),
             pendingAchv: [],
             rivals: parseRivals(r.rivals),
+            xp: Math.min(XP_MAX, Math.max(0, Number(r.xp) || 0)),
+            rested: Math.max(0, Number(r.rested) || 0),
+            seen: Math.max(0, Number(r.seen) || 0),
+            scales: Math.max(0, Number(r.scales) || 0),
+            trackClaimed: Math.max(0, Number(r.track_claimed) || 0),
           };
         }
       } catch (err) {
@@ -687,8 +741,11 @@ export class ProfileStore {
     chest: boolean;
     /** A tier newly banked by this life (1 Bronze to 5 Diamond), else 0. */
     banked: number;
+    /** The first life of this UTC day. */
+    firstToday: boolean;
   } {
     this.rollDay(p);
+    const firstToday = !nextStreak(p.streak, p.streakLast, p.freezes, p.day).playedToday;
     const milestones = this.touchStreak(p);
     p.games++;
     p.kills += life.kills;
@@ -739,7 +796,7 @@ export class ProfileStore {
     }
     if (p.weekDone >= WEEKLY_GOAL && !p.earned.includes(p.week)) p.earned.push(p.week);
     this.markDirty(p.key);
-    return { completed, milestones, freezeEarned, chest, banked };
+    return { completed, milestones, freezeEarned, chest, banked, firstToday };
   }
 
   /**
@@ -848,6 +905,67 @@ export class ProfileStore {
     this.markDirty(p.key);
   }
 
+  /**
+   * Book experience. The rested pool doubles what comes in until it is
+   * spent, and nothing is booked past the cap. Returns what was booked, how
+   * much of that the pool paid, and the level before and after.
+   */
+  addXp(
+    p: Profile,
+    n: number,
+    now = Date.now(),
+  ): { gained: number; bonus: number; from: number; to: number } {
+    const from = levelOf(p.xp);
+    const room = Math.max(0, XP_MAX - p.xp);
+    const base = Math.max(0, Math.floor(n));
+    const bonus = Math.min(base, p.rested);
+    const gained = Math.min(room, base + bonus);
+    const spent = Math.min(bonus, gained);
+    p.rested -= spent;
+    p.xp += gained;
+    p.seen = now;
+    if (gained > 0 || spent > 0) this.markDirty(p.key);
+    return { gained, bonus: spent, from, to: levelOf(p.xp) };
+  }
+
+  /**
+   * Time away since the profile was last seen becomes rested XP, a share of
+   * the current level per hour up to one whole level; an unknown time away
+   * (a profile never seen) earns nothing. Returns the pool.
+   */
+  touchRested(p: Profile, now = Date.now()): number {
+    const level = levelOf(p.xp);
+    if (p.seen > 0 && level < LEVEL_CAP) {
+      const add = Math.min(
+        Math.max(0, xpToNext(level) - p.rested),
+        restedFor(level, (now - p.seen) / 3600_000),
+      );
+      if (add > 0) p.rested += add;
+    }
+    p.seen = now;
+    this.markDirty(p.key);
+    return p.rested;
+  }
+
+  addScales(p: Profile, n: number): void {
+    if (!(n > 0)) return;
+    p.scales += Math.floor(n);
+    this.markDirty(p.key);
+  }
+
+  /** Pay the level track for every level reached but not yet paid; returns the scales paid. */
+  claimTrack(p: Profile): number {
+    const level = levelOf(p.xp);
+    let paid = 0;
+    for (let l = p.trackClaimed + 1; l <= level; l++) paid += scalesForLevel(l);
+    if (paid > 0) {
+      p.trackClaimed = level;
+      p.scales += paid;
+      this.markDirty(p.key);
+    }
+    return paid;
+  }
+
   /** Crew board: members' week bests summed, this ISO week, flagged accounts excluded. */
   async topCrews(n: number): Promise<TopEntry[]> {
     const week = isoWeek();
@@ -866,6 +984,7 @@ export class ProfileStore {
           best: Number(r.best) || 0,
           kills: 0,
           games: Number(r.members) || 0,
+          level: 0,
           skin: 0,
           bands: [],
           handle: "",
@@ -889,6 +1008,7 @@ export class ProfileStore {
         best: e.best,
         kills: 0,
         games: e.members,
+        level: 0,
         skin: 0,
         bands: [],
         handle: "",
@@ -920,12 +1040,13 @@ export class ProfileStore {
             score: number;
             kills: number;
             games: number;
+            xp: string | number;
             skin: number;
             bands: unknown;
             handle: string;
             avatar: string;
           }>(
-            `SELECT name, ${col} AS score, kills, games, skin, bands, handle, avatar FROM agencoil_profiles
+            `SELECT name, ${col} AS score, kills, games, xp, skin, bands, handle, avatar FROM agencoil_profiles
            WHERE flagged = false ${where} ORDER BY ${col} DESC, updated DESC LIMIT $1`,
             params,
           ),
@@ -935,6 +1056,7 @@ export class ProfileStore {
           best: Number(r.score),
           kills: Number(r.kills),
           games: Number(r.games),
+          level: levelOf(Number(r.xp) || 0),
           skin: Number(r.skin) || 0,
           bands: Array.isArray(r.bands) ? (r.bands as string[]) : [],
           handle: r.handle || "",
@@ -960,6 +1082,7 @@ export class ProfileStore {
               : p.best,
         kills: p.kills,
         games: p.games,
+        level: levelOf(p.xp),
         skin: p.skin,
         bands: p.bands,
         handle: p.handle,
@@ -1149,6 +1272,9 @@ export class ProfileStore {
       crew: p.crew,
       crowned: p.crownUntil > Date.now(),
       achv: p.achv,
+      xp: p.xp,
+      level: levelOf(p.xp),
+      scales: p.scales,
     };
   }
 
@@ -1299,10 +1425,11 @@ export class ProfileStore {
              skin, bands, best_x, best_y, week, week_best, week_done, earned, flagged,
              streak, streak_last, freezes, eaten, near_total, bounty_total, prev_tier, season, season_best,
              shards, chests, crew, crown_until, sub, handle, avatar, achv,
-             week_runs, week_lives, banked_tier, season_tier, seasons, pending, handle_chosen, rivals, updated)
+             week_runs, week_lives, banked_tier, season_tier, seasons, pending, handle_chosen, rivals,
+             xp, rested, seen, scales, track_claimed, updated)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
              $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35,
-             $36, $37, $38, $39, $40, $41, $42, $43, now())
+             $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, now())
            ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, best = GREATEST(agencoil_profiles.best, EXCLUDED.best),
              kills = GREATEST(agencoil_profiles.kills, EXCLUDED.kills),
              games = GREATEST(agencoil_profiles.games, EXCLUDED.games),
@@ -1320,7 +1447,11 @@ export class ProfileStore {
              week_runs = EXCLUDED.week_runs, week_lives = EXCLUDED.week_lives,
              banked_tier = EXCLUDED.banked_tier, season_tier = EXCLUDED.season_tier,
              seasons = EXCLUDED.seasons, pending = EXCLUDED.pending,
-             handle_chosen = EXCLUDED.handle_chosen, rivals = EXCLUDED.rivals, updated = now()`,
+             handle_chosen = EXCLUDED.handle_chosen, rivals = EXCLUDED.rivals,
+             xp = GREATEST(agencoil_profiles.xp, EXCLUDED.xp), rested = EXCLUDED.rested,
+             seen = GREATEST(agencoil_profiles.seen, EXCLUDED.seen), scales = EXCLUDED.scales,
+             track_claimed = GREATEST(agencoil_profiles.track_claimed, EXCLUDED.track_claimed),
+             updated = now()`,
             [
               p.key,
               p.name,
@@ -1365,6 +1496,11 @@ export class ProfileStore {
               JSON.stringify(p.pending),
               p.handleChosen,
               JSON.stringify(p.rivals),
+              p.xp,
+              p.rested,
+              p.seen,
+              p.scales,
+              p.trackClaimed,
             ],
           ),
         );

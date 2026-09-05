@@ -8,6 +8,7 @@ import { buildSync } from "esbuild";
 import WebSocket from "ws";
 import type { GameServer as GameServerT } from "./game-server.ts";
 import type * as ProtocolT from "../../src/game/protocol.ts";
+import { growthXp, killXp, levelOf } from "../../src/game/level.ts";
 
 // The server and the shared protocol use extensionless imports, which the
 // type stripper cannot resolve, so both are bundled the way the build does.
@@ -451,6 +452,8 @@ function parseStats2(r: InstanceType<typeof Reader>): {
   markReward: number;
   markName: string;
   cutoffs: number[];
+  xp: number;
+  rested: number;
 } {
   r.f32();
   r.u16();
@@ -498,9 +501,13 @@ function parseStats2(r: InstanceType<typeof Reader>): {
   const markReward = r.u16();
   const markName = r.str();
   const cutoffs = [r.u32(), r.u32(), r.u32(), r.u32(), r.u32()];
+  const xp = r.u32();
+  const rested = r.u32();
   assert.equal(r.remaining, 0, "stats fully consumed");
   return {
     cutoffs,
+    xp,
+    rested,
     nemesisNid,
     huntNid,
     huntSecs,
@@ -1232,6 +1239,9 @@ function parseProfile(r: InstanceType<typeof Reader>) {
   out.streakNext = r.u16();
   out.playedToday = r.u8() === 1;
   out.nemesis = { name: r.str(), k: r.u8(), d: r.u8() };
+  out.xp = r.u32();
+  out.rested = r.u32();
+  out.scales = r.u32();
   assert.equal(r.remaining, 0, "profile fully consumed");
   return out;
 }
@@ -1309,6 +1319,9 @@ test("protocol 4 full entries carry league, might and finish, protocol 5 board r
       stats.u16();
       stats.str();
       for (let i = 0; i < 5; i++) stats.u32();
+      // Experience and the rested pool, for the bar.
+      stats.u32();
+      stats.u32();
       assert.equal(stats.remaining, 0, `protocol ${proto}: stats fully consumed`);
       const profile = parseProfile(await p.next(S2C.PROFILE));
       assert.equal(profile.bankedTier, 0);
@@ -1386,6 +1399,104 @@ test("crossing a league length mid-life is announced and changes the ring for ev
     assert.equal(line.text, "climber reached Gold");
     await p.close();
     await watcher.close();
+  } finally {
+    await arena.stop();
+  }
+});
+test("experience: growth is booked as the snake grows, a kill pays, levels pay scales, and the life's line sums it", async () => {
+  const arena = await startArena();
+  try {
+    const url5 = arena.url.replace(/v=2$/, "v=5");
+    const a = await joinArena(url5, "dev-xp-a", "grower");
+    const b = await joinArena(url5, "dev-xp-b", "victim");
+    const game = arena.game as unknown as {
+      stopLoop(): void;
+      step(dt: number): void;
+      sendStatsAll(): void;
+      clientBySid(sid: string): {
+        profile: { xp: number; scales: number; trackClaimed: number } | null;
+        life: { startMass: number } | null;
+      };
+    };
+    game.stopLoop();
+    await sleep(60);
+    const world = arena.game.world;
+    world.clearBots();
+    world.desiredBots = 0;
+    const sa = world.snakes.find((s) => s.name === "grower")!;
+    const sb = world.snakes.find((s) => s.name === "victim")!;
+    const ca = game.clientBySid(sa.id);
+    const start = ca.life!.startMass;
+    assert.equal(ca.profile!.xp, 0);
+    const noticeOf = async (p: Player, kind: number): Promise<string> => {
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline) {
+        const r = await p.next(S2C.NOTICE, 1000);
+        const k = r.u8();
+        const text = r.str();
+        if (k === kind) return text;
+      }
+      throw new Error(`no notice of kind ${kind}`);
+    };
+    a.drain(S2C.NOTICE);
+    // Growth follows the peak: booked as it happens, unmoved by shedding,
+    // and equal to the closed form whatever path the length took.
+    sa.mass = start + 990;
+    game.step(1 / 40);
+    assert.equal(ca.profile!.xp, growthXp(990), "growth booked at once");
+    assert.match(await noticeOf(a, 18), /^level 2 · \+27 scales$/, "level 2 announced and paid");
+    sa.mass = start + 500;
+    game.step(1 / 40);
+    assert.equal(ca.profile!.xp, growthXp(990), "shedding costs nothing");
+    sa.mass = start + 2000;
+    game.step(1 / 40);
+    assert.equal(ca.profile!.xp, growthXp(2000));
+    a.drain(S2C.STATS2);
+    game.sendStatsAll();
+    const st = parseStats2(await a.next(S2C.STATS2));
+    assert.equal(st.xp, growthXp(2000), "the stats tail carries xp for the bar");
+    assert.equal(st.rested, 0);
+    // A kill pays by the victim's length.
+    sb.mass = 400;
+    (world as unknown as { kill(s: typeof sb, r: "snake", k: string, n: string): void }).kill(
+      sb,
+      "snake",
+      sa.id,
+      sa.name,
+    );
+    game.step(1 / 40);
+    assert.equal(ca.profile!.xp, growthXp(2000) + killXp(400));
+    assert.match(await noticeOf(a, 18), /^level 3 · \+28 scales$/);
+    assert.equal(ca.profile!.scales, 27 + 28);
+    assert.equal(ca.profile!.trackClaimed, 3);
+    // The life ends: the daily bonus lands, the line sums every part, and
+    // the profile's tail carries the totals.
+    const profile = ca.profile!;
+    a.drain(S2C.NOTICE);
+    a.drain(S2C.PROFILE);
+    (world as unknown as { kill(s: typeof sa, r: "wall", k: null, n: null): void }).kill(
+      sa,
+      "wall",
+      null,
+      null,
+    );
+    game.step(1 / 40);
+    const line = await noticeOf(a, 17);
+    const m = /^\+(\d+) XP · growth 478 · kills 65 · bonus (\d+) · (\d+) scales$/.exec(line);
+    assert.ok(m, `the life's line (${line})`);
+    assert.equal(Number(m![1]), 478 + 65 + Number(m![2]), "the parts sum to the total");
+    assert.ok(Number(m![2]) >= 100, "the first life of the day pays its bonus");
+    assert.equal(Number(m![3]), 40 + 10, "a 2010 life with a kill pays 50 scales");
+    const tail = parseProfile(await a.next(S2C.PROFILE));
+    assert.equal(tail.xp, profile.xp);
+    assert.equal(tail.scales, profile.scales);
+    // The bonus can carry the profile over another level, whose track pays too.
+    let track = 0;
+    for (let l = 2; l <= levelOf(profile.xp); l++) track += 25 + l;
+    assert.equal(profile.scales, track + 50);
+    assert.equal(profile.trackClaimed, levelOf(profile.xp));
+    await a.close();
+    await b.close();
   } finally {
     await arena.stop();
   }

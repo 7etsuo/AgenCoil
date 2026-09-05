@@ -2,14 +2,8 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { ArrowLeft, Share2 } from "lucide-react";
 import { SKINS } from "@/game/model";
-import {
-  DEFAULT_CUTOFFS,
-  LEAGUES,
-  LEAGUE_COLORS,
-  leagueOf,
-  levelOf,
-  titleOf,
-} from "@/game/challenges";
+import { DEFAULT_CUTOFFS, LEAGUES, LEAGUE_COLORS, leagueOf, titleOf } from "@/game/challenges";
+import { LEVEL_CAP, levelOf, xpInto } from "@/game/level";
 import { ACHIEVEMENTS } from "@/game/achievements";
 import { Crest } from "@/components/crest";
 import { serverHttpUrl } from "@/game/net";
@@ -43,6 +37,10 @@ interface PublicProfile {
   crew: string;
   crowned: boolean;
   achv: Record<string, number>;
+  /** The character level (absent from an older server). */
+  xp?: number;
+  level?: number;
+  scales?: number;
 }
 
 interface Rarity {
@@ -155,8 +153,17 @@ function ProfilePage() {
                     {p.name || handle}
                   </h1>
                   <p className="text-sm text-muted">
-                    ✓ @{p.handle} · Lv{levelOf(p.eaten)}
+                    ✓ @{p.handle} · Lv{p.level ?? levelOf(p.xp ?? 0)}
                     {titleOf(p) ? ` · ${titleOf(p)}` : ""}
+                  </p>
+                  <p className="text-xs text-subtle tabular-nums">
+                    {(() => {
+                      const x = xpInto(p.xp ?? 0);
+                      return x.level >= LEVEL_CAP
+                        ? "max level"
+                        : `${x.into.toLocaleString("en-US")} / ${x.next.toLocaleString("en-US")} XP to ${x.level + 1}`;
+                    })()}
+                    {p.scales !== undefined ? ` · ${p.scales.toLocaleString("en-US")} scales` : ""}
                   </p>
                   <div
                     className="mt-2 h-2 w-40 rounded-full"

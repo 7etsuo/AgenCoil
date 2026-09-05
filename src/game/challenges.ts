@@ -144,11 +144,6 @@ export function leagueOf(best: number, cutoffs: Cutoffs = DEFAULT_CUTOFFS): numb
   return tier;
 }
 
-/** Evolution level from total length eaten across all runs. */
-export function levelOf(eaten: number): number {
-  return Math.floor(Math.sqrt(Math.max(0, eaten) / 300));
-}
-
 /** Titles earned from lifetime stats, shown next to a name. */
 export function titleOf(p: {
   kills: number;

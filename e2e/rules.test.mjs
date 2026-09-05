@@ -13,6 +13,7 @@ const esbuild = require("../game-server/node_modules/esbuild");
 const root = new URL("..", import.meta.url).pathname;
 
 let rules;
+let level;
 let crest;
 let record;
 let model;
@@ -22,7 +23,7 @@ before(async () => {
   const entry = join(dir, "entry.ts");
   writeFileSync(
     entry,
-    `export * as rules from "${root}src/game/challenges.ts"; export * as crest from "${root}src/game/crest.ts"; export * as record from "${root}src/game/record.ts"; export * as model from "${root}src/game/model.ts"; export { ProfileStore } from "${root}game-server/src/profiles.ts";`,
+    `export * as rules from "${root}src/game/challenges.ts"; export * as level from "${root}src/game/level.ts"; export * as crest from "${root}src/game/crest.ts"; export * as record from "${root}src/game/record.ts"; export * as model from "${root}src/game/model.ts"; export { ProfileStore } from "${root}game-server/src/profiles.ts";`,
   );
   // Emitted under the server's node_modules so the external "pg" resolves.
   const outDir = join(root, "game-server", "node_modules", ".cache");
@@ -40,6 +41,7 @@ before(async () => {
   delete process.env.DATABASE_URL;
   const mod = await import(pathToFileURL(out).href);
   rules = mod.rules;
+  level = mod.level;
   crest = mod.crest;
   record = mod.record;
   model = mod.model;
@@ -62,9 +64,6 @@ test("leagues, levels and titles follow the documented thresholds", () => {
   assert.equal(rules.LEAGUES[rules.leagueOf(299)].name, "Bronze");
   assert.equal(rules.LEAGUES[rules.leagueOf(300)].name, "Silver");
   assert.equal(rules.LEAGUES[rules.leagueOf(3000)].name, "Diamond");
-  assert.equal(rules.levelOf(0), 0);
-  assert.equal(rules.levelOf(300), 1);
-  assert.equal(rules.levelOf(300 * 25), 5);
   assert.equal(rules.titleOf({ kills: 0, survive: 0, nearTotal: 0, bountyTotal: 0 }), "");
   assert.equal(rules.titleOf({ kills: 50, survive: 0, nearTotal: 0, bountyTotal: 0 }), "Hunter");
   assert.equal(
@@ -194,7 +193,6 @@ test("lifetime totals feed levels and season bests", async () => {
   const p = await store.load("dev-2", "tester");
   store.recordLife(p, life(610, { near: 3, bounty: 2 }));
   assert.equal(p.eaten, 600, "eaten counts growth beyond the starting length");
-  assert.equal(rules.levelOf(p.eaten), 1);
   assert.equal(p.nearTotal, 3);
   assert.equal(p.bountyTotal, 2);
   assert.equal(p.seasonBest, 610);
@@ -647,4 +645,108 @@ test("league stakes: three runs bank a tier, and each tier's payout is fixed", (
     "",
     "Gold and below do not title",
   );
+});
+
+test("the character level climbs an MMO table: cheap early, dear late, capped at 60", () => {
+  assert.equal(level.LEVEL_CAP, 60);
+  assert.deepEqual([1, 2, 3, 4, 5, 10].map(level.xpToNext), [100, 348, 722, 1213, 1812, 6310]);
+  assert.equal(level.xpToNext(60), 0, "nothing past the cap");
+  assert.ok(level.xpToNext(59) > 150_000 && level.xpToNext(59) < 160_000);
+  assert.ok(
+    level.XP_MAX > 3_300_000 && level.XP_MAX < 3_350_000,
+    `about 3.3 million to the cap (${level.XP_MAX})`,
+  );
+  assert.equal(level.xpForLevel(1), 0);
+  assert.equal(level.xpForLevel(2), 100);
+  assert.equal(level.xpForLevel(3), 448);
+  assert.equal(level.levelOf(0), 1, "everyone starts at 1");
+  assert.equal(level.levelOf(99), 1);
+  assert.equal(level.levelOf(100), 2);
+  assert.equal(level.levelOf(447), 2);
+  assert.equal(level.levelOf(448), 3);
+  assert.equal(level.levelOf(level.XP_MAX - 1), 59);
+  assert.equal(level.levelOf(level.XP_MAX), 60);
+  assert.equal(level.levelOf(level.XP_MAX * 10), 60);
+  assert.deepEqual(level.xpInto(150), { level: 2, into: 50, next: 348 });
+  assert.deepEqual(level.xpInto(level.XP_MAX + 5), { level: 60, into: 5, next: 0 });
+});
+
+test("growth pays on a concave curve, so one life can never jump levels", () => {
+  assert.equal(level.growthXp(150), 101);
+  assert.equal(level.growthXp(2000), 478);
+  assert.ok(level.growthXp(20000) > 1890 && level.growthXp(20000) < 1910);
+  assert.ok(level.growthXp(200000) > 7560 && level.growthXp(200000) < 7590);
+  let prev = 0;
+  for (let g = 0; g <= 250_000; g += 500) {
+    const v = level.growthXp(g);
+    assert.ok(v >= prev, "never pays less for more");
+    prev = v;
+  }
+  assert.ok(
+    level.growthXp(20000) - level.growthXp(10000) < level.growthXp(10000) - level.growthXp(0),
+    "each further ten thousand pays less than the last",
+  );
+  // A single 69,000 life with nineteen kills from a fresh profile: level 6, not 15.
+  assert.equal(level.levelOf(level.growthXp(69018) + 19 * level.killXp(200)), 6);
+  assert.equal(level.killXp(0), 25);
+  assert.equal(level.killXp(400), 65);
+  assert.equal(level.killXp(2500), 125, "capped");
+  assert.equal(level.killXp(1_000_000), 125);
+  // Rested: a share of the level per hour away, at most one level, none at the cap.
+  assert.equal(level.restedFor(10, 3), 946);
+  assert.equal(level.restedFor(1, 4), 20);
+  assert.equal(level.restedFor(1, 400), 100);
+  assert.equal(level.restedFor(60, 400), 0);
+  assert.equal(level.scalesForLevel(42), 67);
+  assert.equal(level.lifeScales({ length: 2010, kills: 1, contracts: 0, marks: 0 }), 50);
+});
+
+test("the seed puts today's board where the plan says and never at the cap", () => {
+  const owner = { games: 908, eaten: 10_858_260, kills: 1543, achievements: 10, chests: 2 };
+  assert.equal(level.levelOf(level.seedXp(owner)), 43);
+  assert.equal(
+    level.levelOf(
+      level.seedXp({ games: 74, eaten: 540_822, kills: 187, achievements: 5, chests: 1 }),
+    ),
+    16,
+  );
+  assert.equal(
+    level.levelOf(
+      level.seedXp({ games: 185, eaten: 1_459_026, kills: 512, achievements: 6, chests: 1 }),
+    ),
+    22,
+  );
+  assert.equal(level.seedXp({ games: 0, eaten: 0, kills: 0, achievements: 0, chests: 0 }), 0);
+  assert.equal(
+    level.seedXp({ games: 1_000_000, eaten: 1e12, kills: 1e6, achievements: 0, chests: 0 }),
+    level.XP_MAX,
+  );
+});
+
+test("the store books experience through the rested pool, stops at the cap, and pays the track once", async () => {
+  const store = new ProfileStore();
+  const p = await store.load("dev-xp", "grinder");
+  assert.equal(p.xp, 0);
+  assert.equal(p.trackClaimed, 1, "level 1 is the start, not a reward");
+  let r = store.addXp(p, 500);
+  assert.deepEqual(r, { gained: 500, bonus: 0, from: 1, to: 3 });
+  assert.equal(store.claimTrack(p), 27 + 28, "levels 2 and 3 pay 25 plus the level");
+  assert.equal(store.claimTrack(p), 0, "paid once");
+  assert.equal(p.scales, 55);
+  // Away for four hours at level 3 (722 to the next): 5% an hour rested.
+  p.seen = Date.now() - 4 * 3600_000;
+  assert.equal(store.touchRested(p), Math.floor(4 * 0.05 * 722));
+  const pool = p.rested;
+  r = store.addXp(p, 50);
+  assert.deepEqual(r, { gained: 100, bonus: 50, from: 3, to: 3 }, "rested doubles what comes in");
+  assert.equal(p.rested, pool - 50);
+  // Never seen before: nothing to accrue. At the cap: nothing either.
+  const fresh = await store.load("dev-xp-2", "new");
+  assert.equal(store.touchRested(fresh), 0);
+  fresh.xp = level.XP_MAX - 10;
+  r = store.addXp(fresh, 1000);
+  assert.deepEqual(r, { gained: 10, bonus: 0, from: 59, to: 60 });
+  fresh.seen = Date.now() - 100 * 3600_000;
+  assert.equal(store.touchRested(fresh), 0);
+  assert.equal(level.levelOf(fresh.xp), 60);
 });

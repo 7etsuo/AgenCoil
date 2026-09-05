@@ -27,10 +27,10 @@ import {
   WEEKLY_GOAL,
   isoWeek,
   leagueOf,
-  levelOf,
   titleOf,
   weeklySkinFor,
 } from "@/game/challenges";
+import { LEVEL_CAP, levelOf } from "@/game/level";
 import { Link } from "@tanstack/react-router";
 import { Turnstile } from "@/components/turnstile";
 import { SkinPreview } from "@/components/skin-preview";
@@ -78,6 +78,65 @@ function fmtDur(ms: number): string {
 }
 
 /** A contract clock: "0:52". */
+function fmtNum(n: number): string {
+  return Math.floor(n).toLocaleString("en-US");
+}
+
+/**
+ * The experience bar along the bottom edge, as in WoW: twenty bubbles, the
+ * level at the left end, the rested pool as a lighter stretch past the fill,
+ * gold at the cap. Phones get a thin strip the boost button sits above.
+ */
+function XpBar({ xp, touch }: { xp: NonNullable<HudState["xp"]>; touch: boolean }) {
+  const max = xp.level >= LEVEL_CAP;
+  const frac = max ? 1 : xp.next > 0 ? Math.min(1, xp.into / xp.next) : 0;
+  const rest = max || xp.next <= 0 ? 0 : Math.min(1 - frac, xp.rested / xp.next);
+  const color = max ? "#f0c14a" : "#7b4dff";
+  return (
+    <div
+      className="pointer-events-none absolute inset-x-0 bottom-0 z-[5] flex items-stretch tabular-nums"
+      style={{ height: touch ? 4 : 14 }}
+    >
+      {!touch && (
+        <div
+          className="flex w-9 shrink-0 items-center justify-center border-t border-line/60 bg-bg/90 text-[10px] font-semibold leading-none"
+          style={{ color: max ? "#f0c14a" : "#c9bfff" }}
+        >
+          {xp.level}
+        </div>
+      )}
+      <div className="relative flex-1 overflow-hidden border-t border-line/60 bg-bg/80">
+        <div
+          className="absolute inset-y-0 left-0 transition-[width] duration-300"
+          style={{ width: `${frac * 100}%`, background: color }}
+        />
+        {rest > 0 && (
+          <div
+            className="absolute inset-y-0"
+            style={{ left: `${frac * 100}%`, width: `${rest * 100}%`, background: "#4da3ff73" }}
+          />
+        )}
+        <div
+          className="absolute inset-0"
+          style={{
+            background:
+              "repeating-linear-gradient(to right, transparent 0 calc(5% - 1px), rgba(0,0,0,0.5) calc(5% - 1px) 5%)",
+          }}
+        />
+        {!touch && (
+          <div className="absolute inset-0 flex items-center justify-center text-[10px] leading-none text-fg/90">
+            {max
+              ? `${LEVEL_CAP} · max level`
+              : `${fmtNum(xp.into)} / ${fmtNum(xp.next)} · ${Math.floor(frac * 100)}% to ${xp.level + 1}${
+                  xp.rested > 0 ? ` · rested ${fmtNum(xp.rested)}` : ""
+                }`}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function fmtClock(s: number): string {
   const n = Math.max(0, Math.floor(s));
   return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`;
@@ -813,7 +872,17 @@ export function CoilApp() {
               </div>
             </div>
           )}
-          {hud.promo ? (
+          {hud.levelUp ? (
+            <div className="snek-pop absolute left-1/2 top-[calc(12.4rem+env(safe-area-inset-top))] flex w-max max-w-[80vw] -translate-x-1/2 flex-col items-center gap-1 rounded-xl border border-[#f0c14a]/70 bg-bg/85 px-5 py-3 text-center sm:top-[calc(3.2rem+env(safe-area-inset-top))]">
+              <div className="text-xs tracking-[0.2em] text-[#f0c14a] uppercase">level up</div>
+              <div className="text-3xl font-semibold leading-none tracking-tight text-[#f0c14a]">
+                {hud.levelUp.level >= LEVEL_CAP ? `${LEVEL_CAP} · max level` : hud.levelUp.level}
+              </div>
+              <div className="text-xs text-muted">
+                {hud.levelUp.text.replace(/^level \d+ · /, "")}
+              </div>
+            </div>
+          ) : hud.promo ? (
             <div
               className="snek-pop absolute left-1/2 top-[calc(12.4rem+env(safe-area-inset-top))] flex w-max max-w-[80vw] -translate-x-1/2 flex-col items-center gap-1 rounded-xl border bg-bg/85 px-5 py-3 text-center sm:top-[calc(3.2rem+env(safe-area-inset-top))]"
               style={{ borderColor: `${LEAGUE_COLORS[hud.promo.tier - 1]}99` }}
@@ -837,7 +906,7 @@ export function CoilApp() {
               </div>
             )
           )}
-          <div className="absolute left-1/2 bottom-[calc(1.25rem+env(safe-area-inset-bottom))] flex -translate-x-1/2 flex-col items-center gap-1">
+          <div className="absolute left-1/2 bottom-[calc(2.25rem+env(safe-area-inset-bottom))] flex -translate-x-1/2 flex-col items-center gap-1">
             {hud.arenaMode.id > 0 && (
               <div className="rounded-full border border-[#9b8cff]/60 bg-bg/80 px-3 py-1 text-xs text-[#c9bfff]">
                 {MODES.find((m) => m.id === hud.arenaMode.id)?.name ?? "event"} ·{" "}
@@ -916,6 +985,7 @@ export function CoilApp() {
         </div>
       )}
 
+      {phase !== "menu" && hud?.xp && <XpBar xp={hud.xp} touch={touch} />}
       {phase === "play" && touch && (
         <div
           data-ui
@@ -1032,7 +1102,11 @@ export function CoilApp() {
                     ⚔ {hud.nemesis.name} is in the arena now · leads {hud.nemesis.k}-{hud.nemesis.d}
                   </Chip>
                 )}
-                <Chip>Lv{levelOf(hud.profile.eaten)}</Chip>
+                <Chip tone={levelOf(hud.profile.xp) >= LEVEL_CAP ? "gold" : undefined}>
+                  Lv{levelOf(hud.profile.xp)}
+                  {levelOf(hud.profile.xp) >= LEVEL_CAP ? " · max" : ""}
+                </Chip>
+                <Chip>⬢ {fmtNum(hud.profile.scales)} scales</Chip>
                 {titleOf(hud.profile) && <Chip tone="gold">{titleOf(hud.profile)}</Chip>}
                 <Chip>best {hud.profile.best}</Chip>
                 <Chip>
@@ -1736,6 +1810,18 @@ export function CoilApp() {
               {hud.contractsDone > 0 && (
                 <p className="mt-1 text-xs text-[#ffb347]">
                   {hud.contractsDone} contract{hud.contractsDone === 1 ? "" : "s"} filled this life
+                </p>
+              )}
+              {hud.xpGain && (
+                <p className="mt-1 text-xs text-[#c9bfff]">
+                  +{fmtNum(hud.xpGain.total)} XP
+                  {hud.xpGain.parts.length ? ` · ${hud.xpGain.parts.join(" · ")}` : ""}
+                  {hud.xpGain.scales > 0 ? ` · +${fmtNum(hud.xpGain.scales)} scales` : ""}
+                  {hud.xp
+                    ? hud.xp.level >= LEVEL_CAP
+                      ? ` · level ${LEVEL_CAP}, the cap`
+                      : ` · level ${hud.xp.level}, ${Math.floor((hud.xp.into / Math.max(1, hud.xp.next)) * 100)}% to ${hud.xp.level + 1}`
+                    : ""}
                 </p>
               )}
               <div className="mt-5 grid grid-cols-3 gap-2 text-center tabular-nums">

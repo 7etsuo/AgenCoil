@@ -71,6 +71,9 @@ export interface StatsInfo {
   mark: { nid: number; secs: number; reward: number; name: string } | null;
   /** The season's league ladder: the length a best must reach per tier, Bronze first. */
   cutoffs: number[];
+  /** Your experience and rested pool, for the bar (0 without a profile). */
+  xp: number;
+  rested: number;
 }
 
 export interface ProfileInfo {
@@ -116,6 +119,10 @@ export interface ProfileInfo {
   playedToday: boolean;
   /** The player the game holds against you: their kills on you, yours on them. */
   nemesis: { name: string; k: number; d: number } | null;
+  /** The character level's experience, the rested pool and the scales held. */
+  xp: number;
+  rested: number;
+  scales: number;
 }
 
 export interface ChallengeInfo {
@@ -728,6 +735,8 @@ export class NetSession {
           huntStreak: 0,
           mark: null,
           cutoffs: [...DEFAULT_CUTOFFS],
+          xp: 0,
+          rested: 0,
         };
         const nb = r.u8();
         for (let i = 0; i < nb; i++) {
@@ -784,6 +793,10 @@ export class NetSession {
           if (r.remaining >= LEAGUES.length * 4) {
             s.cutoffs = [];
             for (let i = 0; i < LEAGUES.length; i++) s.cutoffs.push(r.u32());
+          }
+          if (r.remaining >= 8) {
+            s.xp = r.u32();
+            s.rested = r.u32();
           }
         }
         this.hooks.onStats(s);
@@ -895,6 +908,9 @@ export class NetSession {
           streakNext: 0,
           playedToday: false,
           nemesis: null,
+          xp: 0,
+          rested: 0,
+          scales: 0,
         };
         if (r.remaining >= 14) {
           p.bestX = r.f32();
@@ -947,6 +963,11 @@ export class NetSession {
           const k = r.u8();
           const d = r.u8();
           p.nemesis = name ? { name, k, d } : null;
+        }
+        if (r.remaining >= 12) {
+          p.xp = r.u32();
+          p.rested = r.u32();
+          p.scales = r.u32();
         }
         this.hooks.onProfile(p);
         break;
