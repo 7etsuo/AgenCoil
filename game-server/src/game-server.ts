@@ -613,6 +613,21 @@ export class GameServer {
     const isPlayTicketPreflight =
       path === "/api/play-ticket" || (path === "/api/ws" && req.method === "OPTIONS");
     if (!isPlayTicket && !isPlayTicketPreflight) {
+      if (url.searchParams.get("whoami")) {
+        // What this arena takes the caller's address to be, and from which
+        // header: the per-address caps are only as good as this.
+        res.setHeader("cache-control", "no-store");
+        res.end(
+          JSON.stringify({
+            ip: clientIp(req),
+            xff: req.headers["x-forwarded-for"] ?? null,
+            xri: req.headers["x-real-ip"] ?? null,
+            cf: req.headers["cf-connecting-ip"] ?? null,
+            remote: req.socket.remoteAddress ?? null,
+          }),
+        );
+        return;
+      }
       res.end(JSON.stringify(this.status()));
       return;
     }
@@ -858,20 +873,25 @@ export class GameServer {
     const trusted = checkAgentPass(params.get("agent"), process.env.AGENT_SECRET || this.secret);
     const now = Date.now();
     const recent = (this.connectLog.get(ip) ?? []).filter((t) => now - t < 60_000);
-    recent.push(now);
-    this.connectLog.set(ip, recent);
     // Loopback is exempt from the per-address caps so local load tests can
     // open hundreds of sockets. Judged from the socket itself, never from a
-    // header a client could set.
+    // header a client could set. Only admitted sockets are counted: a
+    // client turned away keeps retrying, and counting the refusals kept it
+    // locked out for as long as it tried. The owner's agents count for
+    // nothing, so they cannot fill anyone's quota.
     const peer = req.socket.remoteAddress ?? "";
     const local = peer === "127.0.0.1" || peer === "::1" || peer === "::ffff:127.0.0.1";
     if (
       !local &&
       !trusted &&
-      (recent.length > CONNECTS_PER_MINUTE || (this.connsByIp.get(ip) ?? 0) >= MAX_CONNS_PER_IP)
+      (recent.length >= CONNECTS_PER_MINUTE || (this.connsByIp.get(ip) ?? 0) >= MAX_CONNS_PER_IP)
     ) {
       ws.close(1008, "too many connections");
       return;
+    }
+    if (!trusted) {
+      recent.push(now);
+      this.connectLog.set(ip, recent);
     }
     // The coordinator function never hosts a game while it knows a live
     // arena: a socket landing here skipped or lost the lookup and would be
@@ -903,7 +923,7 @@ export class GameServer {
       ws.close(1013, "arena full");
       return;
     }
-    this.connsByIp.set(ip, (this.connsByIp.get(ip) ?? 0) + 1);
+    if (!trusted) this.connsByIp.set(ip, (this.connsByIp.get(ip) ?? 0) + 1);
     const client: Client = {
       ws,
       ip,
@@ -979,9 +999,11 @@ export class GameServer {
     if (!client.alive) return;
     client.alive = false;
     this.clients.delete(client);
-    const n = (this.connsByIp.get(client.ip) ?? 1) - 1;
-    if (n <= 0) this.connsByIp.delete(client.ip);
-    else this.connsByIp.set(client.ip, n);
+    if (!client.trusted) {
+      const n = (this.connsByIp.get(client.ip) ?? 1) - 1;
+      if (n <= 0) this.connsByIp.delete(client.ip);
+      else this.connsByIp.set(client.ip, n);
+    }
     this.lastActivity = Date.now();
     if (client.key)
       this.events.log("session_end", {
