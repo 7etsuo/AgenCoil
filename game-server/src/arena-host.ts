@@ -60,6 +60,8 @@ const BOOT_WAIT_MS = 5000;
 /** Ticks closer together than this answer with the last result: the endpoint is public. */
 const TICK_MIN_MS = 15_000;
 const HEALTH_TTL_MS = 10_000;
+/** Lookups reuse the arena rows for this long: a roll makes every client ask again within a second. */
+const ROWS_TTL_MS = 2000;
 const LOCK_MS = 60_000;
 const PARTY_ROUTE_MS = 15 * 60_000;
 const ARENA_PORT = 8080;
@@ -88,8 +90,9 @@ export class ArenaHost {
     at: number;
     result: { arenas: number; created: boolean; drained: string[] };
   } | null = null;
-  /** Rows from the last database read, for synchronous checks. */
+  /** Rows from the last database read, for synchronous checks, and when they were read. */
   private lastRows: ArenaRow[] = [];
+  private lastRowsAt = 0;
   private ready: Promise<void> | null = null;
 
   constructor(
@@ -183,7 +186,7 @@ export class ArenaHost {
     await this.ensureReady();
     // Party routes are written by a public endpoint; expired ones are let go here.
     await this.q(`DELETE FROM agencoil_party_route WHERE until < $1`, [now]).catch(() => undefined);
-    const rows = await this.rows();
+    const rows = await this.rows(true);
     let created = false;
     const drained: string[] = [];
     const build = this.build;
@@ -233,7 +236,9 @@ export class ArenaHost {
     return this.env.VERCEL_DEPLOYMENT_ID ?? "local";
   }
 
-  private async rows(): Promise<ArenaRow[]> {
+  private async rows(fresh = false): Promise<ArenaRow[]> {
+    const now = Date.now();
+    if (!fresh && this.lastRowsAt && now - this.lastRowsAt < ROWS_TTL_MS) return this.lastRows;
     const res = await this.q<{
       name: string;
       domain: string;
@@ -251,6 +256,7 @@ export class ArenaHost {
       expiresAt: Number(r.expires_at),
       build: r.build ?? "",
     }));
+    this.lastRowsAt = Date.now();
     return this.lastRows;
   }
 
@@ -282,14 +288,14 @@ export class ArenaHost {
     for (;;) {
       const h = await probe(row.domain);
       this.health.set(row.name, h);
-      if (h.ok) return this.liveArenas();
+      if (h.ok) return this.liveArenas(true);
       if (Date.now() >= until) return arenas;
       await new Promise((r) => setTimeout(r, 500));
     }
   }
 
-  private async liveArenas(): Promise<(ArenaRow & { health: ArenaHealth })[]> {
-    const rows = await this.rows();
+  private async liveArenas(fresh = false): Promise<(ArenaRow & { health: ArenaHealth })[]> {
+    const rows = await this.rows(fresh);
     return Promise.all(rows.map(async (r) => ({ ...r, health: await this.checkHealth(r) })));
   }
 
@@ -328,7 +334,7 @@ export class ArenaHost {
       // Someone else is creating: wait for their row to become healthy.
       for (let i = 0; i < 25; i++) {
         await new Promise((r) => setTimeout(r, 1000));
-        const arenas = await this.liveArenas();
+        const arenas = await this.liveArenas(true);
         if (arenas.some((a) => a.health.ok && a.createdAt > now - LOCK_MS)) return true;
       }
       return false;

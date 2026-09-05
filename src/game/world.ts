@@ -584,8 +584,8 @@ export class World {
     const out: Food[] = [];
     const pts = s.points.length ? s.points : [{ x: s.x, y: s.y }];
     const n = Math.round(clamp(Math.min(8 + s.mass * 0.3, pts.length / 2), 8, 150));
-    // Only bots take the event multiplier: their mass is capped, so doubling
-    // it cannot run away, while player remains fed back into players did.
+    // Only bots take the event multiplier; player remains fed back into
+    // players compounded, and the cap below bounds what any one death drops.
     const mult = s.isBot ? this.remainsMult : 1;
     const total = Math.max(n, Math.min(REMAINS_CAP, s.mass * 0.85 * mult));
     // Orbs vary in size, but together they are worth exactly the total.

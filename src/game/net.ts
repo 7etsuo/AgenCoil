@@ -997,6 +997,10 @@ export class NetSession {
     }
     this.lastSnapAt = now;
     const n = r.u16();
+    // One index for the whole snapshot: a find per entry walked the mirror
+    // once per visible snake, every snapshot.
+    const byId = new Map<string, Snake>();
+    for (const s of this.world.snakes) byId.set(s.id, s);
     for (let i = 0; i < n; i++) {
       const e = readSnakeEntry(r);
       const level = e.full && this.serverVersion >= 2 ? r.u8() : 0;
@@ -1015,7 +1019,7 @@ export class NetSession {
           ack,
         };
         this.reconcile(ack, e.x, e.y);
-        const me = this.world.snakes.find((s) => s.id === id);
+        const me = byId.get(id);
         if (me && e.full) {
           // Our own standing, as the server dressed the snake at spawn; a
           // rise mid-life is a promotion the engine celebrates.
@@ -1033,7 +1037,7 @@ export class NetSession {
         }
         continue;
       }
-      let s = this.world.snakes.find((x) => x.id === id);
+      let s = byId.get(id);
       if (e.full || !s) {
         if (!e.full) continue; // never seen it whole; the next snapshot will be full
         const look = unpackSkin(e.skin ?? 0);
@@ -1070,6 +1074,7 @@ export class NetSession {
         };
         if (!s.points.length) this.world.ensureTrail(s);
         this.world.upsertRemote(s);
+        byId.set(id, s);
         this.buffers.set(id, []);
       }
       s.crown = e.crown;

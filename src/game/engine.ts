@@ -304,6 +304,12 @@ export class CoilEngine {
   private deathCount = 0;
   private dbgWall = 0;
   private dbgSnake = 0;
+  /** The canvas box in CSS pixels, refreshed on resize rather than measured every frame. */
+  private rect = { left: 0, top: 0, width: 1, height: 1 };
+  private rectAt = 0;
+  private sizer: ResizeObserver | null = null;
+  private debugAt = 0;
+  private bestWrittenAt = 0;
   private verificationError: string | null = null;
   private onResize = () => this.resize();
   private onBlur = () => {
@@ -503,8 +509,11 @@ export class CoilEngine {
         this.fpsT = 0;
         this.adaptQuality();
       }
+      // The HUD is a React tree: eight updates a second while playing (the
+      // length ticks), three in the menu and on the death card, where only
+      // countdowns move.
       this.hudAcc += raw;
-      if (this.hudAcc >= 0.12) {
+      if (this.hudAcc >= (this.phase === "play" ? 0.12 : 0.33)) {
         this.hudAcc = 0;
         this.emitHud();
       }
@@ -520,6 +529,8 @@ export class CoilEngine {
     this.audio.setDanger(0);
     this.audio.setHeartbeat(false);
     this.net?.close();
+    this.sizer?.disconnect();
+    this.sizer = null;
     window.removeEventListener("resize", this.onResize);
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("keyup", this.onKeyUp);
@@ -762,13 +773,19 @@ export class CoilEngine {
   }
 
   hud(): HudState {
+    const now = performance.now();
     const world = this.world;
     const p = world.player;
     const alive = world.snakes.filter((s) => s.alive).sort((a, b) => b.mass - a.mass);
     const score = p ? Math.floor(p.mass) : this.phase === "dead" ? Math.floor(this.deathMass) : 0;
     if (score > this.best) {
       this.best = score;
-      writeBest(this.best);
+      // A record run raises the best on every update; the write to storage
+      // is synchronous, so it is spaced out and made sure of at death.
+      if (this.phase !== "play" || now - this.bestWrittenAt > 2000) {
+        this.bestWrittenAt = now;
+        writeBest(this.best);
+      }
     }
     const st = this.online && world !== this.local ? this.stats : null;
     const rank = st ? st.rank : p ? alive.findIndex((s) => s.id === p.id) + 1 : 0;
@@ -794,7 +811,6 @@ export class CoilEngine {
           crown: Boolean(s.crown),
           linked: Boolean(s.linked),
         }));
-    const now = performance.now();
     const ev = this.event;
     const evLeft = ev ? Math.max(0, ev.left - (now - ev.at) / 1000) : 0;
     const me = st ? st.board.find((b) => b.nid === this.net!.selfNid) : undefined;
@@ -910,6 +926,12 @@ export class CoilEngine {
   }
 
   private bind(): void {
+    // Layout changes that are not window resizes (orientation, the address
+    // bar, a rotated phone) reach the canvas box through the observer.
+    if (typeof ResizeObserver !== "undefined") {
+      this.sizer = new ResizeObserver(() => this.resize());
+      this.sizer.observe(this.canvas);
+    }
     window.addEventListener("resize", this.onResize);
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
@@ -1035,7 +1057,7 @@ export class CoilEngine {
    * the world: a still mouse keeps the snake on a straight line.
    */
   private clientToAim(clientX: number, clientY: number): void {
-    const rect = this.canvas.getBoundingClientRect();
+    const rect = this.rect;
     this.aimScreen = {
       x: clientX - rect.left - rect.width / 2,
       y: clientY - rect.top - rect.height / 2,
@@ -1206,7 +1228,12 @@ export class CoilEngine {
   }
 
   private resize(): void {
+    // Measuring the box forces layout; it is done here, on a resize event,
+    // the observer, or at most twice a second from the frame loop, never
+    // every frame.
     const rect = this.canvas.getBoundingClientRect();
+    this.rect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    this.rectAt = performance.now();
     this.dpr = Math.min(window.devicePixelRatio || 1, 1.5) * this.qualityScale;
     const w = Math.max(1, Math.round(rect.width * this.dpr));
     const h = Math.max(1, Math.round(rect.height * this.dpr));
@@ -1671,6 +1698,7 @@ export class CoilEngine {
   private deathFxList: DeathFx[] = [];
 
   private stepDeathFx(dt: number): void {
+    if (!this.deathFx && !this.deathFxList.length) return;
     const list = this.deathFx ? [this.deathFx, ...this.deathFxList] : this.deathFxList;
     for (const fx of list) {
       fx.t += dt;
@@ -1810,7 +1838,7 @@ export class CoilEngine {
   }
 
   private draw(): void {
-    this.resize();
+    if (performance.now() - this.rectAt > 500) this.resize();
     this.renderer.draw(
       this.ctx,
       this.canvas.width,
@@ -1841,7 +1869,7 @@ export class CoilEngine {
     for (const [id, e] of this.emotes) if (e.until < nowMs) this.emotes.delete(id);
     for (const [id, pr] of this.promos) if (nowMs - pr.at > 1600) this.promos.delete(id);
     if (this.stick && this.phase === "play") {
-      const rect = this.canvas.getBoundingClientRect();
+      const rect = this.rect;
       this.renderer.drawStick(this.ctx, this.dpr, {
         ox: this.stick.ox - rect.left,
         oy: this.stick.oy - rect.top,
@@ -1910,6 +1938,11 @@ export class CoilEngine {
   }
 
   private exposeDebug(): void {
+    // A debug handle for headless checks, refreshed ten times a second: it
+    // is a big object and a walk of every body, not something for every frame.
+    const now = performance.now();
+    if (now - this.debugAt < 100) return;
+    this.debugAt = now;
     const world = this.world;
     const p = world.player;
     let pts = 0;

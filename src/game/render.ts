@@ -609,13 +609,17 @@ export class Renderer {
     const minDest = 2.4 / z;
     const sprites = this.foodSprites;
     // Orbs under five screen pixels are batched into one path per colour
-    // instead of one image draw each; zoomed out that is most of them.
-    const tiny: { x: number; y: number; d: number }[][] = sprites.map(() => []);
+    // instead of one image draw each; zoomed out that is most of them. The
+    // batches are flat number arrays kept between frames, so a screen of
+    // small orbs costs no allocation per orb.
+    const tiny = this.tinyBatches;
+    while (tiny.length < sprites.length) tiny.push([]);
+    for (const list of tiny) list.length = 0;
     world.forEachFoodIn(x0, y0, x1, y1, (f) => {
       const spr = sprites[f.c % sprites.length];
       if (!spr) return;
       if (f.k < 2 && f.r * z < 2.5) {
-        tiny[f.c % sprites.length]!.push({ x: f.x, y: f.y, d: f.r * 0.9 });
+        tiny[f.c % sprites.length]!.push(f.x, f.y, f.r * 0.9);
         return;
       }
       if (f.k === 2) {
@@ -649,21 +653,29 @@ export class Renderer {
       }
       ctx.drawImage(spr.canvas, f.x - dest * 0.5, f.y - dest * 0.5, dest, dest);
     });
-    tiny.forEach((list, c) => {
-      if (!list.length) return;
+    for (let c = 0; c < tiny.length; c++) {
+      const list = tiny[c]!;
+      if (!list.length) continue;
       ctx.beginPath();
-      for (const o of list) {
-        ctx.moveTo(o.x + o.d, o.y);
-        ctx.arc(o.x, o.y, o.d, 0, Math.PI * 2);
+      for (let i = 0; i < list.length; i += 3) {
+        const x = list[i]!;
+        const y = list[i + 1]!;
+        const d = list[i + 2]!;
+        ctx.moveTo(x + d, y);
+        ctx.arc(x, y, d, 0, Math.PI * 2);
       }
       ctx.fillStyle = FOOD_COLORS[c] ?? "#ffffff";
       ctx.globalAlpha = 0.85;
       ctx.fill();
       ctx.globalAlpha = 1;
-    });
+    }
   }
 
   private boostSince = new Map<string, number>();
+  /** Measured tag widths by label: `measureText` is layout work, and a label repeats for many frames. */
+  private labelWidths = new Map<string, number>();
+  /** Per colour, the tiny orbs of the frame as flat x, y, radius triples; reused across frames. */
+  private tinyBatches: number[][] = [];
   private promos: ReadonlyMap<string, Promotion> | null = null;
   /** The viewer's nemesis, whose tag and map dot are marked for them alone. */
   private nemesisId: string | null = null;
@@ -997,7 +1009,13 @@ export class Renderer {
       ctx.font = font;
       ctx.textAlign = "left";
       ctx.textBaseline = "bottom";
-      const tw = ctx.measureText(label).width;
+      let tw = this.labelWidths.get(label);
+      if (tw === undefined) {
+        tw = ctx.measureText(label).width;
+        // Labels carry the length, so they churn; the cache is kept small.
+        if (this.labelWidths.size > 512) this.labelWidths.clear();
+        this.labelWidths.set(label, tw);
+      }
       const crestW = tier ? 18 : 0;
       const rankW = rank && rank <= 3 && !s.boss ? 18 : 0;
       const pad = 6;

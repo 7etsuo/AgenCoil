@@ -50,6 +50,8 @@ export class GameAudio {
   }
 
   private danger: { osc: OscillatorNode; gain: GainNode } | null = null;
+  private dangerLevel = 0;
+  private dangerAt = 0;
   private heart: ReturnType<typeof setInterval> | null = null;
 
   /** Low rumble while a much bigger snake is close; level 0..1. */
@@ -68,6 +70,13 @@ export class GameAudio {
       }
       return;
     }
+    // Called every frame: an automation event per frame piles up on the
+    // parameter, so the gain is only retargeted when the level has moved.
+    const now = performance.now();
+    if (this.danger && Math.abs(level - this.dangerLevel) < 0.02 && now - this.dangerAt < 250)
+      return;
+    this.dangerLevel = level;
+    this.dangerAt = now;
     if (!this.danger) {
       const osc = this.ctx.createOscillator();
       osc.type = "sawtooth";

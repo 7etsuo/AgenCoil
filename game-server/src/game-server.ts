@@ -427,6 +427,8 @@ export class GameServer {
    * back at its old length.
    */
   private readonly deadSids = new Map<string, number>();
+  /** Live snakes by id, rebuilt each tick: the per-client loops look snakes up by sid. */
+  private readonly bySid = new Map<string, Snake>();
   private nextNid = 1;
   private nextPlayer = 1;
   private tick = 0;
@@ -1752,7 +1754,7 @@ export class GameServer {
     // screen shows at this length's zoom, and centred near the head. Anything
     // else is a look around the arena nobody else gets, and a way to make
     // the server resend the world every snapshot.
-    const me = client.sid ? this.world.snakes.find((s) => s.id === client.sid && s.alive) : null;
+    const me = client.sid ? this.liveSnake(client.sid) : null;
     if (me) {
       const z = zoomOf(me.mass);
       view.hw = Math.min(view.hw, SCREEN_MAX_W / (2 * z) + 40);
@@ -1891,9 +1893,20 @@ export class GameServer {
     }
   }
 
+  /**
+   * A live snake by id. The index is rebuilt each tick, so a snake spawned
+   * since (a spawn happens on a message, between ticks) is looked up the
+   * slow way once.
+   */
+  private liveSnake(sid: string): Snake | null {
+    const hit = this.bySid.get(sid);
+    if (hit && hit.alive) return hit;
+    return this.world.snakes.find((s) => s.id === sid && s.alive) ?? null;
+  }
+
   private sendToken(client: Client): void {
     if (!client.sid) return;
-    const s = this.world.snakes.find((x) => x.id === client.sid && x.alive);
+    const s = this.liveSnake(client.sid);
     if (!s) return;
     client.ws.send(
       new Writer().u8(S2C.TOKEN).str(this.makeToken(s, client.verifiedUntil)).finish(),
@@ -1908,7 +1921,11 @@ export class GameServer {
     this.deathsBooked = false;
     this.world.step(dt, 0, 0, false);
     this.stepMs = this.stepMs * 0.95 + (performance.now() - t0) * 0.05;
-    for (const s of this.world.snakes) if (!this.nids.has(s.id)) this.nidOf(s.id);
+    this.bySid.clear();
+    for (const s of this.world.snakes) {
+      if (s.alive) this.bySid.set(s.id, s);
+      if (!this.nids.has(s.id)) this.nidOf(s.id);
+    }
 
     if (this.world.deaths.length) this.onDeaths();
     this.deathsBooked = true;
@@ -1985,8 +2002,8 @@ export class GameServer {
   private checkPromotions(): void {
     for (const c of this.clients) {
       if (!c.sid || !c.life) continue;
-      const s = this.world.snakes.find((x) => x.id === c.sid);
-      if (!s || !s.alive) continue;
+      const s = this.liveSnake(c.sid);
+      if (!s) continue;
       const tier = leagueOf(s.mass);
       if (tier <= c.life.tier) continue;
       c.life.tier = tier;
@@ -2009,7 +2026,7 @@ export class GameServer {
   private trackLives(): void {
     for (const c of this.clients) {
       if (!c.sid || !c.life) continue;
-      const s = this.world.snakes.find((x) => x.id === c.sid);
+      const s = this.bySid.get(c.sid);
       if (!s) continue;
       if (s.boosting) c.life.boosted = true;
       if (!c.life.boosted && s.mass > c.life.noboostLength) c.life.noboostLength = s.mass;
@@ -2023,7 +2040,7 @@ export class GameServer {
       if (!c || !c.life) continue;
       c.combo = { n: now - c.combo.last < NEAR_COMBO_WINDOW * 1000 ? c.combo.n + 1 : 1, last: now };
       c.life.near++;
-      const s = this.world.snakes.find((x) => x.id === n.id);
+      const s = this.liveSnake(n.id);
       const bonus = 1 + Math.min(c.combo.n, 6) * 0.5;
       if (s) s.mass += bonus;
       if (c.v2)
