@@ -16,8 +16,19 @@ interface Weights {
   layers: { w: number[][]; b: number[] }[];
 }
 
-/** Ordinary nicknames, none of them a bot's. */
-const NAMES = ["marlo", "vee", "kenji", "tova", "dax", "ines", "soren", "lyra", "bram", "nico"];
+/** Cyberpunk names, from the books and films; none of them a bot's. */
+const NAMES = [
+  "case",
+  "molly",
+  "wintermute",
+  "deckard",
+  "pris",
+  "batou",
+  "motoko",
+  "hiro",
+  "trinity",
+  "kovacs",
+];
 const AIM_REACH = 240;
 
 /** In-memory Web Storage, one per client so each has its own device key. */
