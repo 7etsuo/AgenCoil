@@ -47,6 +47,12 @@ import { moveWisp, slideAlongRim } from "../../src/game/wisp";
 import { cleanName } from "./names";
 import {
   C2S,
+  HANDLE_INVALID,
+  HANDLE_NOT_LINKED,
+  HANDLE_OK,
+  HANDLE_TAKEN,
+  HANDLE_TOO_SOON,
+  HANDLE_UNAVAILABLE,
   Reader,
   S2C,
   Writer,
@@ -74,7 +80,7 @@ import {
   type LifeStats,
 } from "../../src/game/challenges";
 import { playGateFromEnv } from "./play-gate";
-import { cleanHandle, identityGateFromEnv, type Identity } from "./identity";
+import { chosenHandle, cleanHandle, identityGateFromEnv, type Identity } from "./identity";
 import { lifeFeats } from "../../src/game/achievements";
 import { ArenaHost } from "./arena-host";
 import { EventLog } from "./events";
@@ -142,6 +148,10 @@ interface Client {
   verifiedUntil: number;
   /** The linked account behind this socket, once a ticket has been redeemed. */
   account: Identity | null;
+  /** A ticket redemption in flight, so a HELLO arriving meanwhile waits for it. */
+  linking: Promise<void> | null;
+  /** When the player last asked for a handle that reached the database. */
+  lastHandleAt: number;
 }
 
 interface FoodCellSync {
@@ -205,6 +215,8 @@ const HOT_THRESHOLD = 3;
 /** How long a redeemed identity ticket is trusted without asking the site again. */
 const IDENTITY_TTL_MS = 10 * 60_000;
 const IDENTITY_CACHE_MAX = 5000;
+/** Handle requests that reach the database are spaced at least this far apart per socket. */
+const HANDLE_COOLDOWN_MS = 1000;
 /**
  * The view rectangle a client may ask for, in world units from its centre.
  * There is no player zoom; the camera follows snake size down to a scale of
@@ -716,6 +728,8 @@ export class GameServer {
       alive: true,
       verifiedUntil: 0,
       account: null,
+      linking: null,
+      lastHandleAt: 0,
     };
     this.clients.add(client);
     this.lastActivity = Date.now();
@@ -795,6 +809,10 @@ export class GameServer {
       else if (type === C2S.INPUT) this.onInput(client, r);
       else if (type === C2S.EMOTE) this.onEmote(client, r.u8());
       else if (type === C2S.CREW) this.onCrew(client, r.str());
+      else if (type === C2S.HANDLE)
+        void this.onSetHandle(client, r.str()).catch((err) => {
+          console.error("[handle] failed:", (err as Error)?.message ?? err);
+        });
       else if (type === C2S.IDENT)
         void this.onIdent(client, r).catch((err) => {
           console.error("[ident] failed:", (err as Error)?.message ?? err);
@@ -853,18 +871,9 @@ export class GameServer {
       // Account link: the site's origin and a ticket it minted for this player.
       const idOrigin = r.remaining ? r.str().slice(0, 200) : "";
       const idTicket = r.remaining ? r.str().slice(0, 128) : "";
-      if (idOrigin && idTicket && !respawn && !client.account) {
-        const id = await this.redeemIdentity(idOrigin, idTicket);
+      if (idOrigin && idTicket && !respawn) {
+        await this.linkAccount(client, idOrigin, idTicket);
         if (!client.alive) return;
-        if (id) {
-          client.account = id;
-          client.profile = await this.profiles.link(client.profile, id, client.name);
-          if (!client.alive) return;
-          client.key = client.profile.key;
-          client.name = `@${client.profile.handle}`;
-          this.events.log("feature", { key: client.key, s: "link" });
-          if (this.profiles.award(client.profile, "linked")) this.achieve(client, "linked");
-        }
       }
     }
     if (client.sid && this.world.snakes.some((s) => s.id === client.sid && s.alive)) {
@@ -1096,21 +1105,102 @@ export class GameServer {
       if (c.v2 && (c.known.has(client.sid) || c === client)) c.ws.send(msg);
   }
 
-  /** A v2 client introducing itself before playing: load and send its profile. */
+  /**
+   * A v2 client introducing itself before playing: load its profile, link
+   * the account when the site's origin and ticket ride along, and send the
+   * profile. The client sends it again once a ticket minted after the
+   * socket opened arrives, so the menu shows the account before the first life.
+   */
   private async onIdent(client: Client, r: Reader): Promise<void> {
     const key = r
       .str()
       .replace(/[^A-Za-z0-9_-]/g, "")
       .slice(0, 64);
     const name = sanitizeName(r.remaining ? r.str() : "anon");
+    const idOrigin = r.remaining ? r.str().slice(0, 200) : "";
+    const idTicket = r.remaining ? r.str().slice(0, 128) : "";
     if (!key) return;
     client.v2 = true;
-    client.key = key;
+    if (!client.key) this.events.log("session_start", { key, meta: { proto: client.proto } });
+    // Once linked the key is the account's; a repeated introduction keeps it.
+    if (!client.account) client.key = key;
     if (!client.profile) client.profile = await this.profiles.load(key, name);
     if (!client.alive) return;
-    this.events.log("session_start", { key, meta: { proto: client.proto } });
+    if (idOrigin && idTicket) {
+      await this.linkAccount(client, idOrigin, idTicket);
+      if (!client.alive) return;
+    }
     void this.sendProfile(client);
     if (this.event && this.event.until > Date.now()) this.sendEvent(client);
+  }
+
+  /**
+   * Put the account behind a site ticket on this socket: the profile becomes
+   * the account's and the name its handle. A second call while one is in
+   * flight (IDENT then HELLO) waits for the first instead of racing it.
+   */
+  private linkAccount(client: Client, origin: string, ticket: string): Promise<void> {
+    if (client.account) return Promise.resolve();
+    if (client.linking) return client.linking;
+    const task = (async () => {
+      const id = await this.redeemIdentity(origin, ticket);
+      if (!client.alive || !id) return;
+      client.account = id;
+      client.profile = await this.profiles.link(client.profile, id, client.name);
+      if (!client.alive) return;
+      client.key = client.profile.key;
+      client.name = `@${client.profile.handle}`;
+      this.events.log("feature", { key: client.key, s: "link" });
+      if (this.profiles.award(client.profile, "linked")) this.achieve(client, "linked");
+    })().finally(() => {
+      client.linking = null;
+    });
+    client.linking = task;
+    return task;
+  }
+
+  /**
+   * A linked player choosing the handle they are named by. Checked here,
+   * claimed on the profile (which keeps it across sign-ins), and applied to
+   * the live snake at once; the answer carries a status the menu can explain.
+   */
+  private async onSetHandle(client: Client, raw: string): Promise<void> {
+    const reply = (status: number): void => {
+      if (!client.alive) return;
+      client.ws.send(
+        new Writer()
+          .u8(S2C.HANDLE)
+          .u8(status)
+          .str(client.profile?.handle ?? "")
+          .finish(),
+      );
+    };
+    const p = client.profile;
+    if (!client.account || !p || !p.sub) return reply(HANDLE_NOT_LINKED);
+    const h = chosenHandle(raw);
+    if (!h || !cleanName(h)) return reply(HANDLE_INVALID);
+    const now = Date.now();
+    if (now - client.lastHandleAt < HANDLE_COOLDOWN_MS) return reply(HANDLE_TOO_SOON);
+    client.lastHandleAt = now;
+    let result: "ok" | "taken";
+    try {
+      result = await this.profiles.claimHandle(p, h);
+    } catch (err) {
+      console.error("[handle] claim failed:", (err as Error)?.message ?? err);
+      return reply(HANDLE_UNAVAILABLE);
+    }
+    if (!client.alive) return;
+    if (result === "taken") return reply(HANDLE_TAKEN);
+    client.name = `@${h}`;
+    const s = client.sid ? this.world.snakes.find((x) => x.id === client.sid) : undefined;
+    if (s) {
+      s.name = p.crew ? `[${p.crew}] ${client.name}` : client.name;
+      // Every client forgets the snake, so its full entry is resent with the new name.
+      for (const o of this.clients) o.known.delete(s.id);
+    }
+    this.events.log("feature", { key: client.key, s: "handle" });
+    reply(HANDLE_OK);
+    void this.sendProfile(client);
   }
 
   private spawnHelperBot(snake: Snake): void {

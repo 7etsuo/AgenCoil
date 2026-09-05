@@ -138,6 +138,8 @@ export interface NetHooks {
   onEmote: (nid: number, id: number) => void;
   /** Afterlife position and bank; secsLeft 0 ends the wisp. */
   onWisp: (x: number, y: number, bank: number, secsLeft: number) => void;
+  /** The server's answer to a handle request: a HANDLE_* status and the handle now held. */
+  onHandle: (status: number, handle: string) => void;
 }
 
 interface Snap {
@@ -278,6 +280,8 @@ export class NetSession {
 
   /** Stable per-device key for the persistent profile. */
   deviceKey = "";
+  /** The site's origin and account ticket, sent with every introduction once known. */
+  private identity: { origin: string; ticket: string } | null = null;
   /** Party code so friends spawn together. */
   party = "";
   private comebackNext = false;
@@ -389,23 +393,7 @@ export class NetSession {
     ws.onopen = () => {
       this.attempts = 0;
       this.setState("online");
-      if (this.deviceKey) {
-        let nick = this.look?.name ?? "";
-        if (!nick) {
-          try {
-            nick = localStorage.getItem("agencoil-nick") ?? "";
-          } catch {
-            /* ignore */
-          }
-        }
-        ws.send(
-          new Writer()
-            .u8(C2S.IDENT)
-            .str(this.deviceKey)
-            .str(nick || "anon")
-            .finish(),
-        );
-      }
+      this.sendIdent();
       if (this.wantPlay && this.look) this.sendHello(false);
       this.pingTimer = setInterval(() => this.ping(), 2000);
     };
@@ -488,6 +476,40 @@ export class NetSession {
   }
 
   // ── outgoing ───────────────────────────────────────────────────────────────
+
+  /**
+   * Introduce the device, and the account once the site has minted its
+   * ticket, so the menu gets the profile before the first life.
+   */
+  private sendIdent(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.deviceKey) return;
+    let nick = this.look?.name ?? "";
+    if (!nick) {
+      try {
+        nick = localStorage.getItem("agencoil-nick") ?? "";
+      } catch {
+        /* ignore */
+      }
+    }
+    const w = new Writer()
+      .u8(C2S.IDENT)
+      .str(this.deviceKey)
+      .str(nick || "anon");
+    if (this.identity) w.str(this.identity.origin).str(this.identity.ticket);
+    this.ws.send(w.finish());
+  }
+
+  /** The account ticket the site minted (null when signed out); sent at once and on every reconnect. */
+  identify(identity: { origin: string; ticket: string } | null): void {
+    this.identity = identity;
+    if (identity) this.sendIdent();
+  }
+
+  /** Ask for the handle this account is named by; the answer arrives as `onHandle`. */
+  setHandle(raw: string): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(new Writer().u8(C2S.HANDLE).str(raw.slice(0, 32)).finish());
+  }
 
   /** Join the arena (or respawn after death) with this look. */
   play(look: Look, comeback = false, nearNid = 0): void {
@@ -888,6 +910,11 @@ export class NetSession {
       }
       case S2C.ACHIEVE: {
         this.hooks.onAchieve(r.str());
+        break;
+      }
+      case S2C.HANDLE: {
+        const status = r.u8();
+        this.hooks.onHandle(status, r.str());
         break;
       }
       case S2C.PONG: {

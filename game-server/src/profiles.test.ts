@@ -95,6 +95,27 @@ test("a fresh device with no history does not take over an account", async () =>
   assert.equal(p.best, 900);
 });
 
+test("a chosen handle is kept across sign-ins and cannot be taken; a derived one follows the account", async () => {
+  const store = new ProfileStore();
+  const rob = { ...id, sub: "u9", handle: "robert_eno", name: "Robert" };
+  const p = await store.link(null, rob, "Robert");
+  assert.equal(p.handle, "robert_eno");
+  assert.equal(p.handleChosen, false);
+  assert.equal(await store.claimHandle(p, "robeno"), "ok");
+  assert.equal(p.handleChosen, true);
+  const again = await store.link(null, rob, "Robert");
+  assert.equal(again, p);
+  assert.equal(p.handle, "robeno", "a fresh sign-in keeps the chosen handle");
+  const other = await store.link(null, { ...id, sub: "u10", handle: "other" }, "Other");
+  assert.equal(await store.claimHandle(other, "robeno"), "taken");
+  assert.equal(other.handle, "other");
+  assert.equal(await store.claimHandle(p, "robeno"), "ok", "keeping your own handle is fine");
+  // Never chosen: the handle the site derives wins at the next sign-in.
+  await store.link(null, { ...id, sub: "u11", handle: "old_name" }, "Old");
+  const renamed = await store.link(null, { ...id, sub: "u11", handle: "new_name" }, "New");
+  assert.equal(renamed.handle, "new_name");
+});
+
 test("two accounts wanting one handle get distinct handles", async () => {
   const store = new ProfileStore();
   const a = await store.link(null, id, "a");

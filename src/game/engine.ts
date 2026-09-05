@@ -96,6 +96,8 @@ export interface HudState {
   beat: { by: string; target: number; done: boolean } | null;
   /** Tutorial hint for a first life, if any. */
   hint: string | null;
+  /** The server's answer to the last handle request (HANDLE_* status), until the next one. */
+  handleResult: { status: number; handle: string } | null;
   firstLife: boolean;
   party: { name: string; mass: number }[];
   arenaMode: { id: number; secsLeft: number; secsToNext: number };
@@ -233,6 +235,7 @@ export class CoilEngine {
   /** A steering key was held this tick, so the aim point is live, not a leftover. */
   private keyAim = false;
   private unlocked: string[] = [];
+  private handleResult: { status: number; handle: string } | null = null;
   private banked = 0;
   private nearWin: string | null = null;
   private beat: { by: string; target: number; done: boolean } | null = null;
@@ -348,6 +351,10 @@ export class CoilEngine {
           this.audio.kill();
           this.emitHud();
         },
+        onHandle: (status, handle) => {
+          this.handleResult = { status, handle };
+          this.emitHud();
+        },
       });
       this.net.connect();
     } else {
@@ -452,6 +459,18 @@ export class CoilEngine {
 
   setCrew(tag: string): void {
     this.net?.setCrew(tag);
+  }
+
+  /** The site's account ticket, once minted (null on sign-out): the arena links the profile at once. */
+  setIdentity(identity: { origin: string; ticket: string } | null): void {
+    this.net?.identify(identity);
+  }
+
+  /** Ask the arena to name this account by a handle; the answer lands in `hud.handleResult`. */
+  setHandle(raw: string): void {
+    this.handleResult = null;
+    this.net?.setHandle(raw);
+    this.emitHud();
   }
 
   /** Send a quick reaction; also shown locally at once. */
@@ -646,6 +665,7 @@ export class CoilEngine {
       nearWin: this.phase === "dead" ? this.nearWin : null,
       beat: this.beat,
       hint: this.hint(),
+      handleResult: this.handleResult,
       league: this.profile ? leagueOf(this.profile.weekBest) + 1 : 0,
       might: this.profile?.achv.length ?? 0,
       finish: this.profile?.prevTier ?? 0,

@@ -20,6 +20,16 @@ export interface Identity {
 
 const HANDLE_RE = /^[a-z0-9_]{2,15}$/;
 
+/**
+ * A handle a player typed: trimmed, lower-cased, spaces joined with
+ * underscores; null when it breaks the rules (2 to 15 of [a-z0-9_] with at
+ * least one letter, so a bare number never becomes a name again).
+ */
+export function chosenHandle(raw: string): string | null {
+  const h = raw.trim().replace(/^@/, "").toLowerCase().replace(/\s+/g, "_");
+  return HANDLE_RE.test(h) && /[a-z]/.test(h) ? h : null;
+}
+
 export function cleanHandle(raw: string): string {
   const h = raw
     .toLowerCase()

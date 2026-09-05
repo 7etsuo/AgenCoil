@@ -15,6 +15,8 @@ export const C2S = {
   /** A quick reaction (0..3) shown above the snake. */
   EMOTE: 6,
   CREW: 7,
+  /** Choose the handle a linked player is named by. */
+  HANDLE: 8,
 } as const;
 
 export const S2C = {
@@ -52,7 +54,16 @@ export const S2C = {
   WISP: 21,
   /** An achievement this client just earned: id. */
   ACHIEVE: 22,
+  /** Answer to a handle request: a status (HANDLE_*) and the handle now held. */
+  HANDLE: 23,
 } as const;
+
+export const HANDLE_OK = 0;
+export const HANDLE_INVALID = 1;
+export const HANDLE_TAKEN = 2;
+export const HANDLE_NOT_LINKED = 3;
+export const HANDLE_TOO_SOON = 4;
+export const HANDLE_UNAVAILABLE = 5;
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();

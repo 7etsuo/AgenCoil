@@ -127,6 +127,40 @@ function ident(key: string, name: string): Uint8Array {
   return new Writer().u8(C2S.IDENT).str(key).str(name).finish();
 }
 
+/** An introduction carrying the site's origin and account ticket. */
+function identWith(key: string, name: string, origin: string, ticket: string): Uint8Array {
+  return new Writer().u8(C2S.IDENT).str(key).str(name).str(origin).str(ticket).finish();
+}
+
+function handleMsg(raw: string): Uint8Array {
+  return new Writer().u8(C2S.HANDLE).str(raw).finish();
+}
+
+/** A stand-in for the site: redeems any ticket as one fixed account. */
+async function fakeSite(
+  sub: string,
+  handle: string,
+  name: string,
+): Promise<{ origin: string; close(): Promise<void> }> {
+  const srv = http.createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://site");
+    if (url.pathname === "/api/identity/redeem" && url.searchParams.get("t")) {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true, sub, handle, name, avatar: "" }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end();
+  });
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const address = srv.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    close: () => new Promise<void>((resolve) => srv.close(() => resolve())),
+  };
+}
+
 /** A v2 HELLO (or SPAWN) with the same tail the browser client sends. */
 function hello(name: string, key: string, token = "", respawn = false): Uint8Array {
   const w = new Writer()
@@ -319,6 +353,73 @@ test("a head-on names each snake as the other's killer and frees both wire ids",
     await a.close();
     await b.close();
   } finally {
+    await arena.stop();
+  }
+});
+
+test("a signed-in player is linked on connect and chooses the handle they are named by", async () => {
+  const arena = await startArena();
+  const site = await fakeSite("u_rob", "robert_eno", "Robert - Eno");
+  const other = await fakeSite("u_two", "someone", "Someone");
+  try {
+    const ticket = "t".repeat(24);
+    const p = new Player(arena.url);
+    await p.open();
+    p.send(identWith("dev-rob", "rob", site.origin, ticket));
+    let profile = parseProfile(await p.next(S2C.PROFILE));
+    assert.equal(profile.linked, true, "linked before the first life");
+    assert.equal(profile.handle, "robert_eno", "the site's derived handle is the default");
+    // A name that breaks the rules costs nothing and changes nothing.
+    p.send(handleMsg("7"));
+    let r = await p.next(S2C.HANDLE);
+    assert.equal(r.u8(), protocol.HANDLE_INVALID);
+    assert.equal(r.str(), "robert_eno");
+    // A typed name is normalised and claimed; the profile follows.
+    p.send(handleMsg(" @Rob Eno "));
+    r = await p.next(S2C.HANDLE);
+    assert.equal(r.u8(), protocol.HANDLE_OK);
+    assert.equal(r.str(), "rob_eno");
+    profile = parseProfile(await p.next(S2C.PROFILE));
+    assert.equal(profile.handle, "rob_eno");
+    // Playing: the snake carries the chosen name, whatever HELLO said.
+    p.send(hello("rob", "dev-rob"));
+    await p.next(S2C.SPAWNED);
+    const me = arena.game.world.snakes.find((s) => !s.isBot);
+    assert.equal(me?.name, "@rob_eno");
+    // Renamed mid-life, after the cooldown: the live snake follows at once.
+    p.send(handleMsg("robeno"));
+    assert.equal((await p.next(S2C.HANDLE)).u8(), protocol.HANDLE_TOO_SOON);
+    await sleep(1100);
+    p.send(handleMsg("robeno"));
+    r = await p.next(S2C.HANDLE);
+    assert.equal(r.u8(), protocol.HANDLE_OK);
+    assert.equal(me?.name, "@robeno");
+    // Another account cannot take it.
+    const q = new Player(arena.url);
+    await q.open();
+    q.send(identWith("dev-two", "two", other.origin, "u".repeat(24)));
+    await q.next(S2C.PROFILE);
+    q.send(handleMsg("robeno"));
+    r = await q.next(S2C.HANDLE);
+    assert.equal(r.u8(), protocol.HANDLE_TAKEN);
+    assert.equal(r.str(), "someone");
+    // A fresh sign-in derives "robert_eno" again, but the chosen handle stays.
+    const again = new Player(arena.url);
+    await again.open();
+    again.send(identWith("dev-rob", "rob", site.origin, ticket));
+    profile = parseProfile(await again.next(S2C.PROFILE));
+    assert.equal(profile.handle, "robeno");
+    // A guest cannot choose a name.
+    const guest = await joinArena(arena.url, "dev-guest", "guest");
+    guest.send(handleMsg("guesty"));
+    assert.equal((await guest.next(S2C.HANDLE)).u8(), protocol.HANDLE_NOT_LINKED);
+    await p.close();
+    await q.close();
+    await again.close();
+    await guest.close();
+  } finally {
+    await site.close();
+    await other.close();
     await arena.stop();
   }
 });
@@ -546,8 +647,8 @@ function parseProfile(r: InstanceType<typeof Reader>) {
   r.str();
   r.u16();
   r.u16();
-  r.str();
-  r.u8();
+  out.handle = r.str();
+  out.linked = r.u8() === 1;
   r.str();
   out.bankedTier = r.u8();
   out.weekLives = r.u8();

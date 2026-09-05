@@ -78,6 +78,8 @@ export interface Profile {
   /** Linked account: stable id, public handle and avatar; "" for a device profile. */
   sub: string;
   handle: string;
+  /** The player chose the handle; `link` keeps it instead of deriving one. */
+  handleChosen: boolean;
   avatar: string;
   /** Achievement id to the unix second it was earned. */
   achv: Record<string, number>;
@@ -259,7 +261,8 @@ export class ProfileStore {
              ADD COLUMN IF NOT EXISTS banked_tier INTEGER NOT NULL DEFAULT 0,
              ADD COLUMN IF NOT EXISTS season_tier INTEGER NOT NULL DEFAULT 0,
              ADD COLUMN IF NOT EXISTS seasons JSONB NOT NULL DEFAULT '[]',
-             ADD COLUMN IF NOT EXISTS pending JSONB NOT NULL DEFAULT '[]'`,
+             ADD COLUMN IF NOT EXISTS pending JSONB NOT NULL DEFAULT '[]',
+             ADD COLUMN IF NOT EXISTS handle_chosen BOOLEAN NOT NULL DEFAULT false`,
         );
         await this.pool!.query(
           `CREATE INDEX IF NOT EXISTS agencoil_profiles_handle ON agencoil_profiles (handle) WHERE handle <> ''`,
@@ -333,6 +336,7 @@ export class ProfileStore {
       crownUntil: 0,
       sub: "",
       handle: "",
+      handleChosen: false,
       avatar: "",
       achv: {},
       weekRuns: [0, 0, 0, 0, 0],
@@ -412,12 +416,13 @@ export class ProfileStore {
             season_tier: number;
             seasons: unknown;
             pending: unknown;
+            handle_chosen: boolean;
           }>(
             `SELECT name, best, kills, games, survive, unlocks, day, progress, skin, bands, best_x, best_y,
                   week, week_best, week_done, earned, flagged, streak, streak_last, freezes, eaten,
                   near_total, bounty_total, prev_tier, season, season_best, shards, chests, crew,
                   crown_until, sub, handle, avatar, achv, week_runs, week_lives, banked_tier,
-                  season_tier, seasons, pending
+                  season_tier, seasons, pending, handle_chosen
            FROM agencoil_profiles WHERE key = $1`,
             [key],
           ),
@@ -464,6 +469,7 @@ export class ProfileStore {
             crownUntil: Number(r.crown_until) || 0,
             sub: r.sub || "",
             handle: r.handle || "",
+            handleChosen: Boolean(r.handle_chosen),
             avatar: r.avatar || "",
             achv: parseAchv(r.achv),
             weekRuns: parseRuns(r.week_runs),
@@ -946,36 +952,52 @@ export class ProfileStore {
     if (!p) p = await this.load(key, name);
     p.sub = id.sub;
     p.avatar = id.avatar;
-    p.handle = await this.freeHandle(id.handle, key);
+    // A handle the player chose stays; a derived one follows the account.
+    p.handle = p.handleChosen && p.handle ? p.handle : await this.freeHandle(id.handle, key);
     // The profile keeps the account's display name; the arena name is the handle.
     this.setName(p, id.name || name);
     this.markDirty(key);
     return p;
   }
 
+  /** Does another profile hold this handle? Throws when the database cannot be asked. */
+  private async handleTaken(h: string, key: string): Promise<boolean> {
+    for (const o of this.cache.values()) if (o.handle === h && o.key !== key) return true;
+    if (!this.pool) return false;
+    const r = await retryDb(() =>
+      this.pool!.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM agencoil_profiles WHERE handle = $1 AND key <> $2`,
+        [h, key],
+      ),
+    );
+    return Number(r.rows[0]?.n ?? 0) > 0;
+  }
+
   /** The handle itself, or a suffixed one when another account already holds it. */
   private async freeHandle(handle: string, key: string): Promise<string> {
-    const taken = async (h: string): Promise<boolean> => {
-      for (const o of this.cache.values()) if (o.handle === h && o.key !== key) return true;
-      if (!this.pool) return false;
-      const r = await retryDb(() =>
-        this.pool!.query<{ n: string }>(
-          `SELECT count(*)::text AS n FROM agencoil_profiles WHERE handle = $1 AND key <> $2`,
-          [h, key],
-        ),
-      );
-      return Number(r.rows[0]?.n ?? 0) > 0;
-    };
     try {
-      if (!(await taken(handle))) return handle;
+      if (!(await this.handleTaken(handle, key))) return handle;
       for (let i = 2; i < 100; i++) {
         const h = `${handle.slice(0, 12)}_${i}`;
-        if (!(await taken(h))) return h;
+        if (!(await this.handleTaken(h, key))) return h;
       }
     } catch (err) {
       console.error("[profiles] handle check failed:", (err as Error)?.message ?? err);
     }
     return `${handle.slice(0, 8)}_${key.slice(-6)}`;
+  }
+
+  /**
+   * Give a profile the handle its player chose. "taken" when another
+   * profile holds it. A chosen handle is kept across sign-ins instead of
+   * being derived again. Throws when the database cannot be asked.
+   */
+  async claimHandle(p: Profile, handle: string): Promise<"ok" | "taken"> {
+    if (p.handle !== handle && (await this.handleTaken(handle, p.key))) return "taken";
+    p.handle = handle;
+    p.handleChosen = true;
+    this.markDirty(p.key);
+    return "ok";
   }
 
   /** The profile behind a public handle, or null. */
@@ -1114,10 +1136,10 @@ export class ProfileStore {
              skin, bands, best_x, best_y, week, week_best, week_done, earned, flagged,
              streak, streak_last, freezes, eaten, near_total, bounty_total, prev_tier, season, season_best,
              shards, chests, crew, crown_until, sub, handle, avatar, achv,
-             week_runs, week_lives, banked_tier, season_tier, seasons, pending, updated)
+             week_runs, week_lives, banked_tier, season_tier, seasons, pending, handle_chosen, updated)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
              $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35,
-             $36, $37, $38, $39, $40, $41, now())
+             $36, $37, $38, $39, $40, $41, $42, now())
            ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, best = GREATEST(agencoil_profiles.best, EXCLUDED.best),
              kills = GREATEST(agencoil_profiles.kills, EXCLUDED.kills),
              games = GREATEST(agencoil_profiles.games, EXCLUDED.games),
@@ -1134,7 +1156,8 @@ export class ProfileStore {
              avatar = EXCLUDED.avatar, achv = agencoil_profiles.achv || EXCLUDED.achv,
              week_runs = EXCLUDED.week_runs, week_lives = EXCLUDED.week_lives,
              banked_tier = EXCLUDED.banked_tier, season_tier = EXCLUDED.season_tier,
-             seasons = EXCLUDED.seasons, pending = EXCLUDED.pending, updated = now()`,
+             seasons = EXCLUDED.seasons, pending = EXCLUDED.pending,
+             handle_chosen = EXCLUDED.handle_chosen, updated = now()`,
             [
               p.key,
               p.name,
@@ -1177,6 +1200,7 @@ export class ProfileStore {
               p.seasonTier,
               JSON.stringify(p.seasons),
               JSON.stringify(p.pending),
+              p.handleChosen,
             ],
           ),
         );

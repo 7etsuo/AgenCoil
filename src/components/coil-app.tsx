@@ -48,6 +48,27 @@ import {
   nextSteps,
   type Totals,
 } from "@/game/achievements";
+import {
+  HANDLE_INVALID,
+  HANDLE_NOT_LINKED,
+  HANDLE_OK,
+  HANDLE_TAKEN,
+  HANDLE_TOO_SOON,
+} from "@/game/protocol";
+
+/** What the arena said about the last name request, in the menu's words. */
+const HANDLE_NOTES: Record<number, string> = {
+  [HANDLE_OK]: "saved: that is your name in the arena and on your profile",
+  [HANDLE_INVALID]: "2 to 15 letters, numbers or underscores, with at least one letter",
+  [HANDLE_TAKEN]: "that name is taken",
+  [HANDLE_NOT_LINKED]: "sign in to choose a name",
+  [HANDLE_TOO_SOON]: "one moment, then try again",
+};
+
+/** The handle a typed name would become: no @, lower case, spaces as underscores. */
+function typedHandle(raw: string): string {
+  return raw.trim().replace(/^@/, "").toLowerCase().replace(/\s+/g, "_");
+}
 
 /** A short tag for the process a session is on, so friends can see they share one. */
 function arenaLabel(name: string): string {
@@ -229,6 +250,7 @@ export function CoilApp() {
     name: string;
     avatar: string;
   } | null>(null);
+  const [handleNote, setHandleNote] = useState<string | null>(null);
 
   useEffect(() => {
     const n = readNick() || `coil${(Math.random() * 90 + 10) | 0}`;
@@ -257,8 +279,8 @@ export function CoilApp() {
       .catch(() => setSignInReady(false));
   }, []);
 
-  // A signed-in player gets an arena ticket; their account name becomes the
-  // default nickname unless they already picked one.
+  // A signed-in player gets an arena ticket, which the engine hands to the
+  // arena at once so the account's profile (and chosen name) reach the menu.
   useEffect(() => {
     if (!signedIn) {
       setIdentity(null);
@@ -267,16 +289,39 @@ export function CoilApp() {
     let cancelled = false;
     mintIdentity()
       .then((t) => {
-        if (cancelled) return;
-        setIdentity(t);
-        // Signed in: the account handle is the name, in the arena and offline alike.
-        setNick(`@${t.handle}`.slice(0, 16));
+        if (!cancelled) setIdentity(t);
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
   }, [signedIn]);
+
+  useEffect(() => {
+    engineRef.current?.setIdentity(
+      identity ? { origin: window.location.origin, ticket: identity.ticket } : null,
+    );
+  }, [identity, engineReady]);
+
+  // Signed in: the account's handle is the name, in the arena and offline
+  // alike. The arena's word (a chosen handle) beats the site's derived default.
+  const accountHandle =
+    hud?.profile?.linked && hud.profile.handle ? hud.profile.handle : (identity?.handle ?? "");
+  useEffect(() => {
+    if (accountHandle) setNick(`@${accountHandle}`.slice(0, 16));
+  }, [accountHandle]);
+
+  useEffect(() => {
+    const r = hud?.handleResult;
+    if (r) setHandleNote(HANDLE_NOTES[r.status] ?? "could not save the name, try again");
+  }, [hud?.handleResult]);
+  const canRename = signedIn && identity !== null && Boolean(hud?.profile?.linked);
+  const nameChanged = canRename && typedHandle(nick) !== accountHandle;
+  const saveHandle = () => {
+    if (!nameChanged) return;
+    setHandleNote(null);
+    engineRef.current?.setHandle(typedHandle(nick));
+  };
 
   // The engine keeps `best` current; mirror it whenever the HUD updates so
   // unlocks show up on the next visit to the menu.
@@ -393,6 +438,8 @@ export function CoilApp() {
       }
     }
     const chosen = locked(skin) ? 0 : skin;
+    // A name typed but not yet saved goes with the play: the arena names the snake by it.
+    if (nameChanged) saveHandle();
     persist(nick, chosen, custom);
     try {
       localStorage.setItem(TRAIL_KEY, String(trail));
@@ -944,10 +991,18 @@ export function CoilApp() {
                 id="nick"
                 value={nick}
                 maxLength={16}
-                readOnly={signedIn && identity !== null}
-                title={signedIn && identity ? "your handle is your name in the arena" : undefined}
-                onChange={(e) => setNick(e.target.value)}
-                className={`h-12 flex-1 mt-1 h-11 w-full rounded-md border border-line bg-elevated px-3 text-base text-fg outline-none focus:border-accent ${signedIn && identity ? "text-muted" : ""}`}
+                title={canRename ? "your name in the arena and on your profile" : undefined}
+                onChange={(e) => {
+                  setNick(e.target.value);
+                  setHandleNote(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && nameChanged) {
+                    e.preventDefault();
+                    saveHandle();
+                  }
+                }}
+                className="h-12 flex-1 mt-1 h-11 w-full rounded-md border border-line bg-elevated px-3 text-base text-fg outline-none focus:border-accent"
               />
               <button
                 type="button"
@@ -958,6 +1013,25 @@ export function CoilApp() {
                 {verificationState === "verifying" ? "Checking…" : "Play"}
               </button>
             </div>
+            {canRename && (
+              <div className="mt-2 flex items-center gap-2 text-xs">
+                {nameChanged && (
+                  <button
+                    type="button"
+                    onClick={saveHandle}
+                    className="shrink-0 rounded-md border border-line px-3 py-1.5 text-muted hover:text-fg"
+                  >
+                    save name
+                  </button>
+                )}
+                <span className="text-subtle">
+                  {handleNote ??
+                    (nameChanged
+                      ? `you will be @${typedHandle(nick)}`
+                      : "signed in: this is your name in the arena and on your profile")}
+                </span>
+              </div>
+            )}
             {needsVerification && TURNSTILE_SITE_KEY ? (
               <div className="mt-5">
                 <Turnstile
