@@ -396,8 +396,10 @@ export function clamp(n: number, a: number, b: number): number {
 }
 
 export function wrapAngle(a: number): number {
-  while (a > Math.PI) a -= Math.PI * 2;
-  while (a < -Math.PI) a += Math.PI * 2;
+  if (!Number.isFinite(a)) return 0;
+  if (a > Math.PI || a < -Math.PI) a %= Math.PI * 2;
+  if (a > Math.PI) a -= Math.PI * 2;
+  if (a < -Math.PI) a += Math.PI * 2;
   return a;
 }
 
