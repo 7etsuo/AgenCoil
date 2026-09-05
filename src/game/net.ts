@@ -663,12 +663,20 @@ export class NetSession {
     switch (type) {
       case S2C.WELCOME: {
         const instance = r.str();
-        if (this.instance && this.instance !== instance) {
-          // Different server process: nothing we know is valid any more.
-          this.world.snakes = [];
-          this.world.clearFood();
-          this.buffers.clear();
-        }
+        // Each socket starts new delta bookkeeping, even on the same server.
+        // Old food cannot receive a deletion from a socket that never sent it.
+        const me = this.instance === instance ? this.world.player : undefined;
+        this.world.snakes = me ? [me] : [];
+        this.world.clearFood();
+        this.pendingEats.clear();
+        this.buffers.clear();
+        this.history = [];
+        this.serverSelf = null;
+        this.lastAck = 0;
+        this.offset = { x: 0, y: 0 };
+        this.lastSnapAt = 0;
+        this.gaps = [];
+        this.interpDelay = INTERP_MIN_MS;
         this.instance = instance;
         r.f32();
         r.u8();
@@ -1113,10 +1121,21 @@ export class NetSession {
         };
         this.reconcile(ack, e.x, e.y);
         const me = byId.get(id);
+        if (me) {
+          me.crown = e.crown;
+          me.boss = e.boss;
+          me.linked = e.linked;
+        }
         if (me && e.full) {
           // Our own standing, as the server dressed the snake at spawn; a
           // rise mid-life is a promotion the engine celebrates.
           if (me.league && league > me.league) this.hooks.onLeague(e.nid, me.league, league);
+          const look = unpackSkin(e.skin ?? 0);
+          me.name = e.name ?? "";
+          me.skin = look.skin;
+          me.trail = look.trail;
+          me.bands = e.bands;
+          me.level = level;
           me.league = league;
           me.might = might;
           me.finish = finish;
@@ -1132,7 +1151,7 @@ export class NetSession {
         continue;
       }
       let s = byId.get(id);
-      if (e.full || !s) {
+      if (!s) {
         if (!e.full) continue; // never seen it whole; the next snapshot will be full
         const look = unpackSkin(e.skin ?? 0);
         s = {
@@ -1177,6 +1196,14 @@ export class NetSession {
       s.linked = e.linked;
       if (e.full) {
         if (s.league && league > s.league) this.hooks.onLeague(e.nid, s.league, league);
+        // Refresh metadata without jumping ahead to the server's position
+        // or throwing away the samples currently being interpolated.
+        const look = unpackSkin(e.skin ?? 0);
+        s.name = e.name ?? "";
+        s.skin = look.skin;
+        s.trail = look.trail;
+        s.bands = e.bands;
+        s.level = level;
         s.league = league;
         s.might = might;
         s.finish = finish;

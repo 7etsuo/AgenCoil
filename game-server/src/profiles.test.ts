@@ -174,6 +174,35 @@ test("two accounts wanting one handle get distinct handles", async () => {
   assert.equal(b.handle, "tetsuo_2");
 });
 
+test("a new best during a rank query gets its own answer and cannot cache the old rank", async () => {
+  const pending = new Map<number, (n: number) => void>();
+  let counts = 0;
+  const pool = {
+    query: async (sql: string, args: unknown[] = []) => {
+      if (!sql.includes("SELECT count(*)")) return { rows: [], rowCount: 0 };
+      counts++;
+      return new Promise((resolve) => {
+        pending.set(Number(args[0]), (n) => resolve({ rows: [{ n: String(n) }], rowCount: 1 }));
+      });
+    },
+  } as unknown as pg.Pool;
+  const store = new ProfileStore(pool);
+  const p = await store.load("changing-rank", "ranked");
+  p.best = 300;
+  const old = store.rank(p);
+  await new Promise((resolve) => setImmediate(resolve));
+  p.best = 900;
+  const fresh = store.rank(p);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(counts, 2);
+  pending.get(900)!(0);
+  assert.equal(await fresh, 1);
+  pending.get(300)!(4);
+  assert.equal(await old, 5);
+  assert.equal(await store.rank(p), 1);
+  assert.equal(counts, 2, "the old result must not replace the new best's cache entry");
+});
+
 test("achievements are awarded once and milestones follow the totals", async () => {
   const store = new ProfileStore();
   const p = await store.load("d", "x");
@@ -358,6 +387,7 @@ test("banking follows the season's ladder: three lives over a tier's cutoff bank
   assert.equal(r.banked, 5, "450 is Diamond on a ladder that puts Diamond at 400");
   assert.equal(p.bankedTier, 5);
 });
+
 test("the character level is seeded once from lifetime totals, persists, and only ever climbs", async () => {
   const { PGlite } = (await import("../../node_modules/@electric-sql/pglite/dist/index.js")) as {
     PGlite: new () => {
@@ -405,6 +435,7 @@ test("the character level is seeded once from lifetime totals, persists, and onl
     await db.close();
   }
 });
+
 test("the wardrobe: pieces are granted once, duplicates pay scales, equips need ownership and the right slot, the shelf sells", async () => {
   const store = new ProfileStore();
   const p = await store.load("dev-wardrobe", "dresser");

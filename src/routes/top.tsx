@@ -38,13 +38,17 @@ function TopPage() {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     setRows(null);
     setError(false);
-    fetch(`${serverHttpUrl()}?top=${kind}`)
-      .then((r) => r.json())
+    fetch(`${serverHttpUrl()}?top=${kind}`, { signal: controller.signal })
+      .then((r) => {
+        if (!r.ok) throw new Error(String(r.status));
+        return r.json();
+      })
       .then((j: { rows: Row[]; week?: string; season?: number; cutoffs?: number[] }) => {
-        if (Array.isArray(j.cutoffs) && j.cutoffs.length === LEAGUES.length) setCutoffs(j.cutoffs);
         if (cancelled) return;
+        if (Array.isArray(j.cutoffs) && j.cutoffs.length === LEAGUES.length) setCutoffs(j.cutoffs);
         setRows(j.rows ?? []);
         setWeek(j.week ?? "");
         setSeason(j.season ?? 0);
@@ -52,6 +56,7 @@ function TopPage() {
       .catch(() => !cancelled && setError(true));
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [kind]);
 

@@ -42,7 +42,7 @@ Tests are plain `node --test`. Script tests live beside their module as `scripts
 
 `npm run e2e` is the suite that matters for the game. `e2e/world.test.mjs` bundles the shared simulation with esbuild and checks the collision rules and the slither.io tuning directly, with no browser; `e2e/arena.test.mjs` boots the arena server on 8199 and Vite on 8198 (`e2e/helpers.mjs`), then checks the trail, a shared world across two tabs, reload resume, a server-replacement hop, the offline fallback, a 4x CPU-throttled phone frame rate, and the status endpoint. Run it before touching netcode.
 
-`npm test` currently fails 16 script tests on a fresh checkout because they read `.grok/skills/*` files that only exist in the sandbox. That is the baseline, not a regression signal. `npm run lint` is clean; built output under `game-server/dist` and `game-server/.vercel` is ignored by the config.
+`npm test` passes on a fresh checkout: the script tests that read `.grok/skills/*` (files that only exist in the sandbox) skip themselves when those files are absent. `npm run lint` is clean; built output under `game-server/dist` and `game-server/.vercel` is ignored by the config.
 
 `cd game-server && npm test` also runs `src/events.test.ts` (the metrics SQL against an in-process PGlite) and `src/game-server.test.ts`, which boots a real `GameServer` on a random port and drives it with `ws` sockets (reconnect with a resume token, grace-period cleanup, token replay). It needs no database or Turnstile secret.
 

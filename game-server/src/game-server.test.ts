@@ -1163,6 +1163,27 @@ test("food sync keeps a client's orbs exactly equal to the server's orbs in its 
     await sync();
     same("after orbs cross the view edge");
     assert.ok(!held.has(leaver.id!) && held.has(far.id!));
+    // The old cell leaves the view while its orb moves to a cell still on screen.
+    const follower = world.addFood({ x: 48, y: 48, v: 1, c: 0, r: 4, k: 0 });
+    view(0, 0);
+    await sync();
+    const beforeFollow = dels.length;
+    world.moveFood(follower, 2448, 48);
+    view(2400, 0);
+    await sync();
+    same("after following an orb out of its previous cell");
+    assert.ok(!dels.slice(beforeFollow).includes(follower.id!));
+    // Dense remains exceed one message's add cap and resume on the next sync.
+    const cluster = Array.from({ length: 1800 }, () =>
+      world.addFood({ x: 2460, y: 48, v: 1, c: 0, r: 4, k: 2 }),
+    );
+    await sync();
+    assert.ok(held.size < expected().size, "the first message respects the add cap");
+    await sync();
+    same("after a capped dense cluster finishes syncing");
+    for (let i = 0; i < cluster.length; i += 3) world.removeFood(cluster[i]!);
+    await sync();
+    same("after eating from a dense cell");
     await p.close();
   } finally {
     await arena.stop();
@@ -1170,6 +1191,83 @@ test("food sync keeps a client's orbs exactly equal to the server's orbs in its 
 });
 
 /** Parse one SNAP end to end for a protocol version; throws or leaves bytes on a layout mismatch. */
+test("snapshots respect the configured rate and halve distant updates under load", async () => {
+  const arena = await startArena();
+  try {
+    const p = await joinArena(arena.url, "dev-cadence", "watcher");
+    const game = arena.game as unknown as {
+      clients: Set<{
+        sid: string | null;
+        view: { cx: number; cy: number; hw: number; hh: number };
+        known: Set<string>;
+        refresh: Set<string>;
+        ws: { bufferedAmount: number; send(bytes: Uint8Array): void };
+      }>;
+      stopLoop(): void;
+      step(dt: number): void;
+      stepMs: number;
+      snapshotBudget: number;
+      snapshotCount: number;
+      nidOf(id: string): number;
+    };
+    game.stopLoop();
+    const client = [...game.clients][0]!;
+    arena.game.world.snakes = [];
+    arena.game.world.step = () => {};
+    const near = arena.game.world.spawnSnake("near-test", "near", 0, false);
+    const far = arena.game.world.spawnSnake("far-test", "far", 0, false);
+    for (const [s, x] of [
+      [near, 0],
+      [far, 950],
+    ] as const) {
+      s.x = x;
+      s.y = 0;
+      s.angle = 0;
+      s.points = [];
+      arena.game.world.ensureTrail(s);
+    }
+    client.sid = null;
+    client.view = { cx: 0, cy: 0, hw: 1000, hh: 600 };
+    client.known = new Set([near.id, far.id]);
+    client.refresh.clear();
+    const nearNid = game.nidOf(near.id);
+    const farNid = game.nidOf(far.id);
+    let snaps = 0;
+    let nearUpdates = 0;
+    let farUpdates = 0;
+    const send = client.ws.send;
+    client.ws.send = (bytes) => {
+      const r = new Reader(bytes);
+      if (r.u8() !== S2C.SNAP) return;
+      snaps++;
+      const entries = parseSnap(r, 2);
+      nearUpdates += Number(entries.some((e) => e.nid === nearNid));
+      farUpdates += Number(entries.some((e) => e.nid === farNid));
+    };
+    try {
+      for (const [heavy, expected] of [
+        [false, 60],
+        [true, 40],
+      ] as const) {
+        snaps = nearUpdates = farUpdates = 0;
+        game.snapshotBudget = game.snapshotCount = 0;
+        for (let i = 0; i < 80; i++) {
+          game.stepMs = heavy ? 20 : 0;
+          game.step(1 / 40);
+        }
+        assert.equal(snaps, expected, `snapshot count under ${heavy ? "heavy" : "normal"} load`);
+        assert.equal(nearUpdates, expected);
+        assert.equal(farUpdates, expected / 2);
+      }
+    } finally {
+      client.ws.send = send;
+    }
+    await p.close();
+  } finally {
+    await arena.stop();
+  }
+});
+
 function parseSnap(r: InstanceType<typeof Reader>, proto: number) {
   r.u32();
   r.u32();
@@ -1404,6 +1502,7 @@ test("crossing a league length mid-life is announced and changes the ring for ev
     await arena.stop();
   }
 });
+
 test("experience: growth is booked as the snake grows, a kill pays, levels pay scales, and the life's line sums it", async () => {
   const arena = await startArena();
   try {
@@ -1502,6 +1601,7 @@ test("experience: growth is booked as the snake grows, a kill pays, levels pay s
     await arena.stop();
   }
 });
+
 /** Read a WARDROBE message: status, the five equipped ids, the owned ids. */
 function parseWardrobe(r: InstanceType<typeof Reader>): {
   status: number;
@@ -1650,6 +1750,7 @@ test("the wardrobe: protocol 6 entries carry the loadout, equips need ownership,
     await arena.stop();
   }
 });
+
 test("loot orbs: a big player's death by another player drops one, never twice in ten minutes, never for party mates, agents or bots; eating it rolls a piece", async () => {
   const arena = await startArena();
   try {

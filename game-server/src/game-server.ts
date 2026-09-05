@@ -546,6 +546,8 @@ export class GameServer {
   private lootedAt = new Map<string, number>();
   private nextPlayer = 1;
   private tick = 0;
+  private snapshotBudget = 0;
+  private snapshotCount = 0;
   private timer: NodeJS.Timeout | null = null;
   private lastActivity = Date.now();
   private startedAt = Date.now();
@@ -2324,10 +2326,15 @@ export class GameServer {
       this.world.hunger = mode === MODE_HUNGER ? HUNGER_RATE : 0;
     }
     const heavy = this.stepMs > 6;
-    const snapEvery = Math.max(1, Math.round(SERVER_TICK_HZ / (heavy ? 20 : SNAPSHOT_HZ)));
     const foodEvery = Math.max(1, Math.round(SERVER_TICK_HZ / FOOD_SYNC_HZ));
-    if (this.tick % snapEvery === 0)
+    // Fractional tick intervals must carry forward: rounding 40 / 30 to
+    // one sends 40 snapshots per second instead of the configured 30.
+    this.snapshotBudget += heavy ? 20 : SNAPSHOT_HZ;
+    if (this.snapshotBudget >= SERVER_TICK_HZ) {
+      this.snapshotBudget -= SERVER_TICK_HZ;
+      this.snapshotCount++;
       for (const c of this.clients) if (this.canSend(c)) this.sendSnapshot(c);
+    }
     if (this.tick % foodEvery === 0)
       for (const c of this.clients) if (this.canSend(c)) this.sendFood(c);
     if (this.tick % Math.round(SERVER_TICK_HZ / 2) === 0) this.sendStatsAll();
@@ -2938,7 +2945,7 @@ export class GameServer {
     // Snakes near the centre of the view update every snapshot; those out in
     // the margin update every other one, which halves traffic on a zoomed-out
     // screen full of bodies. The client's interpolation tolerates the gap.
-    const half = this.tick % 2 === 0;
+    const half = this.snapshotCount % 2 === 0;
     const shrink = -Math.max(c.view.hw, c.view.hh) * 0.2;
     const visible: Snake[] = [];
     const seen = new Set<string>();
@@ -3012,7 +3019,12 @@ export class GameServer {
     const leave = (key: number): void => {
       const cell = c.foodCells.get(key);
       if (!cell) return;
-      for (const id of cell.ids) drop(id);
+      for (const id of cell.ids) {
+        const f = world.foodById.get(id);
+        // The old cell can leave while its orb stays on screen. Keep the
+        // client's copy until the destination cell adopts it below.
+        if (!f || !inRange(Math.floor(f.x / CELL), Math.floor(f.y / CELL))) drop(id);
+      }
       c.foodCells.delete(key);
     };
     const prev = c.foodRect;
@@ -3059,9 +3071,12 @@ export class GameServer {
       }
       const bucket = world.foodsInCell(key);
       if (bucket) {
+        // Dense remains clusters need constant-time membership checks.
+        // Small cells keep the array to avoid allocating a set per orb.
+        const held = bucket.length > 16 ? new Set(cell.ids) : null;
         for (const f of bucket) {
           const id = f.id!;
-          if (cell.ids.includes(id)) continue;
+          if (held ? held.has(id) : cell.ids.includes(id)) continue;
           if (c.sentFood.has(id)) {
             cell.ids.push(id);
             continue;

@@ -73,8 +73,9 @@ function ProfilePage() {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     setState("loading");
-    fetch(`${serverHttpUrl()}?profile=${encodeURIComponent(handle)}`)
+    fetch(`${serverHttpUrl()}?profile=${encodeURIComponent(handle)}`, { signal: controller.signal })
       .then(async (r) => {
         if (r.status === 404) return null;
         if (!r.ok) throw new Error(String(r.status));
@@ -94,6 +95,7 @@ function ProfilePage() {
       .catch(() => !cancelled && setState("error"));
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [handle]);
 

@@ -211,6 +211,7 @@ export class Reader {
   }
   str(): string {
     const n = this.u8();
+    if (n > this.remaining) throw new RangeError("Truncated protocol string");
     const s = dec.decode(this.bytes.subarray(this.pos, this.pos + n));
     this.pos += n;
     return s;

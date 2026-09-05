@@ -1470,14 +1470,16 @@ export class ProfileStore {
     if (p.best <= 0) return 0;
     const hit = this.rankCache.get(p.key);
     if (hit && hit.best === p.best && now - hit.at < RANK_CACHE_MS) return hit.rank;
-    const pending = this.rankPending.get(p.key);
+    const pendingKey = `${p.key}:${p.best}`;
+    const pending = this.rankPending.get(pendingKey);
     if (pending) return pending;
-    const task = this.rankNow(p, now).finally(() => this.rankPending.delete(p.key));
-    this.rankPending.set(p.key, task);
+    const task = this.rankNow(p, now).finally(() => this.rankPending.delete(pendingKey));
+    this.rankPending.set(pendingKey, task);
     return task;
   }
 
   private async rankNow(p: Profile, now: number): Promise<number> {
+    const best = p.best;
     let rank = 0;
     let fromDb = false;
     if (this.pool) {
@@ -1486,7 +1488,7 @@ export class ProfileStore {
         const r = await retryDb(() =>
           this.pool!.query<{ n: string }>(
             `SELECT count(*)::text AS n FROM agencoil_profiles WHERE best > $1`,
-            [p.best],
+            [best],
           ),
         );
         rank = Number(r.rows[0]?.n ?? 0) + 1;
@@ -1497,10 +1499,10 @@ export class ProfileStore {
     }
     if (!fromDb) {
       let above = 0;
-      for (const o of this.cache.values()) if (o.best > p.best) above++;
+      for (const o of this.cache.values()) if (o.best > best) above++;
       rank = above + 1;
     }
-    this.rankCache.set(p.key, { at: now, best: p.best, rank });
+    if (p.best === best) this.rankCache.set(p.key, { at: now, best, rank });
     if (this.rankCache.size > 5000) {
       const oldest = this.rankCache.keys().next().value;
       if (oldest !== undefined) this.rankCache.delete(oldest);
