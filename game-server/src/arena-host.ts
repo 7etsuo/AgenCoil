@@ -135,7 +135,11 @@ export class ArenaHost {
   private lastRows: ArenaRow[] = [];
   private lastRowsAt = 0;
   private ready: Promise<void> | null = null;
-  /** Sandbox control; null where there is no token to call the API with (tests, local runs). */
+  /**
+   * Sandbox control: the SDK on the platform (it finds the function's OIDC
+   * token itself, at call time; the token is not an environment variable at
+   * module load), a stub in tests, null in local runs.
+   */
   private readonly sandboxes: SandboxControl | null;
 
   constructor(
@@ -144,8 +148,7 @@ export class ArenaHost {
     sandboxes?: SandboxControl,
   ) {
     this.enabled = Boolean(pool && env.VERCEL);
-    this.sandboxes =
-      sandboxes ?? (env.VERCEL_OIDC_TOKEN || env.VERCEL_TOKEN ? sdkSandboxes() : null);
+    this.sandboxes = sandboxes ?? (env.VERCEL_ENV ? sdkSandboxes() : null);
   }
 
   /** Tables exist; a failed attempt (cold Neon connection) is retried next call. */
