@@ -62,7 +62,7 @@ import {
   writeSnakeEntry,
 } from "../../src/game/protocol";
 import { DailyBoard } from "./daily";
-import { ProfileStore, type Profile } from "./profiles";
+import { ProfileStore, rollLine, type Profile } from "./profiles";
 import {
   MODE_DOUBLE_REMAINS,
   MODE_HUNGER,
@@ -217,6 +217,13 @@ const IDENTITY_TTL_MS = 10 * 60_000;
 const IDENTITY_CACHE_MAX = 5000;
 /** Handle requests that reach the database are spaced at least this far apart per socket. */
 const HANDLE_COOLDOWN_MS = 1000;
+/**
+ * Notice kinds beyond the feed line (0), bounty (1), reward (2) and comeback
+ * (3): a promotion for the promoted player alone (the client draws the
+ * moment itself from the league byte), and a roll card at 10 plus the tier.
+ */
+const NOTICE_PROMOTED = 4;
+const NOTICE_ROLL = 10;
 /**
  * The view rectangle a client may ask for, in world units from its centre.
  * There is no player zoom; the camera follows snake size down to a scale of
@@ -1342,8 +1349,11 @@ export class GameServer {
     // Rewards a week or season roll queued are told now, while the player is looking.
     const pending = this.profiles.drainPending(p);
     for (const line of pending.lines) {
-      this.notice(client, 2, line);
-      this.events.log("reward", { key: client.key, s: line.slice(0, 80) });
+      // A roll card: kind 10 plus the tier, which the menu shows until it is
+      // dismissed. Older clients show any kind they do not know as a feed line.
+      const { tier, text } = rollLine(line);
+      this.notice(client, NOTICE_ROLL + Math.min(LEAGUES.length, tier), text);
+      this.events.log("reward", { key: client.key, s: text.slice(0, 80) });
     }
     for (const id of pending.achv) this.achieve(client, id);
   }
@@ -1737,9 +1747,12 @@ export class GameServer {
       const runs = Math.min(LEAGUE_BANK_RUNS, (c.profile?.weekRuns[tier] ?? 0) + 1);
       this.notice(
         c,
-        2,
+        NOTICE_PROMOTED,
         `reached ${name} · finish this life to count it (${runs}/${LEAGUE_BANK_RUNS} to bank ${name})`,
       );
+      // Gold and up is news for the whole arena; Silver stays private.
+      if (tier >= 2)
+        for (const o of this.clients) if (o !== c) this.notice(o, 0, `${s.name} reached ${name}`);
       this.events.log("promoted", { key: c.key, s: name, n: Math.floor(s.mass) });
     }
   }

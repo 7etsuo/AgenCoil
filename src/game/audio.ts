@@ -114,6 +114,13 @@ export class GameAudio {
     setTimeout(() => this.blip(880, 0.12, 0.09, "triangle"), 70);
   }
 
+  /** A promotion: three rising sine notes, unlike the kill's two triangle notes. */
+  rankUp(): void {
+    this.blip(523, 0.12, 0.09, "sine");
+    setTimeout(() => this.blip(659, 0.12, 0.09, "sine"), 90);
+    setTimeout(() => this.blip(784, 0.2, 0.1, "sine"), 180);
+  }
+
   /** A slow pad with a drifting filter and the odd soft note. */
   startMusic(): void {
     if (this.muted || !this.ctx || this.music) return;

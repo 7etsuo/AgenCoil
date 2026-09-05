@@ -170,6 +170,12 @@ export interface TopEntry {
   avatar: string;
 }
 
+/** Split a pending roll line into the tier it is about and its text. */
+export function rollLine(line: string): { tier: number; text: string } {
+  const m = /^#(\d) (.*)$/s.exec(line);
+  return m ? { tier: Number(m[1]), text: m[2]! } : { tier: 0, text: line };
+}
+
 export interface ChallengeView {
   challenge: Challenge;
   progress: number;
@@ -531,10 +537,11 @@ export class ProfileStore {
         for (let i = 0; i < reward.chests; i++) got.push(this.openChest(p));
         if (reward.shards) got.push(this.addShards(p, reward.shards));
         if (reward.aura) got.push(`the ${name.toLowerCase()} aura around your head this week`);
-        p.pending.push(`last week you banked ${name}: ${got.join("; ")}`);
+        // A "#tier " prefix tells the client which crest to draw on the card.
+        p.pending.push(`#${finish} last week you banked ${name}: ${got.join("; ")}`);
       } else if (p.weekLives > 0) {
         p.pending.push(
-          "last week banked no tier: three lives at a tier's length bank it for rewards",
+          "#0 last week banked no tier: three lives at a tier's length bank it for rewards",
         );
       }
       p.seasonTier = Math.max(p.seasonTier, finish);
@@ -553,7 +560,9 @@ export class ProfileStore {
         p.seasons.push([p.season, p.seasonTier]);
         if (p.seasons.length > 50) p.seasons.splice(0, p.seasons.length - 50);
         const name = LEAGUES[p.seasonTier - 1]!.name;
-        p.pending.push(`season ${p.season} finished in ${name}: it stays on your profile`);
+        p.pending.push(
+          `#${p.seasonTier} season ${p.season} finished in ${name}: it stays on your profile`,
+        );
         for (const id of seasonFeats(p.seasonTier)) if (this.award(p, id)) p.pendingAchv.push(id);
       }
       p.season = season;
@@ -696,7 +705,10 @@ export class ProfileStore {
     return id && this.award(p, id) ? id : null;
   }
 
-  /** Reward notices and toasts queued by a week or season roll; cleared once taken. */
+  /**
+   * Reward notices and toasts queued by a week or season roll; cleared once
+   * taken. Lines start with "#tier " (0 for none), see `rollLine`.
+   */
   drainPending(p: Profile): { lines: string[]; achv: string[] } {
     const lines = p.pending;
     const achv = p.pendingAchv;

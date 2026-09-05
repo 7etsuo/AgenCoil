@@ -774,6 +774,20 @@ test("crossing a league length mid-life is announced and changes the ring for ev
       if (e) seen = true;
     }
     assert.ok(seen, "a full entry with league 2 reached the other client");
+    // Silver was private; Gold is announced to everyone else in the arena.
+    me.mass = 850;
+    const line = await (async () => {
+      const until = Date.now() + 3000;
+      while (Date.now() < until) {
+        const r = await watcher.next(S2C.NOTICE, 1500);
+        const kind = r.u8();
+        const text = r.str();
+        if (/reached Gold/.test(text)) return { kind, text };
+      }
+      throw new Error("the watcher never heard about Gold");
+    })();
+    assert.equal(line.kind, 0, "a plain feed line for everyone");
+    assert.equal(line.text, "climber reached Gold");
     await p.close();
     await watcher.close();
   } finally {

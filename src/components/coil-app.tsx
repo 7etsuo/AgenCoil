@@ -225,6 +225,7 @@ export function CoilApp() {
   const [fullscreen, setFullscreen] = useState(false);
   const lastPhase = useRef<string>("menu");
   const lastNotice = useRef<string | null>(null);
+  const lastPromo = useRef(false);
   const engineReady = hud !== null;
   const [trail, setTrail] = useState(0);
   const [deathFx, setDeathFx] = useState(0);
@@ -341,8 +342,10 @@ export function CoilApp() {
     };
     if (hud.phase === "dead" && lastPhase.current !== "dead") vibrate(90);
     if (hud.killNotice && hud.killNotice !== lastNotice.current) vibrate(25);
+    if (hud.promo && !lastPromo.current) vibrate(40);
     lastPhase.current = hud.phase;
     lastNotice.current = hud.killNotice;
+    lastPromo.current = Boolean(hud.promo);
   }, [hud]);
 
   // Safe-area insets, measured from a probe element, so canvas-drawn HUD
@@ -768,10 +771,29 @@ export function CoilApp() {
               </div>
             </div>
           )}
-          {hud.hint && (
-            <div className="absolute left-1/2 top-[calc(12.4rem+env(safe-area-inset-top))] w-max max-w-[80vw] -translate-x-1/2 rounded-full border border-accent/50 bg-bg/85 px-4 py-1.5 text-center text-sm text-fg sm:top-[calc(3.2rem+env(safe-area-inset-top))]">
-              {hud.hint}
+          {hud.promo ? (
+            <div
+              className="snek-pop absolute left-1/2 top-[calc(12.4rem+env(safe-area-inset-top))] flex w-max max-w-[80vw] -translate-x-1/2 flex-col items-center gap-1 rounded-xl border bg-bg/85 px-5 py-3 text-center sm:top-[calc(3.2rem+env(safe-area-inset-top))]"
+              style={{ borderColor: `${LEAGUE_COLORS[hud.promo.tier - 1]}99` }}
+            >
+              <Crest tier={hud.promo.tier} size={40} />
+              <div
+                className="text-3xl font-semibold leading-none tracking-tight"
+                style={{ color: LEAGUE_COLORS[hud.promo.tier - 1] }}
+              >
+                {LEAGUES[hud.promo.tier - 1]?.name}
+              </div>
+              <div className="text-xs text-muted">
+                finish this life to count it · {hud.promo.runs}/{LEAGUE_BANK_RUNS} to bank{" "}
+                {LEAGUES[hud.promo.tier - 1]?.name}
+              </div>
             </div>
+          ) : (
+            hud.hint && (
+              <div className="absolute left-1/2 top-[calc(12.4rem+env(safe-area-inset-top))] w-max max-w-[80vw] -translate-x-1/2 rounded-full border border-accent/50 bg-bg/85 px-4 py-1.5 text-center text-sm text-fg sm:top-[calc(3.2rem+env(safe-area-inset-top))]">
+                {hud.hint}
+              </div>
+            )
           )}
           {hud.arenaMode.id > 0 && (
             <div className="absolute left-1/2 bottom-[calc(1.25rem+env(safe-area-inset-bottom))] -translate-x-1/2 rounded-full border border-[#9b8cff]/60 bg-bg/80 px-3 py-1 text-xs text-[#c9bfff]">
@@ -937,6 +959,9 @@ export function CoilApp() {
                   </div>
                 );
               })()}
+            {hud?.roll && (
+              <RollCard roll={hud.roll} onDismiss={() => engineRef.current?.dismissRoll()} />
+            )}
             {hud?.profile && (
               <div className="mt-3 flex flex-wrap gap-1.5 text-[11px]">
                 <Chip>Lv{levelOf(hud.profile.eaten)}</Chip>
@@ -1541,201 +1566,229 @@ export function CoilApp() {
         </div>
       )}
       {phase === "dead" && hud && !hud.deathBeat && (
-        <div data-ui className="absolute inset-0 flex items-center justify-center p-4">
-          <div className="w-full max-w-sm rounded-xl border border-line bg-surface/92 p-6 text-center">
-            <p className="text-xs tracking-[0.2em] text-muted uppercase">down</p>
-            <h2 className="mt-2 text-3xl font-semibold tracking-tight">
-              {hud.nearWin ? "so close" : "you popped"}
-            </h2>
-            <p className="mt-2 text-sm text-muted">
-              {hud.nearWin ? `${hud.nearWin} · ` : ""}
-              {hud.deathReason}
-            </p>
-            {hud.banked > 0 && (
-              <p className="mt-1 text-xs text-[#bfe9ff]">
-                your wisp banked +{hud.banked} starting length for this life
+        <div data-ui className="absolute inset-0 overflow-y-auto p-4">
+          {/* Taller than a phone screen: the card scrolls from its top instead of losing it. */}
+          <div className="flex min-h-full items-center justify-center">
+            <div className="w-full max-w-sm rounded-xl border border-line bg-surface/92 p-6 text-center">
+              <p className="text-xs tracking-[0.2em] text-muted uppercase">down</p>
+              <h2 className="mt-2 text-3xl font-semibold tracking-tight">
+                {hud.nearWin ? "so close" : "you popped"}
+              </h2>
+              <p className="mt-2 text-sm text-muted">
+                {hud.nearWin ? `${hud.nearWin} · ` : ""}
+                {hud.deathReason}
               </p>
-            )}
-            {hud.profile &&
-              (() => {
-                const tier = leagueOf(hud.score);
-                if (tier <= 0) return null;
-                const runs = hud.profile.weekRuns[tier] ?? 0;
-                const name = LEAGUES[tier]!.name;
-                return (
-                  <p
-                    className="mt-2 flex items-center justify-center gap-2 text-xs"
-                    style={{ color: LEAGUE_COLORS[tier] }}
-                  >
-                    <Crest tier={tier + 1} size={24} />
-                    <span>
-                      {runs >= LEAGUE_BANK_RUNS
-                        ? `${name} is banked for the week`
-                        : `a ${name} run · ${runs}/${LEAGUE_BANK_RUNS} to bank it`}
-                    </span>
-                    <BankSlots tier={tier + 1} runs={runs} />
-                  </p>
-                );
-              })()}
-            {hud.replay && hud.replay.length > 1 && (
-              <div className="mt-4 overflow-hidden rounded-lg border border-line">
-                <ReplayView frames={hud.replay} at={hud.deathAt} />
-              </div>
-            )}
-            {hud.deathRank > 0 && (
-              <p className="mt-1 text-xs text-subtle">
-                you were #{hud.deathRank} of {hud.deathCount}
-                {hud.firstLife && hud.deathCount > hud.deathRank
-                  ? ` · you beat ${hud.deathCount - hud.deathRank}. one more?`
-                  : ""}
-              </p>
-            )}
-            <div className="mt-5 grid grid-cols-3 gap-2 text-center tabular-nums">
-              <div className="rounded-lg border border-line bg-elevated/70 px-2 py-2">
-                <div className="text-xs text-muted">length</div>
-                <div className="text-xl font-semibold">{hud.score}</div>
-              </div>
-              <div className="rounded-lg border border-line bg-elevated/70 px-2 py-2">
-                <div className="text-xs text-muted">kills</div>
-                <div className="text-xl font-semibold">{hud.kills}</div>
-              </div>
-              <div className="rounded-lg border border-line bg-elevated/70 px-2 py-2">
-                <div className="text-xs text-muted">best</div>
-                <div className="text-xl font-semibold">{hud.best}</div>
-              </div>
-            </div>
-            {hud.unlocked.length > 0 && (
-              <div className="mt-3 rounded-lg border border-[#f0c14a]/50 bg-[#f0c14a]/10 px-3 py-2 text-left text-xs">
-                <div className="text-[10px] tracking-[0.2em] text-[#f0c14a] uppercase">
-                  unlocked
-                </div>
-                {hud.unlocked.map((id) => {
-                  const a = ACHIEVEMENT_BY_ID.get(id);
-                  return a ? (
-                    <div key={id} className="text-[#f0c14a]">
-                      {a.icon} {a.name} <span className="text-muted">· {a.desc}</span>
-                    </div>
-                  ) : null;
-                })}
-              </div>
-            )}
-            {hud.profile &&
-              (() => {
-                const steps = nextSteps(totalsOf(hud.profile), new Set(hud.profile.achv), 2);
-                return steps.length ? (
-                  <ul className="mt-2 space-y-0.5 text-left text-xs text-muted">
-                    {steps.map((s) => (
-                      <li key={s.a.id} className="flex justify-between">
-                        <span>
-                          {s.a.icon} {(s.a.target ?? 0) - Math.min(s.have, s.a.target ?? 0)} more to{" "}
-                          {s.a.name}
-                        </span>
-                        <span className="tabular-nums text-subtle">
-                          {Math.min(s.have, s.a.target ?? 0)}/{s.a.target}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null;
-              })()}
-            {authEnabled && signInReady && !signedIn && (
-              <button
-                type="button"
-                onClick={() =>
-                  void signIn("grok-x", {
-                    callbackURL: window.location.pathname + window.location.search,
-                  })
-                }
-                className="mt-3 h-10 w-full rounded-lg border border-line text-sm text-muted hover:text-fg"
-              >
-                Sign in with X to keep your stats
-              </button>
-            )}
-            {hud.rematch && (
-              <button
-                type="button"
-                onClick={() => engineRef.current?.respawn(false, true)}
-                className="mt-5 h-12 w-full rounded-lg border border-[#ff6b8a] bg-[#ff6b8a]/15 font-medium text-[#ffb3c1] active:scale-[0.98]"
-              >
-                Rematch · spawn next to {hud.rematch.name}
-              </button>
-            )}
-            {hud.comebackLeft > 0 && (
-              <button
-                type="button"
-                onClick={() => engineRef.current?.respawn(true)}
-                className="mt-5 h-12 w-full rounded-lg border border-[#f0c14a] bg-[#f0c14a]/15 font-medium text-[#f0c14a] active:scale-[0.98]"
-              >
-                Rise again with a quarter of your length · {hud.comebackLeft}s
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => engineRef.current?.respawn()}
-              className={`${hud.comebackLeft > 0 || hud.rematch ? "mt-2" : "mt-6"} h-12 w-full rounded-lg bg-accent font-medium text-accent-fg active:scale-[0.98] ${hud.nearWin ? "h-14 text-lg shadow-[0_0_28px_rgba(215,221,232,0.35)]" : ""}`}
-            >
-              {hud.nearWin ? "Run it back" : "Play again"}
-            </button>
-            {hud.challenges.length > 0 && (
-              <ul className="mt-3 space-y-0.5 text-left text-xs text-muted">
-                {hud.challenges.map((c) => (
-                  <li key={c.id} className="flex justify-between">
-                    <span className={c.done ? "text-fg" : ""}>
-                      {c.done ? "✓ " : ""}
-                      {c.text}
-                    </span>
-                    <span className="tabular-nums text-subtle">
-                      {Math.min(c.progress, c.target)}/{c.target}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {hud.watchable.length > 0 && (
-              <div className="mt-3 flex flex-wrap items-center justify-center gap-2 text-xs text-muted">
-                <Eye size={14} />
-                {hud.watchable.map((w) => (
-                  <button
-                    key={w.nid}
-                    type="button"
-                    onClick={() => engineRef.current?.watch(hud.watching === w.nid ? null : w.nid)}
-                    className={`rounded-full border px-2.5 py-1 ${hud.watching === w.nid ? "border-accent text-fg" : "border-line hover:text-fg"}`}
-                  >
-                    {w.name}
-                  </button>
-                ))}
-              </div>
-            )}
-            <button
-              type="button"
-              onClick={() => void share()}
-              className="mt-2 flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-line text-sm text-muted hover:text-fg"
-            >
-              <Share2 size={16} /> {shared ? "copied" : "share your run"}
-            </button>
-            <div className="mt-2 flex gap-2">
+              {hud.banked > 0 && (
+                <p className="mt-1 text-xs text-[#bfe9ff]">
+                  your wisp banked +{hud.banked} starting length for this life
+                </p>
+              )}
+              {hud.profile &&
+                (() => {
+                  // The rank row: where the life started and where it ended, and the bank.
+                  const tier = leagueOf(hud.score) + 1;
+                  const from = Math.min(hud.spawnTier || 1, tier);
+                  const runs = hud.profile.weekRuns[tier - 1] ?? 0;
+                  const name = LEAGUES[tier - 1]!.name;
+                  return (
+                    <p
+                      className="mt-2 flex flex-wrap items-center justify-center gap-2 text-xs"
+                      style={{ color: LEAGUE_COLORS[tier - 1] }}
+                    >
+                      {from < tier ? (
+                        <>
+                          <Crest tier={from} size={20} dim />
+                          <span className="text-subtle">to</span>
+                          <Crest tier={tier} size={24} />
+                          <span>
+                            {LEAGUES[from - 1]!.name} to {name}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <Crest tier={tier} size={24} />
+                          <span>{tier > 1 ? `a ${name} run` : `Silver at ${LEAGUES[1]!.min}`}</span>
+                        </>
+                      )}
+                      {tier > 1 && (
+                        <>
+                          <span className="text-subtle">·</span>
+                          <span>
+                            {runs >= LEAGUE_BANK_RUNS
+                              ? `${name} banked`
+                              : `${runs}/${LEAGUE_BANK_RUNS} to bank ${name}`}
+                          </span>
+                          <BankSlots tier={tier} runs={runs} />
+                        </>
+                      )}
+                    </p>
+                  );
+                })()}
               {hud.replay && hud.replay.length > 1 && (
+                <div className="mt-4 overflow-hidden rounded-lg border border-line">
+                  <ReplayView frames={hud.replay} at={hud.deathAt} />
+                </div>
+              )}
+              {hud.deathRank > 0 && (
+                <p className="mt-1 text-xs text-subtle">
+                  you were #{hud.deathRank} of {hud.deathCount}
+                  {hud.firstLife && hud.deathCount > hud.deathRank
+                    ? ` · you beat ${hud.deathCount - hud.deathRank}. one more?`
+                    : ""}
+                </p>
+              )}
+              <div className="mt-5 grid grid-cols-3 gap-2 text-center tabular-nums">
+                <div className="rounded-lg border border-line bg-elevated/70 px-2 py-2">
+                  <div className="text-xs text-muted">length</div>
+                  <div className="text-xl font-semibold">{hud.score}</div>
+                </div>
+                <div className="rounded-lg border border-line bg-elevated/70 px-2 py-2">
+                  <div className="text-xs text-muted">kills</div>
+                  <div className="text-xl font-semibold">{hud.kills}</div>
+                </div>
+                <div className="rounded-lg border border-line bg-elevated/70 px-2 py-2">
+                  <div className="text-xs text-muted">best</div>
+                  <div className="text-xl font-semibold">{hud.best}</div>
+                </div>
+              </div>
+              {hud.unlocked.length > 0 && (
+                <div className="mt-3 rounded-lg border border-[#f0c14a]/50 bg-[#f0c14a]/10 px-3 py-2 text-left text-xs">
+                  <div className="text-[10px] tracking-[0.2em] text-[#f0c14a] uppercase">
+                    unlocked
+                  </div>
+                  {hud.unlocked.map((id) => {
+                    const a = ACHIEVEMENT_BY_ID.get(id);
+                    return a ? (
+                      <div key={id} className="text-[#f0c14a]">
+                        {a.icon} {a.name} <span className="text-muted">· {a.desc}</span>
+                      </div>
+                    ) : null;
+                  })}
+                </div>
+              )}
+              {hud.profile &&
+                (() => {
+                  const steps = nextSteps(totalsOf(hud.profile), new Set(hud.profile.achv), 2);
+                  return steps.length ? (
+                    <ul className="mt-2 space-y-0.5 text-left text-xs text-muted">
+                      {steps.map((s) => (
+                        <li key={s.a.id} className="flex justify-between">
+                          <span>
+                            {s.a.icon} {(s.a.target ?? 0) - Math.min(s.have, s.a.target ?? 0)} more
+                            to {s.a.name}
+                          </span>
+                          <span className="tabular-nums text-subtle">
+                            {Math.min(s.have, s.a.target ?? 0)}/{s.a.target}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null;
+                })()}
+              {authEnabled && signInReady && !signedIn && (
                 <button
                   type="button"
-                  onClick={() => void shareGif()}
-                  className="flex h-10 flex-1 items-center justify-center rounded-lg border border-line text-xs text-muted hover:text-fg"
+                  onClick={() =>
+                    void signIn("grok-x", {
+                      callbackURL: window.location.pathname + window.location.search,
+                    })
+                  }
+                  className="mt-3 h-10 w-full rounded-lg border border-line text-sm text-muted hover:text-fg"
                 >
-                  {gifState === "busy"
-                    ? "making gif…"
-                    : gifState === "done"
-                      ? "gif saved"
-                      : "share replay as gif"}
+                  Sign in with X to keep your stats
+                </button>
+              )}
+              {hud.roll && (
+                <RollCard roll={hud.roll} onDismiss={() => engineRef.current?.dismissRoll()} />
+              )}
+              {hud.rematch && (
+                <button
+                  type="button"
+                  onClick={() => engineRef.current?.respawn(false, true)}
+                  className="mt-5 h-12 w-full rounded-lg border border-[#ff6b8a] bg-[#ff6b8a]/15 font-medium text-[#ffb3c1] active:scale-[0.98]"
+                >
+                  Rematch · spawn next to {hud.rematch.name}
+                </button>
+              )}
+              {hud.comebackLeft > 0 && (
+                <button
+                  type="button"
+                  onClick={() => engineRef.current?.respawn(true)}
+                  className="mt-5 h-12 w-full rounded-lg border border-[#f0c14a] bg-[#f0c14a]/15 font-medium text-[#f0c14a] active:scale-[0.98]"
+                >
+                  Rise again with a quarter of your length · {hud.comebackLeft}s
                 </button>
               )}
               <button
                 type="button"
-                onClick={() => void copyBeatLink()}
-                className="flex h-10 flex-1 items-center justify-center rounded-lg border border-line text-xs text-muted hover:text-fg"
+                onClick={() => engineRef.current?.respawn()}
+                className={`${hud.comebackLeft > 0 || hud.rematch ? "mt-2" : "mt-6"} h-12 w-full rounded-lg bg-accent font-medium text-accent-fg active:scale-[0.98] ${hud.nearWin ? "h-14 text-lg shadow-[0_0_28px_rgba(215,221,232,0.35)]" : ""}`}
               >
-                {beatCopied ? "link copied" : "beat my run link"}
+                {hud.nearWin ? "Run it back" : "Play again"}
               </button>
+              {hud.challenges.length > 0 && (
+                <ul className="mt-3 space-y-0.5 text-left text-xs text-muted">
+                  {hud.challenges.map((c) => (
+                    <li key={c.id} className="flex justify-between">
+                      <span className={c.done ? "text-fg" : ""}>
+                        {c.done ? "✓ " : ""}
+                        {c.text}
+                      </span>
+                      <span className="tabular-nums text-subtle">
+                        {Math.min(c.progress, c.target)}/{c.target}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {hud.watchable.length > 0 && (
+                <div className="mt-3 flex flex-wrap items-center justify-center gap-2 text-xs text-muted">
+                  <Eye size={14} />
+                  {hud.watchable.map((w) => (
+                    <button
+                      key={w.nid}
+                      type="button"
+                      onClick={() =>
+                        engineRef.current?.watch(hud.watching === w.nid ? null : w.nid)
+                      }
+                      className={`rounded-full border px-2.5 py-1 ${hud.watching === w.nid ? "border-accent text-fg" : "border-line hover:text-fg"}`}
+                    >
+                      {w.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => void share()}
+                className="mt-2 flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-line text-sm text-muted hover:text-fg"
+              >
+                <Share2 size={16} /> {shared ? "copied" : "share your run"}
+              </button>
+              <div className="mt-2 flex gap-2">
+                {hud.replay && hud.replay.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => void shareGif()}
+                    className="flex h-10 flex-1 items-center justify-center rounded-lg border border-line text-xs text-muted hover:text-fg"
+                  >
+                    {gifState === "busy"
+                      ? "making gif…"
+                      : gifState === "done"
+                        ? "gif saved"
+                        : "share replay as gif"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => void copyBeatLink()}
+                  className="flex h-10 flex-1 items-center justify-center rounded-lg border border-line text-xs text-muted hover:text-fg"
+                >
+                  {beatCopied ? "link copied" : "beat my run link"}
+                </button>
+              </div>
+              <p className="mt-3 text-xs text-subtle">tap anywhere or press space</p>
             </div>
-            <p className="mt-3 text-xs text-subtle">tap anywhere or press space</p>
           </div>
         </div>
       )}
@@ -1827,6 +1880,42 @@ async function renderShareCard(hud: HudState, nick: string, bands: string[]): Pr
   } catch {
     return null;
   }
+}
+
+/** What last week (or the season) paid: shown until the player puts it away. */
+function RollCard({
+  roll,
+  onDismiss,
+}: {
+  roll: { text: string; tier: number };
+  onDismiss: () => void;
+}) {
+  const tier = roll.tier;
+  return (
+    <div
+      className="mt-3 flex items-center gap-3 rounded-lg border bg-bg/60 px-3 py-2 text-left text-xs"
+      style={{ borderColor: tier > 0 ? `${LEAGUE_COLORS[tier - 1]}99` : undefined }}
+    >
+      {tier > 0 ? (
+        <Crest tier={tier} size={48} />
+      ) : (
+        <span className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-elevated text-lg">
+          ·
+        </span>
+      )}
+      <div className="min-w-0 flex-1">
+        <div className="text-fg">{roll.text}</div>
+        <div className="mt-0.5 text-subtle">this week starts at Bronze</div>
+      </div>
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="shrink-0 rounded-md border border-line px-2.5 py-1 text-muted hover:text-fg"
+      >
+        got it
+      </button>
+    </div>
+  );
 }
 
 function Chip({

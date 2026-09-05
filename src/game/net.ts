@@ -144,6 +144,8 @@ export interface NetHooks {
   onWisp: (x: number, y: number, bank: number, secsLeft: number) => void;
   /** The server's answer to a handle request: a HANDLE_* status and the handle now held. */
   onHandle: (status: number, handle: string) => void;
+  /** A known snake's league byte rose on a full entry: a promotion, seen as it happens. */
+  onLeague: (nid: number, from: number, to: number) => void;
 }
 
 interface Snap {
@@ -989,7 +991,9 @@ export class NetSession {
         this.reconcile(ack, e.x, e.y);
         const me = this.world.snakes.find((s) => s.id === id);
         if (me && e.full) {
-          // Our own standing, as the server dressed the snake at spawn.
+          // Our own standing, as the server dressed the snake at spawn; a
+          // rise mid-life is a promotion the engine celebrates.
+          if (me.league && league > me.league) this.hooks.onLeague(e.nid, me.league, league);
           me.league = league;
           me.might = might;
           me.finish = finish;
@@ -1046,6 +1050,7 @@ export class NetSession {
       s.boss = e.boss;
       s.linked = e.linked;
       if (e.full) {
+        if (s.league && league > s.league) this.hooks.onLeague(e.nid, s.league, league);
         s.league = league;
         s.might = might;
         s.finish = finish;

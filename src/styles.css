@@ -69,3 +69,26 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* The promotion card scales in with a small overshoot. */
+@keyframes snek-pop {
+  0% {
+    transform: translateX(-50%) scale(0.6);
+    opacity: 0;
+  }
+  70% {
+    transform: translateX(-50%) scale(1.06);
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(-50%) scale(1);
+  }
+}
+.snek-pop {
+  animation: snek-pop 0.3s ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .snek-pop {
+    animation: none;
+  }
+}

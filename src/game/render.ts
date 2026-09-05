@@ -21,11 +21,17 @@ import {
   zoomOf,
 } from "./model";
 import { pathLength, type World } from "./world";
-import { LEAGUE_COLORS, LEAGUE_SHAPES } from "./challenges";
+import { LEAGUES, LEAGUE_COLORS, LEAGUE_SHAPES } from "./challenges";
 import { crestPath, drawCrest } from "./crest";
 
 const HEX = 44;
 const SPRITE = 64;
+
+/** A promotion in progress on a snake: the tier reached and when (performance.now()). */
+export interface Promotion {
+  tier: number;
+  at: number;
+}
 
 /** A minimap mark beyond the plain dot: the arena's top three, a bounty carrier, a high-tier player. */
 export interface MapMark {
@@ -112,7 +118,9 @@ export class Renderer {
     wisp: { x: number; y: number; angle: number; trail: Vec[] } | null = null,
     ranks: ReadonlyMap<string, number> | null = null,
     marks: readonly MapMark[] = [],
+    promos: ReadonlyMap<string, Promotion> | null = null,
   ): void {
+    this.promos = promos;
     const shake = cam.trauma * cam.trauma;
     const ox = (Math.random() * 2 - 1) * shake * 14;
     const oy = (Math.random() * 2 - 1) * shake * 14;
@@ -333,6 +341,44 @@ export class Renderer {
     ctx.strokeStyle = color;
     ctx.lineWidth = Math.max(2.2 / z, r * 0.16);
     ctx.stroke();
+  }
+
+  /**
+   * A promotion as everyone in view sees it: the new frame expands from the
+   * head and fades over half a second, and the tier's name floats above the
+   * head for a moment longer.
+   */
+  private drawPromotion(
+    ctx: CanvasRenderingContext2D,
+    s: Snake,
+    r: number,
+    z: number,
+    promo: Promotion,
+  ): void {
+    const i = promo.tier - 1;
+    const shape = LEAGUE_SHAPES[i];
+    if (!shape) return;
+    const color = LEAGUE_COLORS[i]!;
+    const age = (performance.now() - promo.at) / 1000;
+    if (age < 0.5) {
+      const t = age / 0.5;
+      ctx.globalAlpha = 0.9 * (1 - t);
+      crestPath(ctx, shape, s.x, s.y, r * (1.34 + 1.06 * t) * 2);
+      ctx.strokeStyle = color;
+      ctx.lineJoin = "round";
+      ctx.lineWidth = Math.max(2.2 / z, r * 0.16);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    if (age < 1.6) {
+      ctx.globalAlpha = Math.min(1, (1.6 - age) * 2);
+      ctx.font = `700 ${Math.max(18, 26 / z)}px Outfit, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillStyle = color;
+      ctx.fillText(LEAGUES[i]!.name, s.x, s.y - r * 1.6 - 22 / z - (age * 14) / z);
+      ctx.globalAlpha = 1;
+    }
   }
 
   /**
@@ -595,6 +641,7 @@ export class Renderer {
   }
 
   private boostSince = new Map<string, number>();
+  private promos: ReadonlyMap<string, Promotion> | null = null;
 
   private segmentSprite(color: string, style?: SkinStyle): Sprite {
     const key = style ? `${style}|${color}` : color;
@@ -746,6 +793,8 @@ export class Renderer {
       }
       if ((s.level ?? 0) >= 20) this.drawShimmer(ctx, s, r);
       if (s.league) this.drawLeagueRing(ctx, s, r, z);
+      const promo = this.promos?.get(s.id);
+      if (promo) this.drawPromotion(ctx, s, r, z, promo);
       if (s.crown) this.drawCrown(ctx, s, r);
       if (s.boss) this.drawBossMarks(ctx, s, r);
       this.drawEvolution(ctx, s, r);

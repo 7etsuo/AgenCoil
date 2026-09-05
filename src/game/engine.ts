@@ -20,10 +20,17 @@ import {
 } from "./model";
 import { World } from "./world";
 import { moveWisp, slideAlongRim, steerWisp } from "./wisp";
-import { Renderer, desiredZoom, type MapMark } from "./render";
+import { Renderer, desiredZoom, type MapMark, type Promotion } from "./render";
 import { GameAudio } from "./audio";
 import { ACHIEVEMENT_BY_ID } from "./achievements";
-import { LEAGUES, LEAGUE_BANK_RUNS, leagueOf, seasonEndsAt, seasonOf } from "./challenges";
+import {
+  LEAGUES,
+  LEAGUE_BANK_RUNS,
+  LEAGUE_COLORS,
+  leagueOf,
+  seasonEndsAt,
+  seasonOf,
+} from "./challenges";
 import {
   NetSession,
   defaultServerUrl,
@@ -107,6 +114,12 @@ export interface HudState {
   hint: string | null;
   /** The server's answer to the last handle request (HANDLE_* status), until the next one. */
   handleResult: { status: number; handle: string } | null;
+  /** Your promotion this moment: the tier reached and the runs toward banking it, for 2.4 s. */
+  promo: { tier: number; runs: number } | null;
+  /** The league you spawned in this life (1 Bronze to 5 Diamond), for the death card's rank row. */
+  spawnTier: number;
+  /** What last week (or the season) paid, until dismissed. */
+  roll: { text: string; tier: number } | null;
   firstLife: boolean;
   party: { name: string; mass: number }[];
   arenaMode: { id: number; secsLeft: number; secsToNext: number };
@@ -245,6 +258,13 @@ export class CoilEngine {
   private keyAim = false;
   private unlocked: string[] = [];
   private handleResult: { status: number; handle: string } | null = null;
+  /** Promotions in progress, by snake id, for the frame burst everyone sees. */
+  private promos = new Map<string, Promotion>();
+  private promo: { tier: number; at: number } | null = null;
+  private spawnTier = 0;
+  /** The best arena rank reached this life, so "#3" and "#1" are said once each. */
+  private bestRankThisLife = 0;
+  private roll: { text: string; tier: number } | null = null;
   /** The league legend has been shown once on this device (localStorage), or during this life. */
   private legendDone = readFlag("agencoil-hint-league");
   private legendShown = false;
@@ -352,17 +372,26 @@ export class CoilEngine {
             this.comebackOffer = performance.now() + COMEBACK_WINDOW_MS;
             return;
           }
+          // A promotion of our own: the league byte drives the moment, the text is not needed.
+          if (kind === 4) return;
+          // A roll card, kind 10 plus the tier it is about: shown until dismissed.
+          if (kind >= 10 && kind <= 15) {
+            this.roll = { text, tier: kind - 10 };
+            this.emitHud();
+            return;
+          }
           this.pushFeed(text);
-          if (kind === 2) this.audio.kill();
+          if (kind === 2 && this.phase !== "dead") this.audio.kill();
         },
         onGateRequired: (message) => this.onGateRequired(message),
         onAchieve: (id) => {
           const a = ACHIEVEMENT_BY_ID.get(id);
           this.unlocked = [...this.unlocked, id];
           this.pushFeed(`achievement: ${a ? `${a.icon} ${a.name}` : id}`);
-          this.audio.kill();
+          if (this.phase !== "dead") this.audio.kill();
           this.emitHud();
         },
+        onLeague: (nid, _from, to) => this.onLeague(String(nid), to),
         onHandle: (status, handle) => {
           this.handleResult = { status, handle };
           this.emitHud();
@@ -545,6 +574,36 @@ export class CoilEngine {
     this.spawnLocal();
   }
 
+  /** The league a life starts in, from the profile the server last sent (Bronze without one). */
+  private startTier(): number {
+    return this.profile ? leagueOf(this.profile.weekBest) + 1 : 1;
+  }
+
+  /**
+   * A known snake's league rose: everyone in view sees the frame burst and
+   * the tier's name; the promoted player also gets the card, the sound and
+   * a beat of hit stop.
+   */
+  private onLeague(id: string, tier: number): void {
+    const now = performance.now();
+    this.promos.set(id, { tier, at: now });
+    const s = this.world.snakes.find((x) => x.id === id);
+    if (s && this.qualityScale >= 1)
+      this.burst(s.x, s.y, LEAGUE_COLORS[tier - 1] ?? "#ffffff", 28, 160);
+    if (this.net && id === this.net.selfId) {
+      this.promo = { tier, at: now };
+      this.hitStopUntil = now + 250;
+      this.audio.rankUp();
+      this.emitHud();
+    }
+  }
+
+  /** Put the week's payout card away. */
+  dismissRoll(): void {
+    this.roll = null;
+    this.emitHud();
+  }
+
   private spawnLocal(): void {
     const w = this.localWorld();
     const s = w.spawnPlayer("local", this.look.name, this.look.skin, this.look.bands);
@@ -556,6 +615,9 @@ export class CoilEngine {
     s.finish = this.profile?.prevTier ?? 0;
     this.phase = "play";
     this.spawnedAt = performance.now();
+    this.spawnTier = this.startTier();
+    this.bestRankThisLife = 0;
+    this.promo = null;
     this.snapCamTo(s);
     this.emitHud();
   }
@@ -572,6 +634,9 @@ export class CoilEngine {
     this.wispBank = 0;
     this.banked = 0;
     this.nearWin = null;
+    this.spawnTier = this.startTier();
+    this.bestRankThisLife = 0;
+    this.promo = null;
     this.snapCamTo(s);
     this.emitHud();
   }
@@ -684,7 +749,20 @@ export class CoilEngine {
       beat: this.beat,
       hint: this.hint(),
       handleResult: this.handleResult,
-      league: this.profile ? leagueOf(this.profile.weekBest) + 1 : 0,
+      promo:
+        this.promo && now - this.promo.at < 2400
+          ? {
+              tier: this.promo.tier,
+              runs: Math.min(
+                LEAGUE_BANK_RUNS,
+                (this.profile?.weekRuns[this.promo.tier - 1] ?? 0) + 1,
+              ),
+            }
+          : null,
+      spawnTier: this.spawnTier,
+      roll: this.roll,
+      // The live snake knows its league before the profile is resent.
+      league: p?.league || (this.profile ? leagueOf(this.profile.weekBest) + 1 : 0),
       might: this.profile?.achv.length ?? 0,
       finish: this.profile?.prevTier ?? 0,
       bankedTier: this.profile?.bankedTier ?? 0,
@@ -1094,6 +1172,7 @@ export class CoilEngine {
         this.audio.kill();
       }
     }
+    this.arenaRankMoment();
     if (this.phase === "dead" && this.wispWanted && this.wispSrv && nowMs > this.deathBeatUntil) {
       this.phase = "wisp";
       this.wispStartedAt = nowMs;
@@ -1125,6 +1204,17 @@ export class CoilEngine {
       }
     }
     this.exposeDebug();
+  }
+
+  /** Once per life: reaching third and first place in an arena with at least four humans. */
+  private arenaRankMoment(): void {
+    const st = this.online && this.world !== this.local ? this.stats : null;
+    if (this.phase !== "play" || !st || st.clients < 4 || st.rank <= 0 || st.rank > 3) return;
+    if (this.bestRankThisLife && st.rank >= this.bestRankThisLife) return;
+    this.bestRankThisLife = st.rank;
+    if (st.rank === 2) return;
+    this.killNotice = st.rank === 1 ? "#1 in the arena" : `#3 in the arena · of ${st.count}`;
+    this.killTimer = 2.6;
   }
 
   /** Point the aim along the held steering keys; true when any are held. */
@@ -1507,6 +1597,7 @@ export class CoilEngine {
     // The server's first WISP message can arrive before or after DEATH, so
     // only flag the wish here; the wisp state itself resets on spawn.
     this.wispWanted = this.online;
+    this.promo = null;
     this.phase = "dead";
     this.boosting = false;
     this.holdBoost = false;
@@ -1623,9 +1714,11 @@ export class CoilEngine {
       this.phase === "wisp" ? this.wisp : null,
       this.topRanks(),
       this.mapMarks(),
+      this.promos,
     );
     const nowMs = performance.now();
     for (const [id, e] of this.emotes) if (e.until < nowMs) this.emotes.delete(id);
+    for (const [id, pr] of this.promos) if (nowMs - pr.at > 1600) this.promos.delete(id);
     if (this.stick && this.phase === "play") {
       const rect = this.canvas.getBoundingClientRect();
       this.renderer.drawStick(this.ctx, this.dpr, {
