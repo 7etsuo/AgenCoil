@@ -40,9 +40,19 @@ import {
   START_MASS,
   lengthOf,
   radiusOf,
+  zoomOf,
   type Snake,
 } from "../../src/game/model";
-import { CELL, World, cellKey, cellKeyOf, hotCellCentre, hotKey } from "../../src/game/world";
+import {
+  CELL,
+  World,
+  type DeathEvent,
+  cellCoordsOf,
+  cellKey,
+  cellKeyOf,
+  hotCellCentre,
+  hotKey,
+} from "../../src/game/world";
 import { moveWisp, slideAlongRim } from "../../src/game/wisp";
 import { cleanName } from "./names";
 import {
@@ -152,8 +162,19 @@ interface Client {
   account: Identity | null;
   /** A ticket redemption in flight, so a HELLO arriving meanwhile waits for it. */
   linking: Promise<void> | null;
+  /** Site tickets this socket has tried to redeem. */
+  linkTries: number;
   /** When the player last asked for a handle that reached the database. */
   lastHandleAt: number;
+  /** When this socket last asked to spawn. */
+  lastSpawnAt: number;
+  /** When any message last arrived; 0 until the first. */
+  lastSeenAt: number;
+  /** The wire id of the snake that ended the last life, for a rematch; 0 for a wall or nobody. */
+  killerNid: number;
+  /** The food cells synced last time (null forces a full walk) and the change counter then. */
+  foodRect: { gx0: number; gx1: number; gy0: number; gy1: number } | null;
+  foodSeq: number;
 }
 
 interface FoodCellSync {
@@ -178,6 +199,8 @@ interface Life {
 
 interface Token {
   sid: string;
+  /** The process that minted it; only a token from another process rebuilds a snake. */
+  instance: string;
   mass: number;
   x: number;
   y: number;
@@ -193,6 +216,8 @@ interface Token {
 /** Compact wire shape: TOKEN messages use an 8-bit string length. */
 interface WireToken {
   s: string;
+  /** Minting instance (absent in tokens from before it was recorded). */
+  i?: string;
   m: number;
   x: number;
   y: number;
@@ -219,6 +244,27 @@ const IDENTITY_TTL_MS = 10 * 60_000;
 const IDENTITY_CACHE_MAX = 5000;
 /** Handle requests that reach the database are spaced at least this far apart per socket. */
 const HANDLE_COOLDOWN_MS = 1000;
+/** A socket may ask to spawn at most this often; a flood would otherwise cost a placement and a rank query each. */
+const SPAWN_MIN_MS = 400;
+/** Site tickets a socket may try to redeem; each is a request to the site. */
+const LINK_TRIES_MAX = 5;
+/** Public page answers kept in memory. */
+const HTTP_CACHE_MAX = 500;
+/**
+ * A client that stops reading is not fed forever: past the first mark its
+ * per-tick messages are skipped, past the second it is cut off. Snapshots
+ * at 30 Hz would otherwise pile up in the socket without bound.
+ */
+const SEND_SKIP_BYTES = 256 * 1024;
+const SEND_CLOSE_BYTES = 4 * 1024 * 1024;
+/** A socket that has said nothing for this long, or never introduced itself within the shorter, is closed. */
+const IDLE_SOCKET_MS = 60_000;
+const HELLO_DEADLINE_MS = 15_000;
+/** The largest screen a view is believed for, in CSS pixels; the view a client reports is clamped to it at its zoom. */
+const SCREEN_MAX_W = 3840;
+const SCREEN_MAX_H = 2160;
+/** While alive, the view centre may sit at most this fraction of the half view away from the head. */
+const VIEW_DRIFT = 0.35;
 /**
  * Notice kinds beyond the feed line (0), bounty (1), reward (2) and comeback
  * (3): a promotion for the promoted player alone (the client draws the
@@ -267,14 +313,46 @@ function sanitizeName(raw: string): string {
   return cleanName(s) || "anon";
 }
 
+/**
+ * Cloudflare's client header is honoured only behind the tunnel a home
+ * arena runs through (`TRUST_CF_CONNECTING_IP=1` in its env). Anywhere
+ * else any client could send it and choose its own address, slipping the
+ * per-address caps and the play ticket's binding.
+ */
+const TRUST_CF_IP = process.env.TRUST_CF_CONNECTING_IP === "1";
+
 function clientIp(req: IncomingMessage): string {
-  const cloudflare = req.headers["cf-connecting-ip"];
-  if (typeof cloudflare === "string" && cloudflare.trim()) return cloudflare.trim();
+  if (TRUST_CF_IP) {
+    const cloudflare = req.headers["cf-connecting-ip"];
+    if (typeof cloudflare === "string" && cloudflare.trim()) return cloudflare.trim();
+  }
   const real = req.headers["x-real-ip"];
   if (typeof real === "string" && real.trim()) return real.trim();
   const fwd = req.headers["x-forwarded-for"];
   const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(",")[0]?.trim();
   return first || req.socket.remoteAddress || "unknown";
+}
+
+/** A header against the game secret, in constant time. */
+function sameSecret(given: string | string[] | undefined, secret: string): boolean {
+  if (!secret || typeof given !== "string") return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(secret);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Keep the process up through anything a tick, a socket or a database
+ * round trip throws: an arena that dies takes every player with it. Errors
+ * are logged, never swallowed silently.
+ */
+export function guardProcess(): void {
+  process.on("unhandledRejection", (err) => {
+    console.error("[server] unhandled rejection:", (err as Error)?.stack ?? err);
+  });
+  process.on("uncaughtException", (err) => {
+    console.error("[server] uncaught exception:", err?.stack ?? err);
+  });
 }
 
 async function readJson(req: IncomingMessage, maxBytes = 4096): Promise<Record<string, unknown>> {
@@ -337,6 +415,12 @@ export class GameServer {
   private readonly heat = new Map<number, number[]>();
   /** Token signatures already redeemed, so a token cannot be replayed. */
   private readonly usedTokens = new Map<string, number>();
+  /**
+   * Player snakes that died here, by id, until every token minted for them
+   * has expired: a token kept from before a death must not bring the snake
+   * back at its old length.
+   */
+  private readonly deadSids = new Map<string, number>();
   private nextNid = 1;
   private nextPlayer = 1;
   private tick = 0;
@@ -345,6 +429,10 @@ export class GameServer {
   private startedAt = Date.now();
   private stepMs = 0;
   private loopMs = 0;
+  private tickErrors = 0;
+  private tickErrorLogAt = 0;
+  /** Set once a tick's deaths were announced and booked; a tick that throws before that hands them back. */
+  private deathsBooked = true;
   private wss: WebSocketServer | null = null;
 
   constructor() {
@@ -399,7 +487,7 @@ export class GameServer {
     const metricsDays = url.searchParams.get("metrics");
     if (metricsDays !== null) {
       const secret = process.env.GAME_SECRET ?? "";
-      if (!secret || req.headers["x-game-secret"] !== secret) {
+      if (!sameSecret(req.headers["x-game-secret"], secret)) {
         res.statusCode = 403;
         res.end(JSON.stringify({ ok: false }));
         return;
@@ -417,7 +505,7 @@ export class GameServer {
     }
     if (path === "/api/drain") {
       const secret = process.env.GAME_SECRET ?? "";
-      if (!secret || req.headers["x-game-secret"] !== secret) {
+      if (!sameSecret(req.headers["x-game-secret"], secret)) {
         res.statusCode = 403;
         res.end(JSON.stringify({ ok: false }));
         return;
@@ -426,29 +514,43 @@ export class GameServer {
       res.end(JSON.stringify({ ok: true, drained: this.clients.size }));
       return;
     }
+    // Public pages are answered from a short memory cache: an arena serves
+    // them straight off its own process, so a hammered handle must not turn
+    // into a database query per request.
     const handle = url.searchParams.get("profile");
     if (handle !== null) {
       res.setHeader("cache-control", "public, max-age=15");
-      const p = await this.profiles.byHandle(cleanHandle(handle));
-      if (!p) {
-        res.statusCode = 404;
-        res.end(JSON.stringify({ ok: false }));
-        return;
-      }
-      const [rank, rarity] = await Promise.all([this.profiles.rank(p), this.profiles.rarity()]);
-      res.end(JSON.stringify({ ok: true, profile: this.profiles.publicProfile(p, rank), rarity }));
+      const h = cleanHandle(handle);
+      const hit = await this.cachedJson(`profile:${h}`, 15_000, async () => {
+        const p = h ? await this.profiles.byHandle(h) : null;
+        if (!p) return { status: 404, body: JSON.stringify({ ok: false }) };
+        const [rank, rarity] = await Promise.all([this.profiles.rank(p), this.profiles.rarity()]);
+        return {
+          status: 200,
+          body: JSON.stringify({ ok: true, profile: this.profiles.publicProfile(p, rank), rarity }),
+        };
+      });
+      res.statusCode = hit.status;
+      res.end(hit.body);
       return;
     }
     const top = url.searchParams.get("top");
     if (top === "alltime" || top === "weekly" || top === "season" || top === "crew") {
       res.setHeader("cache-control", "public, max-age=30");
-      try {
-        const rows =
-          top === "crew" ? await this.profiles.topCrews(50) : await this.profiles.top(top, 100);
-        res.end(JSON.stringify({ kind: top, week: isoWeek(), season: seasonOf(), rows }));
-      } catch {
-        res.end(JSON.stringify({ kind: top, rows: [] }));
-      }
+      const hit = await this.cachedJson(`top:${top}`, 30_000, async () => {
+        try {
+          const rows =
+            top === "crew" ? await this.profiles.topCrews(50) : await this.profiles.top(top, 100);
+          return {
+            status: 200,
+            body: JSON.stringify({ kind: top, week: isoWeek(), season: seasonOf(), rows }),
+          };
+        } catch {
+          return { status: 200, body: JSON.stringify({ kind: top, rows: [] }) };
+        }
+      });
+      res.statusCode = hit.status;
+      res.end(hit.body);
       return;
     }
     // Vercel rewrites /api/play-ticket to the /api/ws function. POST is not
@@ -494,6 +596,33 @@ export class GameServer {
       return;
     }
     res.end(JSON.stringify({ ok: true, ticket: result.ticket, expiresAt: result.expiresAt }));
+  }
+
+  /** Answers to public page requests, by key, for a short while; bounded. */
+  private readonly httpCache = new Map<string, { at: number; status: number; body: string }>();
+  /** Answers being made, so a burst of the same request runs one query. */
+  private readonly httpPending = new Map<string, Promise<{ status: number; body: string }>>();
+
+  private async cachedJson(
+    key: string,
+    ttlMs: number,
+    make: () => Promise<{ status: number; body: string }>,
+  ): Promise<{ status: number; body: string }> {
+    const now = Date.now();
+    const hit = this.httpCache.get(key);
+    if (hit && now - hit.at < ttlMs) return hit;
+    const pending = this.httpPending.get(key);
+    if (pending) return pending;
+    const task = make().finally(() => this.httpPending.delete(key));
+    this.httpPending.set(key, task);
+    const made = await task;
+    this.httpCache.set(key, { at: now, ...made });
+    while (this.httpCache.size > HTTP_CACHE_MAX) {
+      const oldest = this.httpCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.httpCache.delete(oldest);
+    }
+    return made;
   }
 
   status(): Record<string, unknown> {
@@ -564,6 +693,7 @@ export class GameServer {
       if (now - hit.at >= IDENTITY_TTL_MS) this.identities.delete(key);
     }
     for (const [sig, exp] of this.usedTokens) if (exp < now) this.usedTokens.delete(sig);
+    for (const [sid, exp] of this.deadSids) if (exp < now) this.deadSids.delete(sid);
   }
 
   /** The connected client that owns a snake, if any. */
@@ -606,10 +736,23 @@ export class GameServer {
       acc += Math.min(0.25, (now - last) / 1000);
       last = now;
       let steps = 0;
-      while (acc >= dt && steps < 4) {
-        this.step(dt);
-        acc -= dt;
-        steps++;
+      try {
+        while (acc >= dt && steps < 4) {
+          this.step(dt);
+          acc -= dt;
+          steps++;
+        }
+      } catch (err) {
+        // One bad tick must not take the arena down with it; the next tick
+        // starts from a clean accumulator, and the fault is logged, throttled.
+        // Deaths the tick had not booked yet are handed back to the next one.
+        acc = 0;
+        if (!this.deathsBooked) this.world.requeueDeaths();
+        this.tickErrors++;
+        if (now - this.tickErrorLogAt > 1000) {
+          this.tickErrorLogAt = now;
+          console.error(`[tick] failed (${this.tickErrors} so far):`, (err as Error)?.stack ?? err);
+        }
       }
       if (acc > dt * 2) acc = dt;
       // Whole interval cost: simulation plus every client's broadcast.
@@ -662,8 +805,10 @@ export class GameServer {
     recent.push(now);
     this.connectLog.set(ip, recent);
     // Loopback is exempt from the per-address caps so local load tests can
-    // open hundreds of sockets; it never appears behind the platform proxy.
-    const local = ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+    // open hundreds of sockets. Judged from the socket itself, never from a
+    // header a client could set.
+    const peer = req.socket.remoteAddress ?? "";
+    const local = peer === "127.0.0.1" || peer === "::1" || peer === "::ffff:127.0.0.1";
     if (
       !local &&
       (recent.length > CONNECTS_PER_MINUTE || (this.connsByIp.get(ip) ?? 0) >= MAX_CONNS_PER_IP)
@@ -741,7 +886,13 @@ export class GameServer {
       verifiedUntil: 0,
       account: null,
       linking: null,
+      linkTries: 0,
       lastHandleAt: 0,
+      lastSpawnAt: 0,
+      lastSeenAt: 0,
+      killerNid: 0,
+      foodRect: null,
+      foodSeq: -1,
     };
     this.clients.add(client);
     this.lastActivity = Date.now();
@@ -798,6 +949,7 @@ export class GameServer {
   private onMessage(client: Client, data: RawData): void {
     if (!client.alive) return;
     const now = Date.now();
+    client.lastSeenAt = now;
     if (now - client.msgWindow > 1000) {
       client.msgWindow = now;
       client.msgCount = 0;
@@ -836,6 +988,9 @@ export class GameServer {
   }
 
   private async onHello(client: Client, r: Reader, respawn: boolean): Promise<void> {
+    const asked = Date.now();
+    if (asked - client.lastSpawnAt < SPAWN_MIN_MS) return;
+    client.lastSpawnAt = asked;
     client.name = sanitizeName(r.str());
     // A linked player is named by their handle, whatever the client sent.
     if (client.account && client.profile?.handle) client.name = `@${client.profile.handle}`;
@@ -849,10 +1004,12 @@ export class GameServer {
     let nearNid = 0;
     if (r.remaining) {
       client.v2 = true;
-      client.key = r
+      const key = r
         .str()
         .replace(/[^A-Za-z0-9_-]/g, "")
         .slice(0, 64);
+      // Once linked the key is the account's; the device key is not written over it.
+      if (!client.account) client.key = key;
       client.deathFx = r.remaining ? r.u8() : 0;
       client.party = r.remaining
         ? r
@@ -919,7 +1076,12 @@ export class GameServer {
       }
       client.verifiedUntil = verifiedUntil;
     }
-    const token = resume ? this.redeemToken(tokenText) : null;
+    // A token kept from before a death, or one from this very process whose
+    // snake is simply gone, buys nothing: only a hop from another arena
+    // rebuilds a snake from a token.
+    const dead = resume ? this.deadSids.has(resume.sid) : false;
+    if (dead) this.events.log("feature", { key: client.key, s: "dead_token" });
+    const token = resume && !dead ? this.redeemToken(tokenText) : null;
     const now = Date.now();
     let snake: Snake | null = null;
     let spawnKind = "fresh";
@@ -951,9 +1113,15 @@ export class GameServer {
         snake = held;
         snake.skin = client.skin;
         snake.bands = client.bands;
+      } else if (token.instance === this.instance) {
+        // Our own token for a snake that is no longer here: it died or was
+        // replaced, so this is a fresh life like any other.
+        snake = this.world.spawnSnake(this.newSid(), client.name, client.skin, false, client.bands);
+        if (client.profile) this.profiles.setLook(client.profile, client.skin, client.bands);
+        this.events.log("feature", { key: client.key, s: "stale_token" });
       } else {
-        // The snake lived on another instance (or was lost): rebuild it with
-        // the same length near where it was.
+        // The snake lived on another instance: rebuild it with the same
+        // length near where it was.
         spawnKind = "rebuild";
         const at = this.world.safeSpawnNear({ x: token.x, y: token.y });
         snake = this.world.spawnSnake(
@@ -1008,9 +1176,15 @@ export class GameServer {
       // newcomers in the quietest corner the arena has. A party overrides it.
       const best = client.profile?.best ?? 0;
       const selfId = snake.id;
-      const rival = nearNid
-        ? this.world.snakes.find((s) => s.alive && s.id !== selfId && this.nidOf(s.id) === nearNid)
-        : undefined;
+      // A rematch spawns beside the snake that ended the last life, and only
+      // that one, only for a while: anything else would be a way to land next
+      // to whoever you pick.
+      const rival =
+        nearNid && nearNid === client.killerNid && now - client.deathAt < COMEBACK_WINDOW_MS
+          ? this.world.snakes.find(
+              (s) => s.alive && s.id !== selfId && this.nidOf(s.id) === nearNid,
+            )
+          : undefined;
       if (rival) {
         this.spawnNearSnake(snake, rival);
         spawnKind = "rematch";
@@ -1154,6 +1328,8 @@ export class GameServer {
   private linkAccount(client: Client, origin: string, ticket: string): Promise<void> {
     if (client.account) return Promise.resolve();
     if (client.linking) return client.linking;
+    if (client.linkTries >= LINK_TRIES_MAX) return Promise.resolve();
+    client.linkTries++;
     const task = (async () => {
       const id = await this.redeemIdentity(origin, ticket);
       if (!client.alive || !id) return;
@@ -1296,6 +1472,14 @@ export class GameServer {
   }
 
   private async sendProfile(client: Client): Promise<void> {
+    try {
+      await this.sendProfileNow(client);
+    } catch (err) {
+      console.error("[profile] send failed:", (err as Error)?.message ?? err);
+    }
+  }
+
+  private async sendProfileNow(client: Client): Promise<void> {
     const p = client.profile;
     if (!p || !client.alive) return;
     const rank = await this.profiles.rank(p);
@@ -1555,12 +1739,27 @@ export class GameServer {
     // Floats off the wire can be NaN or infinite; such a view would silently
     // stop every snapshot, so keep the previous one instead.
     const v = client.view;
-    client.view = {
+    const view = {
       cx: finite(r.f32(), v.cx),
       cy: finite(r.f32(), v.cy),
       hw: Math.min(VIEW_MAX_HW, Math.max(0, finite(r.f32(), v.hw))),
       hh: Math.min(VIEW_MAX_HH, Math.max(0, finite(r.f32(), v.hh))),
     };
+    // A live snake's view is its own screen: no wider than the largest
+    // screen shows at this length's zoom, and centred near the head. Anything
+    // else is a look around the arena nobody else gets, and a way to make
+    // the server resend the world every snapshot.
+    const me = client.sid ? this.world.snakes.find((s) => s.id === client.sid && s.alive) : null;
+    if (me) {
+      const z = zoomOf(me.mass);
+      view.hw = Math.min(view.hw, SCREEN_MAX_W / (2 * z) + 40);
+      view.hh = Math.min(view.hh, SCREEN_MAX_H / (2 * z) + 40);
+      const dx = view.hw * VIEW_DRIFT;
+      const dy = view.hh * VIEW_DRIFT;
+      view.cx = Math.min(me.x + dx, Math.max(me.x - dx, view.cx));
+      view.cy = Math.min(me.y + dy, Math.max(me.y - dy, view.cy));
+    }
+    client.view = view;
     const lag = r.remaining >= 1 ? (r.u8() * 4) / 1000 : 0;
     this.fingerprint(client, angle);
     if (!client.sid) {
@@ -1623,6 +1822,7 @@ export class GameServer {
   private makeToken(s: Snake, humanExp?: number): string {
     const t: WireToken = {
       s: s.id,
+      i: this.instance,
       m: Math.round(s.mass * 10) / 10,
       x: Math.round(s.x),
       y: Math.round(s.y),
@@ -1660,6 +1860,7 @@ export class GameServer {
         "s" in raw
           ? {
               sid: raw.s,
+              instance: typeof raw.i === "string" ? raw.i : "",
               mass: raw.m,
               x: raw.x,
               y: raw.y,
@@ -1677,7 +1878,9 @@ export class GameServer {
       // A rebuilt snake is placed from these; a NaN would put it nowhere,
       // where nothing can ever touch it.
       if (![t.x, t.y, t.angle].every(Number.isFinite)) return null;
-      t.mass = Math.min(t.mass, 100_000);
+      // Tokens are signed, so this is sanity only; long runs really do reach
+      // a few hundred thousand.
+      t.mass = Math.min(t.mass, 2_000_000);
       t.kills = Number.isFinite(t.kills) ? Math.max(0, Math.floor(t.kills)) : 0;
       return t;
     } catch {
@@ -1699,11 +1902,13 @@ export class GameServer {
   private step(dt: number): void {
     const t0 = performance.now();
     this.tick++;
+    this.deathsBooked = false;
     this.world.step(dt, 0, 0, false);
     this.stepMs = this.stepMs * 0.95 + (performance.now() - t0) * 0.05;
     for (const s of this.world.snakes) if (!this.nids.has(s.id)) this.nidOf(s.id);
 
     if (this.world.deaths.length) this.onDeaths();
+    this.deathsBooked = true;
     this.stepWisps(dt);
     if (this.tick % SERVER_TICK_HZ === 0) this.stepBoss();
     if (this.world.eats.length) this.onEats();
@@ -1714,6 +1919,7 @@ export class GameServer {
     // Under load: fewer bots as players fill the arena, and snapshots at
     // 20 Hz instead of 30 when a step is getting expensive.
     if (this.tick % SERVER_TICK_HZ === 0) {
+      this.dropIdleSockets();
       const players = this.clients.size;
       this.world.desiredBots = Math.max(SERVER_BOTS_MIN, SERVER_BOTS - Math.floor(players * 0.6));
       this.retireSurplusBot();
@@ -1725,8 +1931,10 @@ export class GameServer {
     const heavy = this.stepMs > 6;
     const snapEvery = Math.max(1, Math.round(SERVER_TICK_HZ / (heavy ? 20 : SNAPSHOT_HZ)));
     const foodEvery = Math.max(1, Math.round(SERVER_TICK_HZ / FOOD_SYNC_HZ));
-    if (this.tick % snapEvery === 0) for (const c of this.clients) this.sendSnapshot(c);
-    if (this.tick % foodEvery === 0) for (const c of this.clients) this.sendFood(c);
+    if (this.tick % snapEvery === 0)
+      for (const c of this.clients) if (this.canSend(c)) this.sendSnapshot(c);
+    if (this.tick % foodEvery === 0)
+      for (const c of this.clients) if (this.canSend(c)) this.sendFood(c);
     if (this.tick % Math.round(SERVER_TICK_HZ / 2) === 0) this.sendStatsAll();
     if (this.tick % SERVER_TICK_HZ === 0) for (const c of this.clients) this.sendToken(c);
     if (this.tick % (SERVER_TICK_HZ * 30) === 0) {
@@ -1734,6 +1942,34 @@ export class GameServer {
       this.pruneCaches();
       this.profiles.sweep(this.profilesInUse());
     }
+  }
+
+  /**
+   * A socket that never introduced itself, or has gone quiet, gives its slot
+   * back: the arena admits a fixed number of sockets, and a silent one would
+   * hold a place forever. A menu client pings every two seconds.
+   */
+  /** The idle limits, on the instance so a test can shorten them. */
+  private idleSocketMs = IDLE_SOCKET_MS;
+  private helloDeadlineMs = HELLO_DEADLINE_MS;
+
+  private dropIdleSockets(): void {
+    const now = Date.now();
+    for (const c of this.clients) {
+      const silent = now - (c.lastSeenAt || c.connectedAt) > this.idleSocketMs;
+      const anonymous = !c.lastSeenAt && now - c.connectedAt > this.helloDeadlineMs;
+      if (silent || anonymous) c.ws.close(1000, silent ? "idle" : "no hello");
+    }
+  }
+
+  /** Is the socket keeping up? Skips a client that has fallen behind, drops one that has stopped reading. */
+  private canSend(c: Client): boolean {
+    const buffered = c.ws.bufferedAmount;
+    if (buffered > SEND_CLOSE_BYTES) {
+      c.ws.close(1008, "too slow");
+      return false;
+    }
+    return buffered < SEND_SKIP_BYTES;
   }
 
   /**
@@ -1849,9 +2085,30 @@ export class GameServer {
 
   private onDeaths(): void {
     for (const d of this.world.deaths) {
+      try {
+        this.onDeath(d);
+      } catch (err) {
+        // One death's bookkeeping must not silence the rest of the batch.
+        console.error("[death] booking failed:", (err as Error)?.stack ?? err);
+      }
+    }
+    // Wire ids are freed once the whole batch is told: in a head-on both
+    // snakes die at once, and each death names the other as its killer.
+    // Freeing an id inside the loop minted a fresh one for a snake already
+    // dead, which nothing ever released.
+    for (const d of this.world.deaths) this.nids.delete(d.snake.id);
+  }
+
+  private onDeath(d: DeathEvent): void {
+    {
       const s = d.snake;
       const nid = this.nidOf(s.id);
       const killerNid = d.killerId ? this.nidOf(d.killerId) : 0;
+      // A player's tokens die with it. A snake dropped after its socket left
+      // (no killer, no wall) is the case the token exists for: a reconnect
+      // still rebuilds it.
+      if (!s.isBot && (d.reason === "wall" || d.killerId))
+        this.deadSids.set(s.id, Date.now() + TOKEN_TTL_MS);
       const msg = new Writer()
         .u8(S2C.DEATH)
         .u16(nid)
@@ -1891,14 +2148,14 @@ export class GameServer {
         if (c.known.has(s.id) || c.sid === s.id || (d.killerId && c.sid === d.killerId))
           c.ws.send(msg);
         c.known.delete(s.id);
-        if (c.sid === s.id) this.endLife(c, s);
+        if (c.sid === s.id) this.endLife(c, s, true, killerNid);
       }
       // A snake whose socket left dies in its grace window: the life still
       // counts (best, kills, quests, league runs), without a wisp or comeback.
       const left = this.detached.get(s.id);
       if (left) {
         this.detached.delete(s.id);
-        this.endLife(left, s, false);
+        this.endLife(left, s, false, killerNid);
       }
       if (!s.isBot) {
         // Cause: the rim, another player, a bot (the boss counts as one), or
@@ -1946,11 +2203,6 @@ export class GameServer {
         this.grace.delete(s.id);
       }
     }
-    // Wire ids are freed once the whole batch is told: in a head-on both
-    // snakes die at once, and each death names the other as its killer.
-    // Freeing an id inside the loop minted a fresh one for a snake already
-    // dead, which nothing ever released.
-    for (const d of this.world.deaths) this.nids.delete(d.snake.id);
   }
 
   /**
@@ -1958,12 +2210,13 @@ export class GameServer {
    * the afterlife wisp and comeback window. A life ended by the player's own
    * respawn request is booked without either.
    */
-  private endLife(c: Client, s: Snake, afterlife = true): void {
+  private endLife(c: Client, s: Snake, afterlife = true, killerNid = 0): void {
     c.sid = null;
     this.world.nearIds.delete(s.id);
     if (c.party) this.leaveParty(c.party, s.id);
     c.deathAt = Date.now();
     c.deathMass = s.mass;
+    c.killerNid = killerNid;
     const life = c.life;
     c.life = null;
     if (!life) return;
@@ -2136,10 +2389,14 @@ export class GameServer {
 
   /**
    * Bring the client's orbs in line with the server's for the area on
-   * screen. Cells are stamped by the world on every change, so a cell whose
-   * stamp the client already has is skipped whole; only cells that changed,
-   * entered the view or left it are walked. An orb that crossed between two
-   * cells in view stays put on the client (its position there is cosmetic).
+   * screen. Cells are stamped by the world on every change and logged, so a
+   * sync walks only the cells that entered the view since the last one and
+   * the cells the world changed since then; a still view with nothing
+   * happening in it costs nothing, and a full arena's syncs no longer scale
+   * with how much screen each client has. Cells that left the view are
+   * dropped. An orb that crossed between two cells in view stays put on the
+   * client (its position there is cosmetic). The first sync, and any sync
+   * after one the add cap cut short, walks the whole view.
    */
   private sendFood(c: Client): void {
     const v = c.view;
@@ -2160,60 +2417,101 @@ export class GameServer {
       del.u32(id);
       nDel++;
     };
-    // Cells that left the view: everything the client holds there goes.
-    for (const [key, cell] of c.foodCells) {
-      if (inRange(cell.gx, cell.gy)) continue;
+    const leave = (key: number): void => {
+      const cell = c.foodCells.get(key);
+      if (!cell) return;
       for (const id of cell.ids) drop(id);
       c.foodCells.delete(key);
+    };
+    const prev = c.foodRect;
+    const changed = prev ? world.foodCellsChangedSince(c.foodSeq) : null;
+    const full = !prev || !changed;
+    const seqNow = world.foodSeqNow;
+    // Cells that left the view: everything the client holds there goes.
+    if (full) {
+      for (const [key, cell] of c.foodCells) if (!inRange(cell.gx, cell.gy)) leave(key);
+    } else {
+      for (let gx = prev.gx0; gx <= prev.gx1; gx++) {
+        if (gx < gx0 || gx > gx1) {
+          for (let gy = prev.gy0; gy <= prev.gy1; gy++) leave(cellKeyOf(gx, gy));
+          continue;
+        }
+        for (let gy = prev.gy0; gy < gy0 && gy <= prev.gy1; gy++) leave(cellKeyOf(gx, gy));
+        for (let gy = Math.max(prev.gy0, gy1 + 1); gy <= prev.gy1; gy++) leave(cellKeyOf(gx, gy));
+      }
     }
     let capped = false;
-    for (let gx = gx0; gx <= gx1; gx++) {
-      for (let gy = gy0; gy <= gy1; gy++) {
-        const key = cellKeyOf(gx, gy);
-        const stamp = world.foodCellStamp(key);
-        let cell = c.foodCells.get(key);
-        if (cell && cell.stamp === stamp) continue;
-        if (!cell) {
-          cell = { gx, gy, stamp: -1, ids: [] };
-          c.foodCells.set(key, cell);
-        }
-        // Orbs the client holds for this cell that are no longer in it: gone
-        // from the world, moved out of view, or moved to another cell in view
-        // (that cell's stamp changed too, so it adopts the id below).
-        if (cell.ids.length) {
-          let keep = 0;
-          for (const id of cell.ids) {
-            const f = world.foodById.get(id);
-            if (f && cellKey(f.x, f.y) === key) {
-              cell.ids[keep++] = id;
-              continue;
-            }
-            if (!f || !inRange(Math.floor(f.x / CELL), Math.floor(f.y / CELL))) drop(id);
-          }
-          cell.ids.length = keep;
-        }
-        const bucket = world.foodsInCell(key);
-        if (bucket) {
-          for (const f of bucket) {
-            const id = f.id!;
-            if (cell.ids.includes(id)) continue;
-            if (c.sentFood.has(id)) {
-              cell.ids.push(id);
-              continue;
-            }
-            if (nAdd >= FOOD_ADD_CAP) {
-              capped = true;
-              continue;
-            }
-            cell.ids.push(id);
-            c.sentFood.add(id);
-            writeFood(add, f);
-            nAdd++;
-          }
-        }
-        // A cell cut short by the cap keeps its old stamp and is walked again next time.
-        if (!capped) cell.stamp = stamp;
+    const walk = (gx: number, gy: number): void => {
+      const key = cellKeyOf(gx, gy);
+      const stamp = world.foodCellStamp(key);
+      let cell = c.foodCells.get(key);
+      if (cell && cell.stamp === stamp) return;
+      if (!cell) {
+        cell = { gx, gy, stamp: -1, ids: [] };
+        c.foodCells.set(key, cell);
       }
+      // Orbs the client holds for this cell that are no longer in it: gone
+      // from the world, moved out of view, or moved to another cell in view
+      // (that cell's stamp changed too, so it adopts the id below).
+      if (cell.ids.length) {
+        let keep = 0;
+        for (const id of cell.ids) {
+          const f = world.foodById.get(id);
+          if (f && cellKey(f.x, f.y) === key) {
+            cell.ids[keep++] = id;
+            continue;
+          }
+          if (!f || !inRange(Math.floor(f.x / CELL), Math.floor(f.y / CELL))) drop(id);
+        }
+        cell.ids.length = keep;
+      }
+      const bucket = world.foodsInCell(key);
+      if (bucket) {
+        for (const f of bucket) {
+          const id = f.id!;
+          if (cell.ids.includes(id)) continue;
+          if (c.sentFood.has(id)) {
+            cell.ids.push(id);
+            continue;
+          }
+          if (nAdd >= FOOD_ADD_CAP) {
+            capped = true;
+            continue;
+          }
+          cell.ids.push(id);
+          c.sentFood.add(id);
+          writeFood(add, f);
+          nAdd++;
+        }
+      }
+      // A cell cut short by the cap keeps its old stamp and is walked again next time.
+      if (!capped) cell.stamp = stamp;
+    };
+    if (full) {
+      for (let gx = gx0; gx <= gx1; gx++) for (let gy = gy0; gy <= gy1; gy++) walk(gx, gy);
+    } else {
+      // Cells new to the view, in full.
+      for (let gx = gx0; gx <= gx1; gx++) {
+        if (gx < prev.gx0 || gx > prev.gx1) {
+          for (let gy = gy0; gy <= gy1; gy++) walk(gx, gy);
+          continue;
+        }
+        for (let gy = gy0; gy < prev.gy0 && gy <= gy1; gy++) walk(gx, gy);
+        for (let gy = Math.max(gy0, prev.gy1 + 1); gy <= gy1; gy++) walk(gx, gy);
+      }
+      // Cells the world changed since the last sync, inside the part of the view kept.
+      for (const key of changed) {
+        const { gx, gy } = cellCoordsOf(key);
+        if (!inRange(gx, gy)) continue;
+        if (gx < prev.gx0 || gx > prev.gx1 || gy < prev.gy0 || gy > prev.gy1) continue;
+        walk(gx, gy);
+      }
+    }
+    if (capped) {
+      c.foodRect = null;
+    } else {
+      c.foodRect = { gx0, gx1, gy0, gy1 };
+      c.foodSeq = seqNow;
     }
     if (nAdd) {
       const bytes = add.finish();

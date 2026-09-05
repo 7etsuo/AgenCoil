@@ -3,8 +3,9 @@
  * WebSocket connections on /api/ws; plain GETs return the arena status.
  */
 import http from "node:http";
-import { GameServer } from "./game-server";
+import { GameServer, guardProcess } from "./game-server";
 
+guardProcess();
 const server = http.createServer();
 const game = new GameServer();
 game.attach(server);

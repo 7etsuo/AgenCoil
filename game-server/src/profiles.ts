@@ -220,6 +220,8 @@ export interface ChallengeView {
 
 /** A cached profile nobody has asked for in this long may be forgotten (see `sweep`). */
 export const PROFILE_IDLE_MS = 10 * 60_000;
+/** How long a rank answer stands for a profile whose best has not changed. */
+export const RANK_CACHE_MS = 60_000;
 
 export class ProfileStore {
   private readonly cache = new Map<string, Profile>();
@@ -1184,9 +1186,26 @@ export class ProfileStore {
     return value;
   }
 
-  /** All-time rank by best length (1 = longest ever). */
-  async rank(p: Profile): Promise<number> {
+  /** Recent rank answers per profile: a rank is asked for on every spawn and death, and it barely moves. */
+  private readonly rankCache = new Map<string, { at: number; best: number; rank: number }>();
+  /** Rank queries in flight, so concurrent askers share one round trip. */
+  private readonly rankPending = new Map<string, Promise<number>>();
+
+  /** All-time rank by best length (1 = longest ever). Cached a minute per profile, for the same best. */
+  async rank(p: Profile, now = Date.now()): Promise<number> {
     if (p.best <= 0) return 0;
+    const hit = this.rankCache.get(p.key);
+    if (hit && hit.best === p.best && now - hit.at < RANK_CACHE_MS) return hit.rank;
+    const pending = this.rankPending.get(p.key);
+    if (pending) return pending;
+    const task = this.rankNow(p, now).finally(() => this.rankPending.delete(p.key));
+    this.rankPending.set(p.key, task);
+    return task;
+  }
+
+  private async rankNow(p: Profile, now: number): Promise<number> {
+    let rank = 0;
+    let fromDb = false;
     if (this.pool) {
       try {
         await this.ensureReady();
@@ -1196,14 +1215,23 @@ export class ProfileStore {
             [p.best],
           ),
         );
-        return Number(r.rows[0]?.n ?? 0) + 1;
+        rank = Number(r.rows[0]?.n ?? 0) + 1;
+        fromDb = true;
       } catch {
         /* fall through to the in-memory estimate */
       }
     }
-    let above = 0;
-    for (const o of this.cache.values()) if (o.best > p.best) above++;
-    return above + 1;
+    if (!fromDb) {
+      let above = 0;
+      for (const o of this.cache.values()) if (o.best > p.best) above++;
+      rank = above + 1;
+    }
+    this.rankCache.set(p.key, { at: now, best: p.best, rank });
+    if (this.rankCache.size > 5000) {
+      const oldest = this.rankCache.keys().next().value;
+      if (oldest !== undefined) this.rankCache.delete(oldest);
+    }
+    return rank;
   }
 
   private async flush(): Promise<void> {

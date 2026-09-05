@@ -514,6 +514,8 @@ test("a rival who pops you twice is your nemesis, the stats say when they are he
       assert.ok(!world.snakes.some((s) => s.id === id && s.alive), "the runner died");
     };
     const respawn = async (p: Player, name: string, key: string) => {
+      // Spawns are throttled per socket; a player cannot ask this fast, a test can.
+      await sleep(450);
       p.send(hello(name, key, "", true));
       await p.next(S2C.SPAWNED);
     };
@@ -559,6 +561,24 @@ test("a rival who pops you twice is your nemesis, the stats say when they are he
   }
 });
 
+test("a socket asking to spawn again inside the throttle window is ignored", async () => {
+  const arena = await startArena();
+  try {
+    const p = await joinArena(arena.url, "dev-spam", "spammer");
+    await sleep(450);
+    // Two respawn requests back to back: the first ends the life and spawns
+    // once, the second is inside the window and does nothing.
+    p.send(hello("spammer", "dev-spam", "", true));
+    p.send(hello("spammer", "dev-spam", "", true));
+    await p.next(S2C.SPAWNED);
+    await assert.rejects(p.next(S2C.SPAWNED, 600), "no second spawn");
+    assert.equal(arena.game.world.snakes.filter((s) => !s.isBot && s.alive).length, 1);
+    await p.close();
+  } finally {
+    await arena.stop();
+  }
+});
+
 test("a resume token is single use", async () => {
   const arena = await startArena();
   try {
@@ -573,6 +593,113 @@ test("a resume token is single use", async () => {
     assert.equal(players.length, 2);
     await second.close();
     await third.close();
+  } finally {
+    await arena.stop();
+  }
+});
+
+test("a token kept from before a death buys a fresh snake, not the old one back", async () => {
+  const arena = await startArena();
+  try {
+    const first = await joinArena(arena.url, "dev-dead-token", "ghost");
+    const world = arena.game.world;
+    const me = world.snakes.find((s) => !s.isBot)!;
+    me.mass = 900;
+    // Tokens are minted once a second with the snake's length in them.
+    await sleep(1100);
+    first.drain(S2C.TOKEN);
+    const token = (await first.next(S2C.TOKEN)).str();
+    // Into the rim: a real death, announced.
+    me.x = 1e6;
+    await first.next(S2C.DEATH, 2000);
+    await first.close();
+    const second = await joinArena(arena.url, "dev-dead-token", "ghost", token);
+    const back = world.snakes.find((s) => !s.isBot && s.alive)!;
+    assert.ok(back.mass < 100, `spawned fresh (length ${back.mass.toFixed(0)})`);
+    await second.close();
+  } finally {
+    await arena.stop();
+  }
+});
+
+test("a socket that never says hello, or falls silent, is closed", async () => {
+  const arena = await startArena();
+  try {
+    const game = arena.game as unknown as { idleSocketMs: number; helloDeadlineMs: number };
+    game.helloDeadlineMs = 300;
+    game.idleSocketMs = 1500;
+    const mute = new Player(arena.url);
+    await mute.open();
+    const closeReason = (ws: WebSocket): Promise<string> =>
+      new Promise<string>((resolve, reject) => {
+        ws.once("close", (_code, reason) => resolve(reason.toString()));
+        setTimeout(() => reject(new Error("socket still open")), 4000).unref();
+      });
+    const muteClosed = closeReason(mute.ws);
+    // The idle sweep runs once a second.
+    assert.equal(await muteClosed, "no hello");
+    const p = await joinArena(arena.url, "dev-idle", "quiet");
+    const closed = closeReason(p.ws);
+    const ping = new Writer().u8(C2S.PING).u32(0).finish();
+    // Kept alive by pings for two seconds, then left alone.
+    for (let i = 0; i < 4; i++) {
+      p.send(ping);
+      await sleep(500);
+    }
+    assert.equal(p.ws.readyState, WebSocket.OPEN, "a pinging socket stays");
+    assert.equal(await closed, "idle");
+  } finally {
+    await arena.stop();
+  }
+});
+
+test("a live snake's view is pinned near its head, so a far snake is not sent", async () => {
+  const arena = await startArena();
+  try {
+    const a = await joinArena(arena.url, "dev-view-a", "peeker");
+    const b = await joinArena(arena.url, "dev-view-b", "faraway");
+    const game = arena.game as unknown as { nids: Map<string, number>; stopLoop(): void };
+    const world = arena.game.world;
+    const sa = world.snakes.find((s) => s.name === "peeker")!;
+    const sb = world.snakes.find((s) => s.name === "faraway")!;
+    const nidB = game.nids.get(sb.id)!;
+    world.clearBots();
+    world.desiredBots = 0;
+    for (const [s, x] of [
+      [sa, 0],
+      [sb, 4000],
+    ] as const) {
+      s.x = x;
+      s.y = 0;
+      s.angle = Math.PI / 2;
+      s.points = [];
+      world.ensureTrail(s);
+      world.inputs.get(s.id)!.angle = Math.PI / 2;
+    }
+    // A view claiming to sit right on the far snake.
+    const peek = new Writer()
+      .u8(C2S.INPUT)
+      .u16(1)
+      .angle(Math.PI / 2)
+      .u8(0)
+      .f32(4000)
+      .f32(0)
+      .f32(900)
+      .f32(600)
+      .u8(0)
+      .finish();
+    a.send(peek);
+    await sleep(100);
+    a.drain(S2C.SNAP);
+    let sawB = false;
+    for (let i = 0; i < 8; i++) {
+      const entries = parseSnap(await a.next(S2C.SNAP), 2);
+      if (entries.some((e) => e.nid === nidB)) sawB = true;
+      a.send(peek);
+    }
+    assert.ok(!sawB, "the far snake never reached the peeker");
+    await a.close();
+    await b.close();
   } finally {
     await arena.stop();
   }
@@ -875,16 +1002,21 @@ test("crossing a league length mid-life is announced and changes the ring for ev
     const watcher = await joinArena(url4, "dev-watch", "watcher");
     const p = await joinArena(url4, "dev-climb", "climber");
     const me = arena.game.world.snakes.find((s) => s.name === "climber");
-    assert.ok(me);
-    // Point the watcher's view at the climber so it holds the climber's entry.
+    const other = arena.game.world.snakes.find((s) => s.name === "watcher");
+    assert.ok(me && other);
+    // Put the climber beside the watcher, whose view sits on its own head.
+    me.x = other.x + 200;
+    me.y = other.y;
+    me.points = [];
+    arena.game.world.ensureTrail(me);
     watcher.send(
       new Writer()
         .u8(C2S.INPUT)
         .u16(1)
         .angle(0)
         .u8(0)
-        .f32(me.x)
-        .f32(me.y)
+        .f32(other.x)
+        .f32(other.y)
         .f32(900)
         .f32(600)
         .u8(0)

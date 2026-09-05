@@ -57,6 +57,8 @@ export const ARENA_ROLL_BEFORE_MS = 90 * 60_000;
 export const ARENA_BOOT_MS = 120_000;
 /** How long one lookup waits on a booting arena before answering with it anyway. */
 const BOOT_WAIT_MS = 5000;
+/** Ticks closer together than this answer with the last result: the endpoint is public. */
+const TICK_MIN_MS = 15_000;
 const HEALTH_TTL_MS = 10_000;
 const LOCK_MS = 60_000;
 const PARTY_ROUTE_MS = 15 * 60_000;
@@ -81,6 +83,11 @@ export class ArenaHost {
   readonly enabled: boolean;
   private readonly health = new Map<string, ArenaHealth>();
   private lastTick = 0;
+  /** The last completed tick's answer and time, for callers asking again too soon. */
+  private lastTickResult: {
+    at: number;
+    result: { arenas: number; created: boolean; drained: string[] };
+  } | null = null;
   /** Rows from the last database read, for synchronous checks. */
   private lastRows: ArenaRow[] = [];
   private ready: Promise<void> | null = null;
@@ -162,8 +169,20 @@ export class ArenaHost {
   /** Maintenance: roll arenas near expiry, drop dead ones. Safe to call often. */
   async tick(): Promise<{ arenas: number; created: boolean; drained: string[] }> {
     if (!this.enabled) return { arenas: 0, created: false, drained: [] };
-    await this.ensureReady();
     const now = Date.now();
+    const last = this.lastTickResult;
+    if (last && now - last.at < TICK_MIN_MS) return last.result;
+    const result = await this.tickNow(now);
+    this.lastTickResult = { at: Date.now(), result };
+    return result;
+  }
+
+  private async tickNow(
+    now: number,
+  ): Promise<{ arenas: number; created: boolean; drained: string[] }> {
+    await this.ensureReady();
+    // Party routes are written by a public endpoint; expired ones are let go here.
+    await this.q(`DELETE FROM agencoil_party_route WHERE until < $1`, [now]).catch(() => undefined);
     const rows = await this.rows();
     let created = false;
     const drained: string[] = [];

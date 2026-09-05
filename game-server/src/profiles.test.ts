@@ -138,6 +138,31 @@ test("rivals: two kills make a nemesis, paybacks erase the lead, old rivals fall
   assert.ok(!p.rivals.some((r) => r.key === "dev-a"), "the oldest went first");
 });
 
+test("a rank is asked of the database once a minute per profile, and again when the best moves", async () => {
+  let counts = 0;
+  const pool = {
+    query: async (text: string) => {
+      if (text.includes("count(*)::text AS n FROM agencoil_profiles WHERE best >")) {
+        counts++;
+        return { rows: [{ n: "4" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  } as unknown as pg.Pool;
+  const store = new ProfileStore(pool);
+  const p = await store.load("dev-rank", "ranked");
+  p.best = 300;
+  const t = Date.now();
+  assert.equal(await store.rank(p, t), 5);
+  assert.equal(await store.rank(p, t + 1000), 5);
+  assert.equal(counts, 1, "the second answer came from the cache");
+  p.best = 900;
+  assert.equal(await store.rank(p, t + 2000), 5);
+  assert.equal(counts, 2, "a new best is asked again");
+  await store.rank(p, t + 2000 + 61_000);
+  assert.equal(counts, 3, "and so is a stale answer");
+});
+
 test("two accounts wanting one handle get distinct handles", async () => {
   const store = new ProfileStore();
   const a = await store.link(null, id, "a");

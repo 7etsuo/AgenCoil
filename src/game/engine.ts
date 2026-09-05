@@ -236,6 +236,7 @@ export class CoilEngine {
   private hudListeners = new Set<(h: HudState) => void>();
   private hudAcc = 0;
   private frames = 0;
+  private frameErrorAt = 0;
   private fpsT = 0;
   private fps = 0;
   private stats: StatsInfo | null = null;
@@ -484,8 +485,16 @@ export class CoilEngine {
       // frame-rate independent. Long gaps (tab hidden) are clamped.
       const raw = Math.min(0.1, (now - this.last) / 1000);
       this.last = now;
-      if (raw > 0) this.tick(Math.min(raw, 1 / 20));
-      this.draw();
+      try {
+        if (raw > 0) this.tick(Math.min(raw, 1 / 20));
+        this.draw();
+      } catch (err) {
+        // A frame that throws must not freeze the game; say so once a second.
+        if (now - this.frameErrorAt > 1000) {
+          this.frameErrorAt = now;
+          console.error("[engine] frame failed:", err);
+        }
+      }
       this.frames++;
       this.fpsT += raw;
       if (this.fpsT >= 0.5) {

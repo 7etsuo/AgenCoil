@@ -91,10 +91,16 @@ export class IdentityGate {
 }
 
 export function identityGateFromEnv(): IdentityGate {
-  const list = (
-    process.env.IDENTITY_HOSTNAMES ??
-    process.env.TURNSTILE_HOSTNAMES ??
+  const configured = process.env.IDENTITY_HOSTNAMES ?? process.env.TURNSTILE_HOSTNAMES;
+  let list = (
+    configured ??
     "snek.grok.me,mmo.agenc.ag,agencoil.vercel.app,agencoil.grok.me,*.grok-sandbox.com,localhost,127.0.0.1"
   ).split(",");
+  // The loopback entries serve local runs and tests, and the sandbox
+  // wildcard serves live previews; in production a ticket must never send
+  // the arena knocking on its own ports, and no preview host anyone can
+  // deploy to may vouch for an account.
+  if (!configured && process.env.NODE_ENV === "production")
+    list = list.filter((h) => h !== "localhost" && h !== "127.0.0.1" && !h.startsWith("*."));
   return new IdentityGate(list);
 }

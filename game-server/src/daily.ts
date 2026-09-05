@@ -72,8 +72,12 @@ export class DailyBoard {
     if (d === this.day) return;
     this.day = d;
     this.best.clear();
+    this.sorted = null;
     this.dirty.clear();
   }
+
+  /** The board as last sorted, until a record changes it. */
+  private sorted: DailyEntry[] | null = null;
 
   record(name: string, length: number): void {
     this.roll();
@@ -83,6 +87,14 @@ export class DailyBoard {
     if (length <= prev) return;
     this.best.set(key, length);
     this.dirty.add(key);
+    this.sorted = null;
+    // A name churner must not grow the day's map without bound: past a few
+    // thousand names, everything outside the top few hundred is let go.
+    if (this.best.size > DAILY_MAX_NAMES) {
+      const keep = [...this.best.entries()].sort((a, b) => b[1] - a[1]).slice(0, DAILY_KEEP_NAMES);
+      this.best = new Map(keep);
+      for (const n of this.dirty) if (!this.best.has(n)) this.dirty.delete(n);
+    }
   }
 
   top(n: number): DailyEntry[] {
@@ -92,10 +104,12 @@ export class DailyBoard {
         console.error("[daily] load failed:", err?.message ?? err);
       });
     }
-    return [...this.best.entries()]
-      .map(([name, best]) => ({ name, best }))
-      .sort((a, b) => b.best - a.best)
-      .slice(0, n);
+    if (!this.sorted)
+      this.sorted = [...this.best.entries()]
+        .map(([name, best]) => ({ name, best }))
+        .sort((a, b) => b.best - a.best)
+        .slice(0, DAILY_KEEP_NAMES);
+    return this.sorted.slice(0, n);
   }
 
   private async flush(): Promise<void> {
@@ -127,6 +141,9 @@ export class DailyBoard {
     }
   }
 }
+
+const DAILY_MAX_NAMES = 4000;
+const DAILY_KEEP_NAMES = 500;
 
 function today(): string {
   return new Date().toISOString().slice(0, 10);

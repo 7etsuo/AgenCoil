@@ -155,6 +155,14 @@ export function cellKeyOf(gx: number, gy: number): number {
   return (gx + GRID_OFF) * GRID_SPAN + (gy + GRID_OFF);
 }
 
+/** The grid coordinates behind a food cell key. */
+export function cellCoordsOf(key: number): { gx: number; gy: number } {
+  return { gx: Math.floor(key / GRID_SPAN) - GRID_OFF, gy: (key % GRID_SPAN) - GRID_OFF };
+}
+
+/** Food cell changes remembered for the sync, at most; older ones fall off and force a full walk. */
+const FOOD_LOG_MAX = 60_000;
+
 /**
  * The arena. Three ways to use it:
  *  - offline: `playerId` is steered by aim, bots run when `host` is true;
@@ -199,6 +207,14 @@ export class World {
    */
   private cellStamps = new Map<number, number>();
   private foodSeq = 0;
+  /**
+   * Every cell stamp, oldest first, so a client's food sync can visit only
+   * the cells that changed since its last one instead of its whole view.
+   * Bounded: a client further behind than the log reaches walks everything.
+   */
+  private foodLog: { key: number; seq: number }[] = [];
+  private foodLogFloor = 0;
+  private changedCache: { seq: number; upTo: number; keys: Set<number> } | null = null;
   private foodIndex = new Map<Food, number>();
   /** Food regions: each region's share of the target, and how many orbs it holds. */
   private readonly regionQuota = new Map<number, number>();
@@ -421,11 +437,40 @@ export class World {
     return f;
   }
 
+  /** Mark a food cell changed: a new stamp, and a line in the change log. */
+  private stampCell(key: number): void {
+    const seq = ++this.foodSeq;
+    this.cellStamps.set(key, seq);
+    this.foodLog.push({ key, seq });
+    if (this.foodLog.length > FOOD_LOG_MAX) {
+      this.foodLog.splice(0, FOOD_LOG_MAX >> 1);
+      this.foodLogFloor = this.foodLog[0]!.seq - 1;
+    }
+  }
+
+  /** The current food change counter; a sync records it to ask for changes since. */
+  get foodSeqNow(): number {
+    return this.foodSeq;
+  }
+
+  /** The cells changed after `seq`, or null when the log no longer reaches back that far. */
+  foodCellsChangedSince(seq: number): ReadonlySet<number> | null {
+    if (seq < this.foodLogFloor) return null;
+    // Every client synced in one tick asks the same question.
+    const cached = this.changedCache;
+    if (cached && cached.seq === seq && cached.upTo === this.foodSeq) return cached.keys;
+    const keys = new Set<number>();
+    for (let i = this.foodLog.length - 1; i >= 0 && this.foodLog[i]!.seq > seq; i--)
+      keys.add(this.foodLog[i]!.key);
+    this.changedCache = { seq, upTo: this.foodSeq, keys };
+    return keys;
+  }
+
   private bucket(f: Food, key: number, countRegion = true): void {
     const bucket = this.grid.get(key);
     if (bucket) bucket.push(f);
     else this.grid.set(key, [f]);
-    this.cellStamps.set(key, ++this.foodSeq);
+    this.stampCell(key);
     if (!countRegion) return;
     const rk = regionKey(f.x, f.y);
     this.regionCount.set(rk, (this.regionCount.get(rk) ?? 0) + 1);
@@ -464,7 +509,7 @@ export class World {
   }
 
   clearFood(): void {
-    for (const key of this.grid.keys()) this.cellStamps.set(key, ++this.foodSeq);
+    for (const key of this.grid.keys()) this.stampCell(key);
     this.foods = [];
     this.foodById.clear();
     this.foodIndex.clear();
@@ -483,7 +528,7 @@ export class World {
       bucket.pop();
     }
     if (!bucket.length) this.grid.delete(key);
-    this.cellStamps.set(key, ++this.foodSeq);
+    this.stampCell(key);
     if (!countRegion) return;
     const rk = regionKey(f.x, f.y);
     const n = (this.regionCount.get(rk) ?? 1) - 1;
@@ -1464,6 +1509,16 @@ export class World {
     if (this.stepping) this.deaths.push(event);
     else this.queuedDeaths.push(event);
     this.lags.delete(s.id);
+  }
+
+  /**
+   * Hand the last step's events back for the next one: the server calls it
+   * when a tick threw before it could book them, so no death goes unspoken.
+   */
+  requeueDeaths(): void {
+    if (!this.deaths.length) return;
+    this.queuedDeaths = [...this.deaths, ...this.queuedDeaths];
+    this.deaths = [];
   }
 
   /** Kill from outside the tick (a disconnected player is dropped, for one). */

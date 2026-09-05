@@ -493,6 +493,39 @@ test("a tick that finds several stale arenas starts one successor, not one each"
   }
 });
 
+test("ticks closer than fifteen seconds answer with the last result", async () => {
+  const { mkdirSync: mk } = await import("node:fs");
+  const outDir = join(root, "game-server", "node_modules", ".cache");
+  mk(outDir, { recursive: true });
+  const out = join(outDir, "agencoil-arena-throttle.test.mjs");
+  await esbuild.build({
+    entryPoints: [join(root, "game-server", "src", "arena-host.ts")],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    external: ["pg", "@vercel/sandbox"],
+    outfile: out,
+    logLevel: "silent",
+  });
+  const { ArenaHost } = await import(pathToFileURL(out).href);
+  let reads = 0;
+  const pool = {
+    query: async (text) => {
+      if (text.includes("FROM agencoil_arena WHERE expires_at")) {
+        reads++;
+        return { rows: [], rowCount: 0 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const host = new ArenaHost(pool, { VERCEL: "1", GAME_SECRET: "s", VERCEL_DEPLOYMENT_ID: "d" });
+  host.createArena = async () => false;
+  const first = await host.tick();
+  const second = await host.tick();
+  assert.equal(second, first, "the same answer, no second read");
+  assert.equal(reads, 1);
+});
+
 test("league stakes: three runs bank a tier, and each tier's payout is fixed", () => {
   assert.equal(rules.bankedTierOf([0, 0, 0, 0, 0]), 0);
   assert.equal(rules.bankedTierOf([3, 2, 0, 0, 0]), 1, "Bronze after three lives of any length");
