@@ -107,6 +107,7 @@ import {
 } from "../../src/game/contracts";
 import { ArenaHost } from "./arena-host";
 import { EventLog } from "./events";
+import { checkAgentPass, mintAgentPass } from "./agent-pass";
 
 interface View {
   cx: number;
@@ -194,6 +195,8 @@ interface Client {
   /** The food cells synced last time (null forces a full walk) and the change counter then. */
   foodRect: { gx0: number; gx1: number; gy0: number; gy1: number } | null;
   foodSeq: number;
+  /** Carried a valid agent pass on its URL: one of the owner's headless clients. */
+  trusted: boolean;
   /** The contract this player is hunting, the mark on them, and contracts filled in a row. */
   hunt: Hunt | null;
   mark: Mark | null;
@@ -848,8 +851,11 @@ export class GameServer {
     // Wire protocol the client speaks: 2 adds a level byte to full entries,
     // 3 adds league and might bytes and a league byte per board row, 4 the
     // finish byte, 5 a level byte and a flags byte (crown, linked) per board row.
-    const asked = Number(new URL(req.url ?? "/", "http://x").searchParams.get("v"));
+    const params = new URL(req.url ?? "/", "http://x").searchParams;
+    const asked = Number(params.get("v"));
     const proto = Number.isFinite(asked) ? Math.max(1, Math.min(5, Math.floor(asked))) : 1;
+    // The owner's headless agents carry a signed pass: no per-address caps, no human gate.
+    const trusted = checkAgentPass(params.get("agent"), this.secret);
     const now = Date.now();
     const recent = (this.connectLog.get(ip) ?? []).filter((t) => now - t < 60_000);
     recent.push(now);
@@ -861,6 +867,7 @@ export class GameServer {
     const local = peer === "127.0.0.1" || peer === "::1" || peer === "::ffff:127.0.0.1";
     if (
       !local &&
+      !trusted &&
       (recent.length > CONNECTS_PER_MINUTE || (this.connsByIp.get(ip) ?? 0) >= MAX_CONNS_PER_IP)
     ) {
       ws.close(1008, "too many connections");
@@ -944,6 +951,7 @@ export class GameServer {
       killerNid: 0,
       foodRect: null,
       foodSeq: -1,
+      trusted,
       hunt: null,
       mark: null,
       huntStreak: 0,
@@ -1122,7 +1130,7 @@ export class GameServer {
     if (resume?.humanExp && resume.humanExp > Date.now()) {
       client.verifiedUntil = resume.humanExp;
     }
-    if (this.playGate.enabled && client.verifiedUntil <= Date.now()) {
+    if (this.playGate.enabled && client.verifiedUntil <= Date.now() && !client.trusted) {
       const verifiedUntil = this.playGate.redeem(playTicket, client.ip);
       if (!verifiedUntil) {
         client.ws.send(
@@ -2812,4 +2820,4 @@ export function makeHelloPayload(
   return w.finish();
 }
 
-export { START_MASS };
+export { START_MASS, checkAgentPass, mintAgentPass };

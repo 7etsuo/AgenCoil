@@ -19,7 +19,8 @@ const out = join(outDir, `game-server.test-${process.pid}.mjs`);
 writeFileSync(
   entry,
   `export { GameServer } from "${root}src/game-server.ts";\n` +
-    `export * as protocol from "${root}../src/game/protocol.ts";\n`,
+    `export * as protocol from "${root}../src/game/protocol.ts";\n` +
+    `export { mintAgentPass, checkAgentPass } from "${root}src/agent-pass.ts";\n`,
 );
 buildSync({
   entryPoints: [entry],
@@ -30,8 +31,12 @@ buildSync({
   outfile: out,
   logLevel: "silent",
 });
-const { GameServer, protocol } = (await import(pathToFileURL(out).href)) as {
+const { GameServer, protocol, mintAgentPass, checkAgentPass } = (await import(
+  pathToFileURL(out).href
+)) as {
   GameServer: typeof GameServerT;
+  mintAgentPass: (secret: string, now?: number) => string;
+  checkAgentPass: (pass: string | null, secret: string, now?: number) => boolean;
   protocol: typeof ProtocolT;
 };
 rmSync(out, { force: true });
@@ -713,6 +718,38 @@ test("a socket asking to spawn again inside the throttle window is ignored", asy
     await assert.rejects(p.next(S2C.SPAWNED, 600), "no second spawn");
     assert.equal(arena.game.world.snakes.filter((s) => !s.isBot && s.alive).length, 1);
     await p.close();
+  } finally {
+    await arena.stop();
+  }
+});
+
+test("an agent pass is honoured only when signed with the game secret and fresh", async () => {
+  const check = (p: string | null): boolean => checkAgentPass(p, "test-secret");
+  assert.equal(check(mintAgentPass("test-secret")), true, "signed with the secret");
+  assert.equal(check(mintAgentPass("other-secret")), false, "signed with something else");
+  assert.equal(check(mintAgentPass("test-secret", Date.now() - 2 * 86_400_000)), false, "stale");
+  assert.equal(check(null), false);
+  assert.equal(check("garbage"), false);
+  assert.equal(check("123.abc"), false);
+  // On a socket: the pass marks the client trusted; a forged one does not.
+  const arena = await startArena();
+  try {
+    const game = arena.game as unknown as { clients: Set<{ trusted: boolean; key: string }> };
+    const good = new Player(
+      `${arena.url}&agent=${encodeURIComponent(mintAgentPass("test-secret"))}`,
+    );
+    await good.open();
+    good.send(ident("dev-pass-good", "passer"));
+    await good.next(S2C.PROFILE);
+    const bad = new Player(`${arena.url}&agent=${encodeURIComponent(mintAgentPass("nope"))}`);
+    await bad.open();
+    bad.send(ident("dev-pass-bad", "forger"));
+    await bad.next(S2C.PROFILE);
+    const byKey = (k: string) => [...game.clients].find((c) => c.key === k)!;
+    assert.equal(byKey("dev-pass-good").trusted, true);
+    assert.equal(byKey("dev-pass-bad").trusted, false);
+    await good.close();
+    await bad.close();
   } finally {
     await arena.stop();
   }

@@ -406,8 +406,13 @@ export class NetSession {
     let ws: WebSocket;
     try {
       // Announce the wire protocol on the URL so the server knows it before
-      // the first snapshot (see `proto` on the server's client record).
-      ws = new WebSocket(target + (target.includes("?") ? "&" : "?") + `v=${PROTO}`);
+      // the first snapshot (see `proto` on the server's client record). Any
+      // query the configured URL carries (an agent pass) goes to whichever
+      // arena the coordinator named.
+      const dial = new URL(target);
+      for (const [k, v] of new URL(this.url).searchParams) dial.searchParams.set(k, v);
+      dial.searchParams.set("v", String(PROTO));
+      ws = new WebSocket(dial.toString());
     } catch {
       this.scheduleRetry();
       return;
