@@ -300,8 +300,6 @@ function capacityFromEnv(): number {
 
 /** First-life helper bots beyond the scaled bot count; past this, newcomers get none. */
 const HELPER_BOT_SLACK = 6;
-/** Helpers start at mass 14; a bot under this is still someone's helper and is not retired. */
-const HELPER_BOT_MASS = 20;
 /** Orbs one food sync may add; a cell cut short is finished on the next one. */
 const FOOD_ADD_CAP = 1500;
 
@@ -1920,9 +1918,11 @@ export class GameServer {
     // 20 Hz instead of 30 when a step is getting expensive.
     if (this.tick % SERVER_TICK_HZ === 0) {
       this.dropIdleSockets();
+      // Bots scale down by attrition: over the target none respawns, and
+      // none is ever killed by the server, so a bot only dies the way a
+      // snake dies, by driving into something.
       const players = this.clients.size;
       this.world.desiredBots = Math.max(SERVER_BOTS_MIN, SERVER_BOTS - Math.floor(players * 0.6));
-      this.retireSurplusBot();
       this.checkPromotions();
       const mode = modeNow().id;
       this.world.remainsMult = mode === MODE_DOUBLE_REMAINS ? 2 : 1;
@@ -1970,31 +1970,6 @@ export class GameServer {
       return false;
     }
     return buffered < SEND_SKIP_BYTES;
-  }
-
-  /**
-   * Bots scale down as players arrive. Not spawning more only waits for
-   * attrition, and bots are good at surviving, so once a second the
-   * smallest grown bot over the target retires into remains.
-   */
-  private retireSurplusBot(): void {
-    let bots = 0;
-    let victim: Snake | null = null;
-    for (const s of this.world.snakes) {
-      if (!s.isBot || !s.alive || s.boss) continue;
-      bots++;
-      if (s.mass < HELPER_BOT_MASS || (victim && s.mass >= victim.mass)) continue;
-      // Never in front of anyone: a bot dying with nothing near it reads as a bug.
-      let seen = false;
-      for (const c of this.clients) {
-        if (this.snakeVisible(c, s)) {
-          seen = true;
-          break;
-        }
-      }
-      if (!seen) victim = s;
-    }
-    if (bots > this.world.desiredBots && victim) this.world.killSnake(victim.id);
   }
 
   /**

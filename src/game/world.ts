@@ -63,10 +63,6 @@ const TAIL_HIST = SERVER_TICK_HZ;
 const BOSS_HIT_EVERY = SERVER_TICK_HZ;
 /** Ticks the boss spends heading for one landmark before moving on. */
 const BOSS_LEG_TICKS = SERVER_TICK_HZ * 45;
-/** Bots past this length boost freely, shedding what they cannot use. */
-const BOT_SOFT_CAP = 2000;
-/** Bots past this length boost without pause, shedding it as pellets until they are back under. */
-const BOT_HARD_CAP = 4500;
 const GRID_OFF = 256;
 const GRID_SPAN = 512;
 /**
@@ -1077,13 +1073,6 @@ export class World {
     if (s.think <= 0) {
       s.think = 0.2 + Math.random() * 0.2;
       this.chooseGoal(s);
-      // Without enough players to hunt them, bots would compound forever
-      // and the arena would fill with giants. Big bots get reckless and
-      // shed length; past the hard cap they boost without pause, which
-      // sheds it as pellets everyone can eat and gets them killed the way
-      // snakes die, by driving into something, never by popping unprovoked.
-      if (s.mass > BOT_SOFT_CAP && Math.random() < 0.5) s.boostLeft = 0.4;
-      if (s.mass > BOT_HARD_CAP) s.boostLeft = 1;
     }
     if (s.avoid <= 0) {
       s.avoid = 0.08;
@@ -1105,23 +1094,43 @@ export class World {
       return;
     }
 
-    // Flee a bigger head that is close and pointed at us.
+    // A bigger head that is close and coming our way: flee it, or cut it
+    // off. Crossing in front of a head that cannot turn in time is how
+    // giants fall in slither.io, and a bold bot tries it when it can reach
+    // the crossing point first; it is risky, which is the point. Nothing
+    // else keeps a bot-only arena from filling with giants that never die.
     let threat: Snake | null = null;
     let threatD = (300 + r * 4) ** 2;
+    let threatToward = 0;
     for (const o of this.snakes) {
       if (o === s || !o.alive || o.mass < s.mass * (1.05 + bold * 0.4)) continue;
       const d = dist2(s.x, s.y, o.x, o.y);
       if (d > threatD) continue;
       const toward = Math.abs(wrapAngle(Math.atan2(s.y - o.y, s.x - o.x) - o.angle));
-      if (toward < 1.1) {
+      if (toward < 1.4) {
         threatD = d;
         threat = o;
+        threatToward = toward;
       }
     }
     if (threat) {
-      s.wander = Math.atan2(s.y - threat.y, s.x - threat.x) + randRange(-0.4, 0.4);
-      if (Math.random() < 0.6) s.boostLeft = 0.35 + Math.random() * 0.4;
-      return;
+      const lead = radiusOf(threat.mass) * 2.5 + speedOf(threat.mass, threat.boosting) * 0.5;
+      const px = threat.x + Math.cos(threat.angle) * lead;
+      const py = threat.y + Math.sin(threat.angle) * lead;
+      const ours = Math.hypot(px - s.x, py - s.y) / speedOf(s.mass, true);
+      const theirs = lead / speedOf(threat.mass, threat.boosting);
+      const canCut =
+        !threat.rookie && !threat.boss && threat.invuln <= 0 && s.mass > 40 && ours < theirs * 0.9;
+      if (canCut && Math.random() < bold * 0.7) {
+        s.wander = Math.atan2(py - s.y, px - s.x);
+        s.boostLeft = 0.4 + Math.random() * 0.4;
+        return;
+      }
+      if (threatToward < 1.1) {
+        s.wander = Math.atan2(s.y - threat.y, s.x - threat.x) + randRange(-0.4, 0.4);
+        if (Math.random() < 0.6) s.boostLeft = 0.35 + Math.random() * 0.4;
+        return;
+      }
     }
 
     // Coil: a big snake wraps a much smaller one that strayed inside its reach.

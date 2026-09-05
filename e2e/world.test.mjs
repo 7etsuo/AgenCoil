@@ -457,3 +457,45 @@ test("food regrows where it was eaten, so the rim is never richer than the middl
   const rimShare = (1 - share(R * 0.8)) * world.foods.length;
   assert.ok(rim < rimShare * 1.15, `rim ${rim} vs even ${rimShare.toFixed(0)}`);
 });
+
+test("a bot never boosts or dies on its own: no length cap, no shedding", () => {
+  const world = new World(true);
+  world.clearFood();
+  const bot = world.spawnBot(new Set());
+  bot.mass = 6000;
+  bot.x = 0;
+  bot.y = 0;
+  bot.invuln = 0;
+  bot.points = [];
+  world.ensureTrail(bot);
+  // Alone in an empty arena there is nothing to flee, hunt or eat: a giant
+  // bot drifts, and never once boosts its length away.
+  for (let i = 0; i < 60; i++) {
+    world.thinkBot(bot, 0.3);
+    assert.equal(bot.boosting, false, `a lone giant bot boosted at decision ${i}`);
+  }
+});
+
+test("a bold bot cuts across a bigger head it can beat to the crossing point", () => {
+  const world = new World(true);
+  world.clearFood();
+  // A big snake heading east along the x axis, a small bold bot ahead and to its right.
+  place(world, "big", 0, 0, 0, 3000);
+  const bot = world.spawnBot(new Set());
+  bot.mass = 60;
+  bot.temper = 1;
+  bot.invuln = 0;
+  let cut = false;
+  for (let i = 0; i < 30 && !cut; i++) {
+    bot.x = 200;
+    bot.y = -100;
+    bot.angle = 0;
+    bot.points = [];
+    world.ensureTrail(bot);
+    world.chooseGoal(bot);
+    // Fleeing points away from the head (about -0.5 rad); the crossing point
+    // sits just ahead of the head, down and to the right of the bot.
+    if (bot.wander > 0.8 && bot.wander < 1.9) cut = true;
+  }
+  assert.ok(cut, "the bot went for the crossing point");
+});

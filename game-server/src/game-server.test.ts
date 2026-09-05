@@ -639,7 +639,6 @@ test("a socket that never says hello, or falls silent, is closed", async () => {
     // The idle sweep runs once a second.
     assert.equal(await muteClosed, "no hello");
     const p = await joinArena(arena.url, "dev-idle", "quiet");
-    const closed = closeReason(p.ws);
     const ping = new Writer().u8(C2S.PING).u32(0).finish();
     // Kept alive by pings for two seconds, then left alone.
     for (let i = 0; i < 4; i++) {
@@ -647,7 +646,7 @@ test("a socket that never says hello, or falls silent, is closed", async () => {
       await sleep(500);
     }
     assert.equal(p.ws.readyState, WebSocket.OPEN, "a pinging socket stays");
-    assert.equal(await closed, "idle");
+    assert.equal(await closeReason(p.ws), "idle");
   } finally {
     await arena.stop();
   }
