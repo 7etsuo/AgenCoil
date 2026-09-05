@@ -450,6 +450,7 @@ function parseStats2(r: InstanceType<typeof Reader>): {
   markSecs: number;
   markReward: number;
   markName: string;
+  cutoffs: number[];
 } {
   r.f32();
   r.u16();
@@ -496,8 +497,10 @@ function parseStats2(r: InstanceType<typeof Reader>): {
   const markSecs = r.u16();
   const markReward = r.u16();
   const markName = r.str();
+  const cutoffs = [r.u32(), r.u32(), r.u32(), r.u32(), r.u32()];
   assert.equal(r.remaining, 0, "stats fully consumed");
   return {
+    cutoffs,
     nemesisNid,
     huntNid,
     huntSecs,
@@ -575,6 +578,7 @@ test("contracts: the hunter who fills one is paid, and the marked player is paid
     assert.equal(sta.huntNid, nidB, "the hunter's stats name the target");
     assert.ok(sta.huntReward > 0 && sta.huntSecs > 0, "with a reward and a clock");
     assert.equal(sta.huntName, "quarry");
+    assert.deepEqual(sta.cutoffs, [0, 300, 800, 1500, 3000], "no field yet: the fixed ladder");
     const stb = parseStats2(await b.next(S2C.STATS2));
     assert.equal(stb.markNid, nidA, "the target's stats name the hunter");
     // The hunter takes the quarry down inside the clock: paid, and a streak begins.
@@ -1304,6 +1308,7 @@ test("protocol 4 full entries carry league, might and finish, protocol 5 board r
       stats.u16();
       stats.u16();
       stats.str();
+      for (let i = 0; i < 5; i++) stats.u32();
       assert.equal(stats.remaining, 0, `protocol ${proto}: stats fully consumed`);
       const profile = parseProfile(await p.next(S2C.PROFILE));
       assert.equal(profile.bankedTier, 0);

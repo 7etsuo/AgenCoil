@@ -34,7 +34,12 @@ export const STREAK_MILESTONES: { days: number; unlock: number; label: string }[
 /** Games played per earned streak freeze; at most one banked. */
 export const FREEZE_EVERY_GAMES = 5;
 
-/** Weekly leagues by weekly best length. */
+/**
+ * Weekly leagues. `min` is the fixed ladder: the length a week's best must
+ * reach for a tier when the season's field is not known yet, or is too
+ * small to take percentiles of. With a field, the tiers are relative (see
+ * `LEAGUE_SHARES` and `cutoffsFrom`).
+ */
 export const LEAGUES = [
   { name: "Bronze", min: 0 },
   { name: "Silver", min: 300 },
@@ -42,6 +47,36 @@ export const LEAGUES = [
   { name: "Platinum", min: 1500 },
   { name: "Diamond", min: 3000 },
 ] as const;
+
+/**
+ * Each tier is the top share of the season's players by season best:
+ * Diamond the top 2%, Platinum the top 8%, Gold the top 25%, Silver the
+ * top 55%, Bronze everyone. The server turns the field into length cutoffs
+ * (`cutoffsFrom`) and sends them to every client, so the same run is
+ * Diamond in a weak field and Gold in a strong one.
+ */
+export const LEAGUE_SHARES = [1, 0.55, 0.25, 0.08, 0.02] as const;
+/** Fewer season players than this, and the fixed ladder is used instead of percentiles. */
+export const LEAGUE_MIN_FIELD = 20;
+/** The length a best must reach per tier, Bronze first (always 0). */
+export type Cutoffs = readonly number[];
+export const DEFAULT_CUTOFFS: Cutoffs = LEAGUES.map((l) => l.min);
+
+/** The cutoffs for a field of season bests, sorted ascending: each tier's share taken from the top. */
+export function cutoffsFrom(bestsAscending: readonly number[]): Cutoffs {
+  const n = bestsAscending.length;
+  if (n < LEAGUE_MIN_FIELD) return DEFAULT_CUTOFFS;
+  const out: number[] = [0];
+  for (let i = 1; i < LEAGUE_SHARES.length; i++) {
+    const pos = (1 - LEAGUE_SHARES[i]!) * (n - 1);
+    const lo = Math.floor(pos);
+    const hi = Math.min(n - 1, lo + 1);
+    const v = bestsAscending[lo]! + (bestsAscending[hi]! - bestsAscending[lo]!) * (pos - lo);
+    // Strictly rising, so a flat field still has five distinct tiers.
+    out.push(Math.max(Math.round(v), out[i - 1]! + 1));
+  }
+  return out;
+}
 
 /**
  * The crest of each league, in LEAGUES order: a silhouette nobody confuses
@@ -92,11 +127,12 @@ export function rewardText(tier: number): string {
   return parts.length ? parts.join(", ") : "nothing";
 }
 
-export function leagueOf(weekBest: number): number {
+/** The tier index (0 Bronze to 4 Diamond) a best reaches on the given ladder. */
+export function leagueOf(best: number, cutoffs: Cutoffs = DEFAULT_CUTOFFS): number {
   let tier = 0;
-  LEAGUES.forEach((l, i) => {
-    if (weekBest >= l.min) tier = i;
-  });
+  for (let i = 0; i < LEAGUES.length; i++) {
+    if (best >= (cutoffs[i] ?? LEAGUES[i]!.min)) tier = i;
+  }
   return tier;
 }
 

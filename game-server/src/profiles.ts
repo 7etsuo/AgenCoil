@@ -9,6 +9,9 @@ import { retryDb } from "./db-retry";
 import {
   CHEST_SHARDS,
   COSMETIC_ORDER,
+  DEFAULT_CUTOFFS,
+  cutoffsFrom,
+  type Cutoffs,
   cosmeticName,
   FREEZE_EVERY_GAMES,
   LEAGUES,
@@ -222,6 +225,8 @@ export interface ChallengeView {
 export const PROFILE_IDLE_MS = 10 * 60_000;
 /** How long a rank answer stands for a profile whose best has not changed. */
 export const RANK_CACHE_MS = 60_000;
+/** How long the season's tier cutoffs stand before the field is read again. */
+export const CUTOFF_CACHE_MS = 5 * 60_000;
 
 export class ProfileStore {
   private readonly cache = new Map<string, Profile>();
@@ -674,6 +679,7 @@ export class ProfileStore {
     p: Profile,
     life: LifeStats,
     at?: { x: number; y: number },
+    cutoffs: Cutoffs = DEFAULT_CUTOFFS,
   ): {
     completed: Challenge[];
     milestones: string[];
@@ -707,7 +713,7 @@ export class ProfileStore {
     // League stakes: this life counts for every tier its length reaches.
     p.weekLives++;
     for (let i = 0; i < LEAGUES.length; i++) {
-      if (life.length >= LEAGUES[i]!.min) p.weekRuns[i] = (p.weekRuns[i] ?? 0) + 1;
+      if (life.length >= (cutoffs[i] ?? LEAGUES[i]!.min)) p.weekRuns[i] = (p.weekRuns[i] ?? 0) + 1;
     }
     const bankedBefore = p.bankedTier;
     p.bankedTier = Math.max(p.bankedTier, bankedTierOf(p.weekRuns));
@@ -1183,6 +1189,44 @@ export class ProfileStore {
       }
     }
     this.rarityCache = { at: Date.now(), value };
+    return value;
+  }
+
+  private cutoffCache: { at: number; value: Cutoffs } | null = null;
+
+  /**
+   * The season's tier cutoffs, from the field of season bests (flagged
+   * profiles excluded, so automated play never sets the bar). Cached five
+   * minutes; the fixed ladder when the field is too small.
+   */
+  async leagueCutoffs(now = Date.now()): Promise<Cutoffs> {
+    if (this.cutoffCache && now - this.cutoffCache.at < CUTOFF_CACHE_MS)
+      return this.cutoffCache.value;
+    const season = seasonOf();
+    let bests: number[] = [];
+    if (this.pool) {
+      try {
+        await this.ensureReady();
+        const r = await retryDb(() =>
+          this.pool!.query<{ b: number }>(
+            `SELECT season_best AS b FROM agencoil_profiles
+             WHERE season = $1 AND season_best > 0 AND flagged = false
+             ORDER BY season_best ASC LIMIT 200000`,
+            [season],
+          ),
+        );
+        bests = r.rows.map((x) => Number(x.b) || 0);
+      } catch (err) {
+        console.error("[profiles] cutoffs failed:", (err as Error)?.message ?? err);
+        if (this.cutoffCache) return this.cutoffCache.value;
+      }
+    } else {
+      for (const p of this.cache.values())
+        if (p.season === season && p.seasonBest > 0 && !p.flagged) bests.push(p.seasonBest);
+      bests.sort((a, b) => a - b);
+    }
+    const value = cutoffsFrom(bests);
+    this.cutoffCache = { at: now, value };
     return value;
   }
 

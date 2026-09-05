@@ -25,9 +25,11 @@ import { Renderer, desiredZoom, type MapMark, type Promotion } from "./render";
 import { GameAudio } from "./audio";
 import { ACHIEVEMENT_BY_ID } from "./achievements";
 import {
+  DEFAULT_CUTOFFS,
   LEAGUES,
   LEAGUE_BANK_RUNS,
   LEAGUE_COLORS,
+  type Cutoffs,
   leagueOf,
   nextUtcMidnight,
   nextWeekRoll,
@@ -143,6 +145,8 @@ export interface HudState {
   };
   /** Contracts filled this life. */
   contractsDone: number;
+  /** The season's league ladder from the server: the length a best must reach per tier. */
+  cutoffs: number[];
   firstLife: boolean;
   party: { name: string; mass: number }[];
   arenaMode: { id: number; secsLeft: number; secsToNext: number };
@@ -682,9 +686,14 @@ export class CoilEngine {
     this.spawnLocal();
   }
 
+  /** The season's league ladder, as the server last sent it. */
+  private get cutoffs(): Cutoffs {
+    return this.stats?.cutoffs ?? DEFAULT_CUTOFFS;
+  }
+
   /** The league a life starts in, from the profile the server last sent (Bronze without one). */
   private startTier(): number {
-    return this.profile ? leagueOf(this.profile.weekBest) + 1 : 1;
+    return this.profile ? leagueOf(this.profile.weekBest, this.cutoffs) + 1 : 1;
   }
 
   /** What a life is measured against, decided as it starts. */
@@ -755,7 +764,7 @@ export class CoilEngine {
     s.trail = this.look.trail;
     s.deathFx = this.look.deathFx;
     // The standing the server last told us about, so the tag looks the same offline.
-    s.league = this.profile ? leagueOf(this.profile.weekBest) + 1 : 0;
+    s.league = this.profile ? leagueOf(this.profile.weekBest, this.cutoffs) + 1 : 0;
     s.might = this.profile?.achv.length ?? 0;
     s.finish = this.profile?.prevTier ?? 0;
     this.phase = "play";
@@ -919,7 +928,8 @@ export class CoilEngine {
       contract: this.contractView(),
       contractsDone: this.contractsDone,
       // The live snake knows its league before the profile is resent.
-      league: p?.league || (this.profile ? leagueOf(this.profile.weekBest) + 1 : 0),
+      league: p?.league || (this.profile ? leagueOf(this.profile.weekBest, this.cutoffs) + 1 : 0),
+      cutoffs: [...this.cutoffs],
       might: this.profile?.achv.length ?? 0,
       finish: this.profile?.prevTier ?? 0,
       bankedTier: this.profile?.bankedTier ?? 0,
@@ -1248,13 +1258,16 @@ export class CoilEngine {
     // League stakes: the next tier by length, and the runs still needed to bank the one reached.
     if (this.profile) {
       const weekBest = Math.max(this.profile.weekBest, score);
-      const next = LEAGUES.find((l) => l.min > weekBest);
-      if (next)
+      const cutoffs = this.cutoffs;
+      const nextIdx = LEAGUES.findIndex((_, i) => i > 0 && (cutoffs[i] ?? 0) > weekBest);
+      if (nextIdx > 0) {
+        const at = cutoffs[nextIdx]!;
         cands.push({
-          text: `${next.name} at ${next.min} · ${next.min - weekBest} to go`,
-          frac: weekBest / next.min,
+          text: `${LEAGUES[nextIdx]!.name} at ${at} · ${at - weekBest} to go`,
+          frac: weekBest / at,
         });
-      const reached = leagueOf(this.profile.weekBest);
+      }
+      const reached = leagueOf(this.profile.weekBest, cutoffs);
       const runs = this.profile.weekRuns[reached] ?? 0;
       if (reached > 0 && reached + 1 > this.profile.bankedTier && runs < LEAGUE_BANK_RUNS)
         cands.push({

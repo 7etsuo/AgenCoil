@@ -854,7 +854,7 @@ export function CoilApp() {
             {hud.profile &&
               hud.clocks.weekMs < 6 * 3600_000 &&
               (() => {
-                const tier = leagueOf(hud.profile.weekBest) + 1;
+                const tier = leagueOf(hud.profile.weekBest, hud.cutoffs) + 1;
                 const runs = hud.profile.weekRuns[tier - 1] ?? 0;
                 if (tier < 2 || runs === 0 || runs >= LEAGUE_BANK_RUNS) return null;
                 return (
@@ -989,7 +989,7 @@ export function CoilApp() {
             </div>
             {hud?.profile &&
               (() => {
-                const tier = leagueOf(hud.profile.weekBest) + 1;
+                const tier = leagueOf(hud.profile.weekBest, hud.cutoffs) + 1;
                 const name = LEAGUES[tier - 1]!.name;
                 const runs = hud.profile.weekRuns[tier - 1] ?? 0;
                 const banked = hud.profile.bankedTier;
@@ -998,7 +998,7 @@ export function CoilApp() {
                     ? `${LEAGUES[banked - 1]!.name} banked for the week`
                     : tier > 1
                       ? `${runs}/${LEAGUE_BANK_RUNS} to bank ${name}${banked > 0 ? ` · ${LEAGUES[banked - 1]!.name} banked` : ""}`
-                      : `Silver at ${LEAGUES[1]!.min}`;
+                      : `Silver at ${hud.cutoffs[1]}`;
                 return (
                   <div className="mt-3 flex items-center gap-3 rounded-lg border border-line bg-bg/40 px-3 py-2">
                     <Crest tier={tier} size={40} />
@@ -1471,11 +1471,12 @@ export function CoilApp() {
                         : "";
                     })()}
                     {" · "}
-                    {LEAGUES[leagueOf(hud.profile.weekBest)]!.name} league this week
+                    {LEAGUES[leagueOf(hud.profile.weekBest, hud.cutoffs)]!.name} league this week
                     {(() => {
-                      const t = leagueOf(hud.profile!.weekBest);
+                      const t = leagueOf(hud.profile!.weekBest, hud.cutoffs);
                       const nxt = LEAGUES[t + 1];
-                      return nxt ? ` (${nxt.min - hud.profile!.weekBest} to ${nxt.name})` : "";
+                      const at = hud.cutoffs[t + 1] ?? 0;
+                      return nxt ? ` (${at - hud.profile!.weekBest} to ${nxt.name})` : "";
                     })()}
                     {hud.profile.prevTier > 0 &&
                       ` · finished last week in ${LEAGUES[hud.profile.prevTier - 1]?.name ?? ""}`}
@@ -1511,12 +1512,17 @@ export function CoilApp() {
                       League stakes · {LEAGUE_BANK_RUNS} lives at a tier&apos;s length bank it for
                       the week
                     </div>
+                    <div className="mt-0.5 text-subtle">
+                      Tiers are shares of this season&apos;s players: Diamond the top 2%, Platinum
+                      the top 8%, Gold the top 25%, Silver the top 55%. The lengths move with the
+                      field.
+                    </div>
                     <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-subtle">
                       {LEAGUES.map((l, i) => (
                         <span key={l.name} className="inline-flex items-center gap-1">
                           <Crest tier={i + 1} size={14} />
                           <span style={{ color: LEAGUE_COLORS[i] }}>{l.name}</span>{" "}
-                          {i > 0 ? `${l.min}+` : "any"} · {hud.profile!.weekRuns[i] ?? 0}/
+                          {i > 0 ? `${hud.cutoffs[i]}+` : "any"} · {hud.profile!.weekRuns[i] ?? 0}/
                           {LEAGUE_BANK_RUNS}
                         </span>
                       ))}
@@ -1676,7 +1682,7 @@ export function CoilApp() {
               {hud.profile &&
                 (() => {
                   // The rank row: where the life started and where it ended, and the bank.
-                  const tier = leagueOf(hud.score) + 1;
+                  const tier = leagueOf(hud.score, hud.cutoffs) + 1;
                   const from = Math.min(hud.spawnTier || 1, tier);
                   const runs = hud.profile.weekRuns[tier - 1] ?? 0;
                   const name = LEAGUES[tier - 1]!.name;
@@ -1697,7 +1703,7 @@ export function CoilApp() {
                       ) : (
                         <>
                           <Crest tier={tier} size={24} />
-                          <span>{tier > 1 ? `a ${name} run` : `Silver at ${LEAGUES[1]!.min}`}</span>
+                          <span>{tier > 1 ? `a ${name} run` : `Silver at ${hud.cutoffs[1]}`}</span>
                         </>
                       )}
                       {tier > 1 && (
@@ -1971,7 +1977,7 @@ async function renderShareCard(hud: HudState, nick: string, bands: string[]): Pr
       ctx.fillText(`NEW BEST · was ${hud.record.best}`, 80, 412);
     }
     // The run's league, as a crest with its word.
-    const tier = leagueOf(hud.score) + 1;
+    const tier = leagueOf(hud.score, hud.cutoffs) + 1;
     drawCrest(ctx, tier, 1040, 150, 72);
     ctx.font = "600 28px Outfit, system-ui, sans-serif";
     ctx.textAlign = "center";
@@ -2007,7 +2013,7 @@ function streakLine(p: NonNullable<HudState["profile"]>): string {
  * is in its last day. Durations only, never clock times.
  */
 function NextBlock({ hud, profile }: { hud: HudState; profile: NonNullable<HudState["profile"]> }) {
-  const tier = leagueOf(profile.weekBest) + 1;
+  const tier = leagueOf(profile.weekBest, hud.cutoffs) + 1;
   const runs = profile.weekRuns[tier - 1] ?? 0;
   const bankClose = tier > 1 && runs > 0 && runs < LEAGUE_BANK_RUNS;
   const lastDay = hud.clocks.weekMs < 24 * 3600_000;

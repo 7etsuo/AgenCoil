@@ -19,6 +19,7 @@ import {
 } from "./model";
 import { C2S, Reader, S2C, Writer, readFood, readSnakeEntry, writeBands } from "./protocol";
 import { World } from "./world";
+import { DEFAULT_CUTOFFS, LEAGUES } from "./challenges";
 
 export type NetState = "connecting" | "online" | "offline";
 
@@ -68,6 +69,8 @@ export interface StatsInfo {
   huntStreak: number;
   /** The mark on you: who hunts you, their clock, and what outliving it pays. */
   mark: { nid: number; secs: number; reward: number; name: string } | null;
+  /** The season's league ladder: the length a best must reach per tier, Bronze first. */
+  cutoffs: number[];
 }
 
 export interface ProfileInfo {
@@ -724,6 +727,7 @@ export class NetSession {
           hunt: null,
           huntStreak: 0,
           mark: null,
+          cutoffs: [...DEFAULT_CUTOFFS],
         };
         const nb = r.u8();
         for (let i = 0; i < nb; i++) {
@@ -776,6 +780,10 @@ export class NetSession {
             const reward = r.u16();
             const name = r.str();
             if (nid) s.mark = { nid, secs, reward, name };
+          }
+          if (r.remaining >= LEAGUES.length * 4) {
+            s.cutoffs = [];
+            for (let i = 0; i < LEAGUES.length; i++) s.cutoffs.push(r.u32());
           }
         }
         this.hooks.onStats(s);

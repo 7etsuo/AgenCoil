@@ -2,7 +2,14 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { ArrowLeft, Share2 } from "lucide-react";
 import { SKINS } from "@/game/model";
-import { LEAGUES, LEAGUE_COLORS, leagueOf, levelOf, titleOf } from "@/game/challenges";
+import {
+  DEFAULT_CUTOFFS,
+  LEAGUES,
+  LEAGUE_COLORS,
+  leagueOf,
+  levelOf,
+  titleOf,
+} from "@/game/challenges";
 import { ACHIEVEMENTS } from "@/game/achievements";
 import { Crest } from "@/components/crest";
 import { serverHttpUrl } from "@/game/net";
@@ -58,6 +65,7 @@ function ProfilePage() {
   const { handle } = Route.useParams();
   const [p, setP] = useState<PublicProfile | null>(null);
   const [rarity, setRarity] = useState<Rarity>({ players: 0, counts: {} });
+  const [cutoffs, setCutoffs] = useState<readonly number[]>(DEFAULT_CUTOFFS);
   const [state, setState] = useState<"loading" | "ok" | "missing" | "error">("loading");
   const [copied, setCopied] = useState(false);
 
@@ -68,7 +76,7 @@ function ProfilePage() {
       .then(async (r) => {
         if (r.status === 404) return null;
         if (!r.ok) throw new Error(String(r.status));
-        return (await r.json()) as { profile: PublicProfile; rarity: Rarity };
+        return (await r.json()) as { profile: PublicProfile; rarity: Rarity; cutoffs?: number[] };
       })
       .then((j) => {
         if (cancelled) return;
@@ -78,6 +86,7 @@ function ProfilePage() {
         }
         setP(j.profile);
         setRarity(j.rarity);
+        if (Array.isArray(j.cutoffs) && j.cutoffs.length === LEAGUES.length) setCutoffs(j.cutoffs);
         setState("ok");
       })
       .catch(() => !cancelled && setState("error"));
@@ -156,11 +165,11 @@ function ProfilePage() {
                 </div>
                 <div
                   className="flex shrink-0 flex-col items-center gap-1 text-[11px]"
-                  style={{ color: LEAGUE_COLORS[leagueOf(p.weekBest)] }}
-                  title={`${LEAGUES[leagueOf(p.weekBest)]!.name} this week`}
+                  style={{ color: LEAGUE_COLORS[leagueOf(p.weekBest, cutoffs)] }}
+                  title={`${LEAGUES[leagueOf(p.weekBest, cutoffs)]!.name} this week`}
                 >
-                  <Crest tier={leagueOf(p.weekBest) + 1} size={40} />
-                  {LEAGUES[leagueOf(p.weekBest)]!.name}
+                  <Crest tier={leagueOf(p.weekBest, cutoffs) + 1} size={40} />
+                  {LEAGUES[leagueOf(p.weekBest, cutoffs)]!.name}
                 </div>
                 <button
                   type="button"
@@ -187,8 +196,8 @@ function ProfilePage() {
                 ))}
               </div>
               <p className="mt-3 text-xs text-muted">
-                {LEAGUES[leagueOf(p.weekBest)]!.name} league this week · week best {p.weekBest} ·
-                season best {p.seasonBest}
+                {LEAGUES[leagueOf(p.weekBest, cutoffs)]!.name} league this week · week best{" "}
+                {p.weekBest} · season best {p.seasonBest}
                 {p.prevTier > 0 ? ` · last week ${LEAGUES[p.prevTier - 1]?.name ?? ""}` : ""}
                 {" · "}
                 {p.bountyTotal} bounties · {p.nearTotal} near misses · {p.chests} chests

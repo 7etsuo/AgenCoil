@@ -335,3 +335,23 @@ test("the season roll writes the best banked tier into history, permanently, wit
   const pub = store.publicProfile(p, 1);
   assert.deepEqual(pub.seasons, [[41, 5]]);
 });
+
+test("banking follows the season's ladder: three lives over a tier's cutoff bank it", async () => {
+  const store = new ProfileStore(null);
+  const p = await store.load("dev-ladder", "ladder");
+  const lifeOf = (length: number) => ({
+    length,
+    kills: 0,
+    survive: 10,
+    near: 0,
+    remains: 0,
+    noboostLength: 0,
+    bounty: 0,
+  });
+  const ladder = [0, 100, 200, 300, 400];
+  let r = { banked: 0 };
+  for (let i = 0; i < LEAGUE_BANK_RUNS; i++)
+    r = store.recordLife(p, lifeOf(450), undefined, ladder);
+  assert.equal(r.banked, 5, "450 is Diamond on a ladder that puts Diamond at 400");
+  assert.equal(p.bankedTier, 5);
+});

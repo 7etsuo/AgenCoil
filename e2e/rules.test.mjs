@@ -601,6 +601,27 @@ test("ticks closer than fifteen seconds answer with the last result", async () =
   assert.equal(reads, 1);
 });
 
+test("league tiers are shares of the season's field, with the fixed ladder for a small field", () => {
+  const field = Array.from({ length: 100 }, (_, i) => (i + 1) * 100);
+  const c = rules.cutoffsFrom(field);
+  assert.equal(c[0], 0, "Bronze is everyone");
+  assert.ok(c[1] >= 4400 && c[1] <= 4700, `Silver starts at the 45th percentile (${c[1]})`);
+  assert.ok(c[2] >= 7400 && c[2] <= 7700, `Gold at the 75th (${c[2]})`);
+  assert.ok(c[3] >= 9100 && c[3] <= 9300, `Platinum at the 92nd (${c[3]})`);
+  assert.ok(c[4] >= 9700 && c[4] <= 9900, `Diamond at the 98th (${c[4]})`);
+  assert.equal(rules.leagueOf(10000, c), 4);
+  assert.equal(rules.leagueOf(5000, c), 1);
+  assert.equal(rules.leagueOf(5000), 4, "on the fixed ladder 5000 is Diamond");
+  assert.deepEqual(
+    [...rules.cutoffsFrom([50, 60, 70])],
+    [...rules.DEFAULT_CUTOFFS],
+    "too few players",
+  );
+  const flat = rules.cutoffsFrom(Array(30).fill(10));
+  for (let i = 1; i < flat.length; i++)
+    assert.ok(flat[i] > flat[i - 1], "a flat field still has five tiers");
+});
+
 test("league stakes: three runs bank a tier, and each tier's payout is fixed", () => {
   assert.equal(rules.bankedTierOf([0, 0, 0, 0, 0]), 0);
   assert.equal(rules.bankedTierOf([3, 2, 0, 0, 0]), 1, "Bronze after three lives of any length");

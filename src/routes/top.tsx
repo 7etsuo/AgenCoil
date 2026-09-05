@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { SKINS } from "@/game/model";
-import { LEAGUES, LEAGUE_COLORS, leagueOf } from "@/game/challenges";
+import { DEFAULT_CUTOFFS, LEAGUES, LEAGUE_COLORS, leagueOf } from "@/game/challenges";
 import { Crest } from "@/components/crest";
 import { serverHttpUrl } from "@/game/net";
 
@@ -31,6 +31,7 @@ function TopPage() {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [week, setWeek] = useState("");
   const [season, setSeason] = useState(0);
+  const [cutoffs, setCutoffs] = useState<readonly number[]>(DEFAULT_CUTOFFS);
   const [error, setError] = useState(false);
 
   useEffect(() => {
@@ -39,7 +40,8 @@ function TopPage() {
     setError(false);
     fetch(`${serverHttpUrl()}?top=${kind}`)
       .then((r) => r.json())
-      .then((j: { rows: Row[]; week?: string; season?: number }) => {
+      .then((j: { rows: Row[]; week?: string; season?: number; cutoffs?: number[] }) => {
+        if (Array.isArray(j.cutoffs) && j.cutoffs.length === LEAGUES.length) setCutoffs(j.cutoffs);
         if (cancelled) return;
         setRows(j.rows ?? []);
         setWeek(j.week ?? "");
@@ -122,10 +124,10 @@ function TopPage() {
                   {kind === "weekly" && (
                     <span
                       className="ml-2 inline-flex items-center gap-1 align-middle text-xs"
-                      style={{ color: LEAGUE_COLORS[leagueOf(r.best)] }}
+                      style={{ color: LEAGUE_COLORS[leagueOf(r.best, cutoffs)] }}
                     >
-                      <Crest tier={leagueOf(r.best) + 1} size={14} />
-                      {LEAGUES[leagueOf(r.best)]!.name}
+                      <Crest tier={leagueOf(r.best, cutoffs) + 1} size={14} />
+                      {LEAGUES[leagueOf(r.best, cutoffs)]!.name}
                     </span>
                   )}
                   {r.kills >= 50 && <span className="ml-2 text-xs text-[#f0c14a]">Hunter</span>}

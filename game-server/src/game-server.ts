@@ -75,6 +75,7 @@ import {
 import { DailyBoard } from "./daily";
 import { ProfileStore, rollLine, type Profile } from "./profiles";
 import {
+  DEFAULT_CUTOFFS,
   MODE_DOUBLE_REMAINS,
   MODE_HUNGER,
   MODE_TINY,
@@ -82,6 +83,7 @@ import {
   UNLOCK_TRAIL,
   LEAGUES,
   LEAGUE_BANK_RUNS,
+  type Cutoffs,
   isoWeek,
   leagueOf,
   levelOf,
@@ -474,6 +476,9 @@ export class GameServer {
   private readonly deadSids = new Map<string, number>();
   /** Live snakes by id, rebuilt each tick: the per-client loops look snakes up by sid. */
   private readonly bySid = new Map<string, Snake>();
+  /** The season's league cutoffs (see `cutoffsFrom`), refreshed from the profiles every few minutes. */
+  private cutoffs: Cutoffs = DEFAULT_CUTOFFS;
+  private cutoffsAt = 0;
   private nextNid = 1;
   private nextPlayer = 1;
   private tick = 0;
@@ -492,6 +497,16 @@ export class GameServer {
     this.world.host = true;
     this.world.resetLocalBots(SERVER_BOTS);
     for (const s of this.world.snakes) this.nidOf(s.id);
+    void this.refreshCutoffs();
+  }
+
+  private async refreshCutoffs(): Promise<void> {
+    this.cutoffsAt = Date.now();
+    try {
+      this.cutoffs = await this.profiles.leagueCutoffs();
+    } catch (err) {
+      console.error("[leagues] cutoffs failed:", (err as Error)?.message ?? err);
+    }
   }
 
   attach(server: Server): void {
@@ -580,7 +595,12 @@ export class GameServer {
         const [rank, rarity] = await Promise.all([this.profiles.rank(p), this.profiles.rarity()]);
         return {
           status: 200,
-          body: JSON.stringify({ ok: true, profile: this.profiles.publicProfile(p, rank), rarity }),
+          body: JSON.stringify({
+            ok: true,
+            profile: this.profiles.publicProfile(p, rank),
+            rarity,
+            cutoffs: this.cutoffs,
+          }),
         };
       });
       res.statusCode = hit.status;
@@ -596,7 +616,13 @@ export class GameServer {
             top === "crew" ? await this.profiles.topCrews(50) : await this.profiles.top(top, 100);
           return {
             status: 200,
-            body: JSON.stringify({ kind: top, week: isoWeek(), season: seasonOf(), rows }),
+            body: JSON.stringify({
+              kind: top,
+              week: isoWeek(),
+              season: seasonOf(),
+              rows,
+              cutoffs: this.cutoffs,
+            }),
           };
         } catch {
           return { status: 200, body: JSON.stringify({ kind: top, rows: [] }) };
@@ -1110,6 +1136,7 @@ export class GameServer {
       if (client.key && !client.profile)
         client.profile = await this.profiles.load(client.key, client.name);
       if (!client.alive) return;
+      if (client.trusted && client.profile) this.profiles.flag(client.profile);
       // The identify message may have arrived before the nickname was known.
       if (client.profile && !client.account) this.profiles.setName(client.profile, client.name);
       const unlocks = client.profile?.unlocks ?? 0;
@@ -1304,7 +1331,7 @@ export class GameServer {
     snake.trail = client.trail;
     snake.deathFx = client.deathFx;
     snake.level = client.profile ? levelOf(client.profile.eaten) : 0;
-    snake.league = client.profile ? leagueOf(client.profile.weekBest) + 1 : 0;
+    snake.league = client.profile ? leagueOf(client.profile.weekBest, this.cutoffs) + 1 : 0;
     snake.might = client.profile ? Object.keys(client.profile.achv).length : 0;
     snake.finish = client.profile?.prevTier ?? 0;
     client.sid = snake.id;
@@ -1315,7 +1342,7 @@ export class GameServer {
       boosted: false,
       noboostLength: snake.mass,
       bounty: 0,
-      tier: leagueOf(client.profile?.weekBest ?? 0),
+      tier: leagueOf(client.profile?.weekBest ?? 0, this.cutoffs),
       contracts: 0,
       marks: 0,
     };
@@ -1399,6 +1426,8 @@ export class GameServer {
     if (!client.account) client.key = key;
     if (!client.profile) client.profile = await this.profiles.load(key, name);
     if (!client.alive) return;
+    // The owner's agents play under profiles that count for nothing public.
+    if (client.trusted) this.profiles.flag(client.profile);
     if (idOrigin && idTicket) {
       await this.linkAccount(client, idOrigin, idTicket);
       if (!client.alive) return;
@@ -2046,6 +2075,7 @@ export class GameServer {
       this.decayHeat();
       this.pruneCaches();
       this.profiles.sweep(this.profilesInUse());
+      if (Date.now() - this.cutoffsAt > 5 * 60_000) void this.refreshCutoffs();
     }
   }
 
@@ -2199,7 +2229,7 @@ export class GameServer {
       if (!c.sid || !c.life) continue;
       const s = this.liveSnake(c.sid);
       if (!s) continue;
-      const tier = leagueOf(s.mass);
+      const tier = leagueOf(s.mass, this.cutoffs);
       if (tier <= c.life.tier) continue;
       c.life.tier = tier;
       s.league = tier + 1;
@@ -2393,7 +2423,7 @@ export class GameServer {
         const line = `${d.killerName ?? "someone"} claimed the ${bounty} bounty on ${s.name}`;
         for (const c of this.clients) this.notice(c, 1, line);
       }
-      if (!s.isBot) this.daily.record(s.name, Math.floor(s.mass));
+      if (!s.isBot && !owner?.trusted) this.daily.record(s.name, Math.floor(s.mass));
       // Only a real snake-on-snake death marks the spot; a dropped connection
       // or a retired bot has no killer and says nothing about the place.
       if (d.reason === "snake" && d.killerId) this.recordDeath(s.x, s.y);
@@ -2463,6 +2493,7 @@ export class GameServer {
       c.profile,
       stats,
       { x: s.x, y: s.y },
+      this.cutoffs,
     );
     if (stats.length > bestBefore)
       this.events.log("feature", { key: c.key, s: "best", n: stats.length });
@@ -2824,6 +2855,8 @@ export class GameServer {
           .u16(m ? Math.max(0, Math.min(65535, Math.ceil((m.until - now) / 1000))) : 0)
           .u16(m ? Math.min(65535, m.reward) : 0)
           .str(m?.hunterName ?? "");
+        // The season's league ladder, so every client draws the same tiers.
+        for (let i = 0; i < LEAGUES.length; i++) w.u32(Math.min(0xffffffff, this.cutoffs[i] ?? 0));
       }
       c.ws.send(w.finish());
     }
