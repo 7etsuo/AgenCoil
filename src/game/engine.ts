@@ -1298,7 +1298,10 @@ export class CoilEngine {
     if (typeof drive === "function" && this.phase === "play") {
       const me = this.world.player;
       const cmd = me
-        ? (drive as (w: World, s: Snake) => { angle: number; boost: boolean } | null)(this.world, me)
+        ? (drive as (w: World, s: Snake) => { angle: number; boost: boolean } | null)(
+            this.world,
+            me,
+          )
         : null;
       if (cmd && me) {
         this.aimScreen = null;
