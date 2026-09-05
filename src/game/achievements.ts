@@ -110,6 +110,8 @@ export const ACHIEVEMENTS: readonly Achievement[] = [
   feat("season_gold", "Season Gold", "finish a season in Gold or better", "🏅"),
   feat("season_diamond", "Season Diamond", "finish a season in Diamond", "👑"),
   feat("payback", "Payback", "take down your nemesis", "⚔️"),
+  feat("hitman", "Hitman", "fill three contracts in one life", "🎯"),
+  feat("slippery", "Slippery", "outlive three marks in one life", "🫧"),
 ];
 
 /** The feat for banking a weekly tier, by tier (1 Bronze to 5 Diamond); Bronze has none. */
@@ -161,6 +163,8 @@ export function lifeFeats(life: LifeStats): string[] {
   if (life.noboostLength >= 300) out.push("purist");
   if (life.remains >= 500) out.push("scavenger");
   if (life.survive >= 900) out.push("marathon");
+  if ((life.contracts ?? 0) >= 3) out.push("hitman");
+  if ((life.marks ?? 0) >= 3) out.push("slippery");
   return out;
 }
 

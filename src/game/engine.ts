@@ -135,6 +135,14 @@ export interface HudState {
   nemesis: { name: string; k: number; d: number; nid: number; inArena: boolean } | null;
   /** The life that just ended was ended by your nemesis. */
   nemesisKilledMe: boolean;
+  /** The contract on offer and the mark on you, with live clocks and a direction, and the streak. */
+  contract: {
+    hunt: { name: string; secsLeft: number; reward: number; dir: string } | null;
+    mark: { name: string; secsLeft: number; reward: number } | null;
+    streak: number;
+  };
+  /** Contracts filled this life. */
+  contractsDone: number;
   firstLife: boolean;
   party: { name: string; mass: number }[];
   arenaMode: { id: number; secsLeft: number; secsToNext: number };
@@ -240,6 +248,9 @@ export class CoilEngine {
   private fpsT = 0;
   private fps = 0;
   private stats: StatsInfo | null = null;
+  /** When the last stats arrived, so the contract clocks run between messages. */
+  private statsAt = 0;
+  private contractsDone = 0;
   controls: Controls = "point";
   private stick: Stick | null = null;
   private stickId: number | null = null;
@@ -347,6 +358,7 @@ export class CoilEngine {
         },
         onStats: (s) => {
           this.stats = s;
+          this.statsAt = performance.now();
           const b = this.world.snakes.find((x) => x.boss);
           if (b && s.boss) {
             b.hp = s.boss.hp;
@@ -423,6 +435,38 @@ export class CoilEngine {
                 color: "#ffb3c1",
               });
             this.audio.kill();
+            return;
+          }
+          // Contracts: offered (6) and a mark on you (9) land in the kill slot
+          // with a sound; filled (7) and outlived (16) pay, with a floater;
+          // missed (8) goes to the feed.
+          if (kind === 6 || kind === 9) {
+            this.killNotice = text;
+            this.killTimer = 3;
+            this.audio.alert();
+            return;
+          }
+          if (kind === 7 || kind === 16) {
+            this.killNotice = text;
+            this.killTimer = 2.6;
+            if (kind === 7) this.contractsDone++;
+            const me = this.world.player;
+            const paid = /\+(\d+)/.exec(text);
+            if (me && paid)
+              this.floaters.push({
+                x: me.x,
+                y: me.y - radiusOf(me.mass) * 2.2,
+                text: `+${paid[1]}`,
+                life: 1.1,
+                color: kind === 7 ? "#ffb347" : "#bfe9ff",
+              });
+            this.audio.kill();
+            this.pushFeed(text);
+            return;
+          }
+          if (kind === 8) {
+            this.pushFeed(text);
+            this.audio.near(0);
             return;
           }
           // A roll card, kind 10 plus the tier it is about: shown until dismissed.
@@ -647,6 +691,7 @@ export class CoilEngine {
   private startLife(spawnMass: number): void {
     this.spawnTier = this.startTier();
     this.bestRankThisLife = 0;
+    this.contractsDone = 0;
     this.promo = null;
     this.recordBest = recordTarget(this.profile?.best ?? 0, this.best, spawnMass);
     this.recordPassed = false;
@@ -871,6 +916,8 @@ export class CoilEngine {
         this.killerId !== null &&
         (this.stats?.nemesisNid ?? 0) > 0 &&
         this.killerId === String(this.stats!.nemesisNid),
+      contract: this.contractView(),
+      contractsDone: this.contractsDone,
       // The live snake knows its league before the profile is resent.
       league: p?.league || (this.profile ? leagueOf(this.profile.weekBest) + 1 : 0),
       might: this.profile?.achv.length ?? 0,
@@ -1326,6 +1373,34 @@ export class CoilEngine {
       }
     }
     this.exposeDebug();
+  }
+
+  /**
+   * The contract on offer and the mark on you, from the last stats, with
+   * the clocks run forward and the target's live position when it is in
+   * the mirror (the stats carry a position for one that is not).
+   */
+  private contractView(): HudState["contract"] {
+    const st = this.online && this.world !== this.local ? this.stats : null;
+    if (!st || this.phase !== "play")
+      return { hunt: null, mark: null, streak: st?.huntStreak ?? 0 };
+    const age = (performance.now() - this.statsAt) / 1000;
+    const h = st.hunt;
+    let hunt: HudState["contract"]["hunt"] = null;
+    if (h) {
+      const live = this.world.snakes.find((s) => s.id === String(h.nid));
+      hunt = {
+        name: h.name,
+        secsLeft: Math.max(0, Math.ceil(h.secs - age)),
+        reward: h.reward,
+        dir: this.compass(live?.x ?? h.x, live?.y ?? h.y),
+      };
+    }
+    const m = st.mark;
+    const mark = m
+      ? { name: m.name, secsLeft: Math.max(0, Math.ceil(m.secs - age)), reward: m.reward }
+      : null;
+    return { hunt, mark, streak: st.huntStreak };
   }
 
   /** The nemesis from the profile, and whether their snake is here now, from the stats. */
@@ -1864,6 +1939,7 @@ export class CoilEngine {
       this.mapMarks(),
       this.promos,
       this.online && this.stats?.nemesisNid ? String(this.stats.nemesisNid) : null,
+      this.online && this.phase === "play" && this.stats?.hunt ? String(this.stats.hunt.nid) : null,
     );
     const nowMs = performance.now();
     for (const [id, e] of this.emotes) if (e.until < nowMs) this.emotes.delete(id);
@@ -1894,6 +1970,11 @@ export class CoilEngine {
         if (b.bounty > 0) out.push({ x: b.x, y: b.y, kind: "bounty" });
         if (b.league >= 4) out.push({ x: b.x, y: b.y, kind: "tier", tier: b.league });
       });
+      // The contract's target, where the mirror has it or where the stats last saw it.
+      if (this.phase === "play" && st.hunt) {
+        const live = this.world.snakes.find((s) => s.id === String(st.hunt!.nid));
+        out.push({ x: live?.x ?? st.hunt.x, y: live?.y ?? st.hunt.y, kind: "target" });
+      }
       return out;
     }
     const alive = this.world.snakes.filter((s) => s.alive).sort((a, b) => b.mass - a.mass);

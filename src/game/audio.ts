@@ -114,6 +114,12 @@ export class GameAudio {
     this.blip(180, 0.04, 0.05, "sawtooth");
   }
 
+  /** A contract landing: two short square notes, a fourth apart. */
+  alert(): void {
+    this.blip(392, 0.06, 0.07, "square");
+    setTimeout(() => this.blip(523, 0.09, 0.07, "square"), 70);
+  }
+
   death(): void {
     this.blip(140, 0.18, 0.12, "sine");
   }

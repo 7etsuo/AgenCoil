@@ -37,7 +37,8 @@ export interface Promotion {
 export interface MapMark {
   x: number;
   y: number;
-  kind: "top" | "bounty" | "tier";
+  /** "target" is the snake your contract names: an orange crosshair. */
+  kind: "top" | "bounty" | "tier" | "target";
   /** For "tier": 4 Platinum or 5 Diamond, drawn in the tier's colour. */
   tier?: number;
 }
@@ -123,9 +124,11 @@ export class Renderer {
     marks: readonly MapMark[] = [],
     promos: ReadonlyMap<string, Promotion> | null = null,
     nemesisId: string | null = null,
+    targetId: string | null = null,
   ): void {
     this.promos = promos;
     this.nemesisId = nemesisId;
+    this.targetId = targetId;
     const shake = cam.trauma * cam.trauma;
     const ox = (Math.random() * 2 - 1) * shake * 14;
     const oy = (Math.random() * 2 - 1) * shake * 14;
@@ -679,6 +682,8 @@ export class Renderer {
   private promos: ReadonlyMap<string, Promotion> | null = null;
   /** The viewer's nemesis, whose tag and map dot are marked for them alone. */
   private nemesisId: string | null = null;
+  /** The snake the viewer's contract names, marked for them alone. */
+  private targetId: string | null = null;
 
   private segmentSprite(color: string, style?: SkinStyle): Sprite {
     const key = style ? `${style}|${color}` : color;
@@ -1003,9 +1008,10 @@ export class Renderer {
       const rank = ranks?.get(s.id);
       const tier = s.boss ? 0 : (s.league ?? 0);
       const nemesis = s.id === this.nemesisId;
+      const target = s.id === this.targetId;
       const label = s.boss
         ? `BOSS · ${s.name}`
-        : `${nemesis ? "⚔ " : ""}${s.crown ? "👑 " : ""}${s.linked ? "✓ " : ""}${s.name} · ${Math.floor(s.mass)}`;
+        : `${target ? "◎ " : ""}${nemesis ? "⚔ " : ""}${s.crown ? "👑 " : ""}${s.linked ? "✓ " : ""}${s.name} · ${Math.floor(s.mass)}`;
       ctx.font = font;
       ctx.textAlign = "left";
       ctx.textBaseline = "bottom";
@@ -1022,7 +1028,11 @@ export class Renderer {
       const y = sy - r - 10;
       const width = crestW + rankW + tw + pad * 2;
       const left = sx - width / 2;
-      ctx.fillStyle = nemesis ? "rgba(70,12,20,0.78)" : "rgba(7,9,15,0.5)";
+      ctx.fillStyle = target
+        ? "rgba(70,42,8,0.8)"
+        : nemesis
+          ? "rgba(70,12,20,0.78)"
+          : "rgba(7,9,15,0.5)";
       roundRect(ctx, left, y - 16, width, 18, 9);
       ctx.fill();
       if (rank === 1) {
@@ -1049,7 +1059,7 @@ export class Renderer {
       ctx.font = font;
       ctx.textAlign = "left";
       ctx.textBaseline = "bottom";
-      ctx.fillStyle = nemesis ? "#ffb3c1" : "rgba(238,241,246,0.92)";
+      ctx.fillStyle = target ? "#ffd28a" : nemesis ? "#ffb3c1" : "rgba(238,241,246,0.92)";
       ctx.fillText(label, x, y);
     }
   }
@@ -1107,6 +1117,22 @@ export class Renderer {
         ctx.arc(mx, my, 2.4, 0, Math.PI * 2);
         ctx.fillStyle = LEAGUE_COLORS[(mk.tier ?? 4) - 1] ?? LEAGUE_COLORS[3];
         ctx.fill();
+        continue;
+      }
+      if (mk.kind === "target") {
+        ctx.arc(mx, my, 5, 0, Math.PI * 2);
+        for (const [dx, dy] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ] as const) {
+          ctx.moveTo(mx + dx * 3, my + dy * 3);
+          ctx.lineTo(mx + dx * 8, my + dy * 8);
+        }
+        ctx.strokeStyle = "#ffb347";
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
         continue;
       }
       ctx.arc(mx, my, mk.kind === "top" ? 4.2 : 5.2, 0, Math.PI * 2);

@@ -432,8 +432,19 @@ test("a signed-in player is linked on connect and chooses the handle they are na
   }
 });
 
-/** Read a protocol 5 STATS2 message down to its nemesis id. */
-function parseStats2(r: InstanceType<typeof Reader>): { nemesisNid: number } {
+/** Read a protocol 5 STATS2 message down to its nemesis id and the contract tail. */
+function parseStats2(r: InstanceType<typeof Reader>): {
+  nemesisNid: number;
+  huntNid: number;
+  huntSecs: number;
+  huntReward: number;
+  huntName: string;
+  huntStreak: number;
+  markNid: number;
+  markSecs: number;
+  markReward: number;
+  markName: string;
+} {
   r.f32();
   r.u16();
   r.u16();
@@ -468,9 +479,137 @@ function parseStats2(r: InstanceType<typeof Reader>): { nemesisNid: number } {
   r.f32();
   r.f32();
   const nemesisNid = r.u16();
+  const huntNid = r.u16();
+  const huntSecs = r.u16();
+  const huntReward = r.u16();
+  r.f32();
+  r.f32();
+  const huntName = r.str();
+  const huntStreak = r.u8();
+  const markNid = r.u16();
+  const markSecs = r.u16();
+  const markReward = r.u16();
+  const markName = r.str();
   assert.equal(r.remaining, 0, "stats fully consumed");
-  return { nemesisNid };
+  return {
+    nemesisNid,
+    huntNid,
+    huntSecs,
+    huntReward,
+    huntName,
+    huntStreak,
+    markNid,
+    markSecs,
+    markReward,
+    markName,
+  };
 }
+
+test("contracts: the hunter who fills one is paid, and the marked player is paid for outliving one", async () => {
+  const arena = await startArena();
+  try {
+    const url5 = arena.url.replace(/v=2$/, "v=5");
+    const a = await joinArena(url5, "dev-hunt-a", "hunter");
+    const b = await joinArena(url5, "dev-hunt-b", "quarry");
+    const game = arena.game as unknown as {
+      nids: Map<string, number>;
+      stopLoop(): void;
+      step(dt: number): void;
+      stepContracts(now: number): void;
+      sendStatsAll(): void;
+      clientBySid(sid: string): {
+        life: { startAt: number } | null;
+        hunt: { until: number } | null;
+        mark: { until: number } | null;
+      };
+    };
+    game.stopLoop();
+    await sleep(60);
+    const world = arena.game.world;
+    world.clearBots();
+    world.desiredBots = 0;
+    const sa = world.snakes.find((s) => s.name === "hunter")!;
+    const sb = world.snakes.find((s) => s.name === "quarry")!;
+    // Two veterans of a fair size, close together, past spawn protection.
+    const ready = (s: typeof sa, x: number, mass: number): void => {
+      s.x = x;
+      s.y = 0;
+      s.mass = mass;
+      s.invuln = 0;
+      s.rookie = false;
+      s.points = [];
+      world.ensureTrail(s);
+    };
+    ready(sa, 0, 300);
+    ready(sb, 400, 200);
+    const ca = game.clientBySid(sa.id);
+    // Contracts start half a minute into a life: the hunter's is older than that, the quarry's is not.
+    ca.life!.startAt = Date.now() - 60_000;
+    const noticeOf = async (p: Player, kind: number): Promise<string> => {
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline) {
+        const r = await p.next(S2C.NOTICE, 1000);
+        const k = r.u8();
+        const text = r.str();
+        if (k === kind) return text;
+      }
+      throw new Error(`no notice of kind ${kind}`);
+    };
+    a.drain(S2C.NOTICE);
+    b.drain(S2C.NOTICE);
+    game.stepContracts(Date.now());
+    assert.match(await noticeOf(a, 6), /hunt quarry/);
+    assert.match(await noticeOf(b, 9), /marked by hunter/);
+    a.drain(S2C.STATS2);
+    b.drain(S2C.STATS2);
+    game.sendStatsAll();
+    const nidA = game.nids.get(sa.id)!;
+    const nidB = game.nids.get(sb.id)!;
+    const sta = parseStats2(await a.next(S2C.STATS2));
+    assert.equal(sta.huntNid, nidB, "the hunter's stats name the target");
+    assert.ok(sta.huntReward > 0 && sta.huntSecs > 0, "with a reward and a clock");
+    assert.equal(sta.huntName, "quarry");
+    const stb = parseStats2(await b.next(S2C.STATS2));
+    assert.equal(stb.markNid, nidA, "the target's stats name the hunter");
+    // The hunter takes the quarry down inside the clock: paid, and a streak begins.
+    const before = sa.mass;
+    (world as unknown as { kill(s: typeof sb, r: "snake", k: string, n: string): void }).kill(
+      sb,
+      "snake",
+      sa.id,
+      sa.name,
+    );
+    game.step(1 / 40);
+    assert.match(await noticeOf(a, 7), /contract done · quarry/);
+    assert.ok(sa.mass >= before + sta.huntReward, `paid (${before} -> ${sa.mass})`);
+    // The quarry comes back and gets a contract on the hunter (whose own
+    // gap keeps it from hunting), and the hunter outlives the clock.
+    await sleep(450);
+    b.send(hello("quarry", "dev-hunt-b", "", true));
+    await b.next(S2C.SPAWNED);
+    const sb2 = world.snakes.find((s) => s.name === "quarry" && s.alive)!;
+    ready(sb2, 400, 200);
+    ready(sa, 0, 300);
+    const cb = game.clientBySid(sb2.id);
+    cb.life!.startAt = Date.now() - 60_000;
+    a.drain(S2C.NOTICE);
+    b.drain(S2C.NOTICE);
+    game.stepContracts(Date.now());
+    assert.match(await noticeOf(b, 6), /hunt hunter/);
+    assert.match(await noticeOf(a, 9), /marked by quarry/);
+    const paidBefore = sa.mass;
+    cb.hunt!.until = Date.now() - 1;
+    ca.mark!.until = Date.now() - 1;
+    game.stepContracts(Date.now());
+    assert.match(await noticeOf(b, 8), /contract expired · hunter/);
+    assert.match(await noticeOf(a, 16), /shook off quarry/);
+    assert.ok(sa.mass > paidBefore, "the marked player was paid for outliving the mark");
+    await a.close();
+    await b.close();
+  } finally {
+    await arena.stop();
+  }
+});
 
 test("a rival who pops you twice is your nemesis, the stats say when they are here, and taking them down is payback", async () => {
   const arena = await startArena();
@@ -1115,6 +1254,18 @@ test("protocol 4 full entries carry league, might and finish, protocol 5 board r
       stats.f32();
       stats.f32();
       stats.u16();
+      // The contract tail: no contract in this test, but the fields are always there.
+      stats.u16();
+      stats.u16();
+      stats.u16();
+      stats.f32();
+      stats.f32();
+      stats.str();
+      stats.u8();
+      stats.u16();
+      stats.u16();
+      stats.u16();
+      stats.str();
       assert.equal(stats.remaining, 0, `protocol ${proto}: stats fully consumed`);
       const profile = parseProfile(await p.next(S2C.PROFILE));
       assert.equal(profile.bankedTier, 0);

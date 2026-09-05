@@ -38,6 +38,7 @@ import {
   SERVER_TICK_HZ,
   SNAPSHOT_HZ,
   START_MASS,
+  dist2,
   lengthOf,
   radiusOf,
   zoomOf,
@@ -94,6 +95,16 @@ import {
 import { playGateFromEnv } from "./play-gate";
 import { chosenHandle, cleanHandle, identityGateFromEnv, type Identity } from "./identity";
 import { lifeFeats } from "../../src/game/achievements";
+import {
+  CONTRACT_FIRST_MS,
+  CONTRACT_GAP_MS,
+  CONTRACT_MIN_MASS,
+  CONTRACT_RANGE,
+  contractFair,
+  contractReward,
+  contractSecs,
+  markReward,
+} from "../../src/game/contracts";
 import { ArenaHost } from "./arena-host";
 import { EventLog } from "./events";
 
@@ -183,6 +194,28 @@ interface Client {
   /** The food cells synced last time (null forces a full walk) and the change counter then. */
   foodRect: { gx0: number; gx1: number; gy0: number; gy1: number } | null;
   foodSeq: number;
+  /** The contract this player is hunting, the mark on them, and contracts filled in a row. */
+  hunt: Hunt | null;
+  mark: Mark | null;
+  huntStreak: number;
+  /** When the last hunt ended, so the next offer waits its gap. */
+  huntEndedAt: number;
+}
+
+/** A contract to take a snake down before a deadline. */
+interface Hunt {
+  targetSid: string;
+  targetName: string;
+  until: number;
+  reward: number;
+}
+
+/** A mark on a player: someone has a contract on them until the deadline. */
+interface Mark {
+  hunterSid: string;
+  hunterName: string;
+  until: number;
+  reward: number;
 }
 
 interface FoodCellSync {
@@ -203,6 +236,9 @@ interface Life {
   bounty: number;
   /** League tier index the snake has reached this life (from the week best at spawn). */
   tier: number;
+  /** Contracts filled and marks outlived this life. */
+  contracts: number;
+  marks: number;
 }
 
 interface Token {
@@ -281,6 +317,12 @@ const VIEW_DRIFT = 0.35;
 const NOTICE_PROMOTED = 4;
 /** The killer just took down their nemesis: the client shows it in the kill slot. */
 const NOTICE_PAYBACK = 5;
+/** Contracts: offered, filled, missed; a mark on you; a mark outlived. */
+const NOTICE_HUNT = 6;
+const NOTICE_HUNT_DONE = 7;
+const NOTICE_HUNT_FAILED = 8;
+const NOTICE_MARKED = 9;
+const NOTICE_MARK_SURVIVED = 16;
 const NOTICE_ROLL = 10;
 /**
  * The view rectangle a client may ask for, in world units from its centre.
@@ -902,6 +944,10 @@ export class GameServer {
       killerNid: 0,
       foodRect: null,
       foodSeq: -1,
+      hunt: null,
+      mark: null,
+      huntStreak: 0,
+      huntEndedAt: 0,
     };
     this.clients.add(client);
     this.lastActivity = Date.now();
@@ -937,6 +983,10 @@ export class GameServer {
       });
     const sid = client.sid;
     client.sid = null;
+    // A hunt ends with the socket, quietly; whoever it marked has outlived it.
+    client.hunt = null;
+    client.mark = null;
+    if (sid) this.settleMarksBy(sid);
     if (!sid) return;
     if (client.party) this.leaveParty(client.party, sid);
     // Hold the snake for a moment so a reconnect (forced by the platform's
@@ -1236,6 +1286,8 @@ export class GameServer {
       noboostLength: snake.mass,
       bounty: 0,
       tier: leagueOf(client.profile?.weekBest ?? 0),
+      contracts: 0,
+      marks: 0,
     };
     client.combo = { n: 0, last: 0 };
     client.bountied = false;
@@ -1946,6 +1998,7 @@ export class GameServer {
       const players = this.clients.size;
       this.world.desiredBots = Math.max(SERVER_BOTS_MIN, SERVER_BOTS - Math.floor(players * 0.6));
       this.checkPromotions();
+      this.stepContracts(Date.now());
       const mode = modeNow().id;
       this.world.remainsMult = mode === MODE_DOUBLE_REMAINS ? 2 : 1;
       this.world.hunger = mode === MODE_HUNGER ? HUNGER_RATE : 0;
@@ -1992,6 +2045,118 @@ export class GameServer {
       return false;
     }
     return buffered < SEND_SKIP_BYTES;
+  }
+
+  /**
+   * Contracts, once a second: hunts past their clock are missed, marks past
+   * theirs are outlived, and every eligible hunter without a contract is
+   * offered one. See src/game/contracts.ts for the rules.
+   */
+  private stepContracts(now: number): void {
+    for (const c of this.clients) {
+      if (c.hunt && now >= c.hunt.until) this.endHunt(c, "expired");
+      if (c.mark && now >= c.mark.until) this.settleMark(c, "survived");
+    }
+    for (const c of this.clients) {
+      if (c.hunt || !c.sid || !c.life || !c.v2) continue;
+      if (now - c.life.startAt < CONTRACT_FIRST_MS || now - c.huntEndedAt < CONTRACT_GAP_MS)
+        continue;
+      const me = this.liveSnake(c.sid);
+      if (!me || me.mass < CONTRACT_MIN_MASS) continue;
+      const target = this.pickTarget(c, me);
+      if (target) this.assignHunt(c, me, target);
+    }
+  }
+
+  /**
+   * A contract's target: alive, near, a fair size, not protected, not a
+   * rookie, not a party mate, not already hunted. Players before bots, one
+   * of the three nearest at random.
+   */
+  private pickTarget(c: Client, me: Snake): Snake | null {
+    const hunted = new Set<string>();
+    for (const o of this.clients) if (o.hunt) hunted.add(o.hunt.targetSid);
+    const mates = c.party ? this.parties.get(c.party) : undefined;
+    const players: Snake[] = [];
+    const bots: Snake[] = [];
+    const range2 = CONTRACT_RANGE * CONTRACT_RANGE;
+    for (const s of this.world.snakes) {
+      if (!s.alive || s.id === me.id || s.boss || s.invuln > 0 || s.rookie) continue;
+      if (hunted.has(s.id) || mates?.has(s.id)) continue;
+      if (!contractFair(me.mass, s.mass)) continue;
+      if (dist2(me.x, me.y, s.x, s.y) > range2) continue;
+      (s.isBot ? bots : players).push(s);
+    }
+    const pool = players.length ? players : bots;
+    if (!pool.length) return null;
+    pool.sort((a, b) => dist2(me.x, me.y, a.x, a.y) - dist2(me.x, me.y, b.x, b.y));
+    return pool[Math.floor(Math.random() * Math.min(3, pool.length))]!;
+  }
+
+  private assignHunt(c: Client, me: Snake, target: Snake): void {
+    const secs = contractSecs(Math.sqrt(dist2(me.x, me.y, target.x, target.y)));
+    const reward = contractReward(target.mass, c.huntStreak);
+    const until = Date.now() + secs * 1000;
+    c.hunt = { targetSid: target.id, targetName: target.name, until, reward };
+    this.notice(c, NOTICE_HUNT, `contract · hunt ${target.name} · ${secs} s · +${reward}`);
+    this.events.log("feature", {
+      key: c.key,
+      s: "contract",
+      n: reward,
+      meta: { bot: target.isBot },
+    });
+    // A hunted player is told, and paid for outliving the clock.
+    const victim = target.isBot ? null : this.clientBySid(target.id);
+    if (victim && victim.v2 && !victim.mark) {
+      const mr = markReward(reward);
+      victim.mark = { hunterSid: me.id, hunterName: me.name, until, reward: mr };
+      this.notice(victim, NOTICE_MARKED, `marked by ${me.name} · survive ${secs} s · +${mr}`);
+    }
+  }
+
+  /** A hunt ends: filled (paid, streak up), missed (streak lost) or void (the target went some other way). */
+  private endHunt(c: Client, outcome: "done" | "expired" | "void"): void {
+    const h = c.hunt;
+    if (!h) return;
+    c.hunt = null;
+    c.huntEndedAt = Date.now();
+    if (outcome === "done") {
+      c.huntStreak++;
+      if (c.life) c.life.contracts++;
+      const me = c.sid ? this.liveSnake(c.sid) : null;
+      if (me) me.mass += h.reward;
+      const streak = c.huntStreak > 1 ? ` · streak ${c.huntStreak}` : "";
+      this.notice(c, NOTICE_HUNT_DONE, `contract done · ${h.targetName} · +${h.reward}${streak}`);
+      this.events.log("feature", { key: c.key, s: "contract_done", n: h.reward });
+    } else if (outcome === "expired") {
+      const had = c.huntStreak;
+      c.huntStreak = 0;
+      const lost = had > 1 ? ` · streak of ${had} lost` : "";
+      this.notice(c, NOTICE_HUNT_FAILED, `contract expired · ${h.targetName}${lost}`);
+      this.events.log("feature", { key: c.key, s: "contract_miss" });
+    } else {
+      this.notice(c, 0, `contract void · ${h.targetName} is gone`);
+    }
+  }
+
+  /** A mark ends: outlived (paid) or not (the marked snake died; nothing to say, it knows). */
+  private settleMark(c: Client, outcome: "survived" | "died"): void {
+    const m = c.mark;
+    if (!m) return;
+    c.mark = null;
+    if (outcome !== "survived") return;
+    const me = c.sid ? this.liveSnake(c.sid) : null;
+    if (!me) return;
+    me.mass += m.reward;
+    if (c.life) c.life.marks++;
+    this.notice(c, NOTICE_MARK_SURVIVED, `you shook off ${m.hunterName} · +${m.reward}`);
+    this.events.log("feature", { key: c.key, s: "mark_survived", n: m.reward });
+  }
+
+  /** The hunter is gone (dead, or left): everyone it marked has outlived the mark. */
+  private settleMarksBy(hunterSid: string): void {
+    for (const o of this.clients)
+      if (o.mark?.hunterSid === hunterSid) this.settleMark(o, "survived");
   }
 
   /**
@@ -2141,6 +2306,14 @@ export class GameServer {
           this.events.log("feature", { key: killerClient.key, s: "payback" });
         }
       }
+      // Contracts on the dead snake: the hunter who did it inside the clock
+      // is paid; any other hunt on it is void.
+      const now = Date.now();
+      for (const c of this.clients) {
+        if (c.hunt?.targetSid !== s.id) continue;
+        const filled = Boolean(d.killerId) && c.sid === d.killerId && now <= c.hunt.until;
+        this.endHunt(c, filled ? "done" : "void");
+      }
       for (const c of this.clients) {
         if (c.known.has(s.id) || c.sid === s.id || (d.killerId && c.sid === d.killerId))
           c.ws.send(msg);
@@ -2210,6 +2383,15 @@ export class GameServer {
    */
   private endLife(c: Client, s: Snake, afterlife = true, killerNid = 0): void {
     c.sid = null;
+    // Dying mid-contract is a missed contract; dying while marked ends the
+    // mark unpaid; whoever this snake was hunting has outlived it.
+    if (c.hunt) {
+      c.hunt = null;
+      c.huntEndedAt = Date.now();
+      c.huntStreak = 0;
+    }
+    c.mark = null;
+    this.settleMarksBy(s.id);
     this.world.nearIds.delete(s.id);
     if (c.party) this.leaveParty(c.party, s.id);
     c.deathAt = Date.now();
@@ -2243,6 +2425,8 @@ export class GameServer {
       remains: Math.floor(life.remains),
       noboostLength: Math.floor(life.noboostLength),
       bounty: life.bounty,
+      contracts: life.contracts,
+      marks: life.marks,
     };
     const bestBefore = c.profile.best;
     const { completed, milestones, freezeEarned, chest, banked } = this.profiles.recordLife(
@@ -2538,6 +2722,7 @@ export class GameServer {
   /** The ranking and boards are computed once, then each client gets its own line. */
   private sendStatsAll(): void {
     if (!this.clients.size) return;
+    const now = Date.now();
     const alive = this.world.snakes.filter((s) => s.alive).sort((a, b) => b.mass - a.mass);
     this.refreshBounties(alive);
     const rankOf = new Map<string, number>();
@@ -2593,6 +2778,22 @@ export class GameServer {
           .f32(b?.y ?? 0);
         // The nemesis's live snake, so the client can mark it and say they are here.
         w.u16(c.profile ? this.nemesisNid(c.profile) : 0);
+        // The contract on offer: the target (wire id, clock, reward, where it
+        // is, its name), the streak, and the mark on this player.
+        const h = c.hunt;
+        const t = h ? this.liveSnake(h.targetSid) : null;
+        w.u16(t ? (this.nids.get(t.id) ?? 0) : 0)
+          .u16(h ? Math.max(0, Math.min(65535, Math.ceil((h.until - now) / 1000))) : 0)
+          .u16(h ? Math.min(65535, h.reward) : 0)
+          .f32(t?.x ?? 0)
+          .f32(t?.y ?? 0)
+          .str(t ? h!.targetName : "")
+          .u8(Math.min(255, c.huntStreak));
+        const m = c.mark;
+        w.u16(m ? (this.nids.get(m.hunterSid) ?? 0) : 0)
+          .u16(m ? Math.max(0, Math.min(65535, Math.ceil((m.until - now) / 1000))) : 0)
+          .u16(m ? Math.min(65535, m.reward) : 0)
+          .str(m?.hunterName ?? "");
       }
       c.ws.send(w.finish());
     }

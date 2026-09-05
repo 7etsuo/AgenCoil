@@ -77,6 +77,12 @@ function fmtDur(ms: number): string {
   return `${m}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** A contract clock: "0:52". */
+function fmtClock(s: number): string {
+  const n = Math.max(0, Math.floor(s));
+  return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`;
+}
+
 /** The handle a typed name would become: no @, lower case, spaces as underscores. */
 function typedHandle(raw: string): string {
   return raw.trim().replace(/^@/, "").toLowerCase().replace(/\s+/g, "_");
@@ -686,6 +692,19 @@ export function CoilApp() {
               {hud.nemesis?.inArena && (
                 <div className="rounded-full border border-[#ff6b8a]/60 bg-bg/80 px-3 py-1 text-xs text-[#ffb3c1]">
                   ⚔ {hud.nemesis.name} is here · they lead {hud.nemesis.k}-{hud.nemesis.d}
+                </div>
+              )}
+              {hud.contract.hunt && (
+                <div className="rounded-full border border-[#ffb347]/60 bg-bg/80 px-3 py-1 text-xs text-[#ffb347]">
+                  ◎ hunt {hud.contract.hunt.name} · {fmtClock(hud.contract.hunt.secsLeft)} · +
+                  {hud.contract.hunt.reward} · {hud.contract.hunt.dir}
+                  {hud.contract.streak > 1 ? ` · streak ${hud.contract.streak}` : ""}
+                </div>
+              )}
+              {hud.contract.mark && (
+                <div className="rounded-full border border-[#ff6b8a]/60 bg-bg/80 px-3 py-1 text-xs text-[#ffb3c1]">
+                  marked by {hud.contract.mark.name} · survive{" "}
+                  {fmtClock(hud.contract.mark.secsLeft)} · +{hud.contract.mark.reward}
                 </div>
               )}
               {hud.beat && !hud.beat.done && (
@@ -1706,6 +1725,11 @@ export function CoilApp() {
                   {hud.firstLife && hud.deathCount > hud.deathRank
                     ? ` · you beat ${hud.deathCount - hud.deathRank}. one more?`
                     : ""}
+                </p>
+              )}
+              {hud.contractsDone > 0 && (
+                <p className="mt-1 text-xs text-[#ffb347]">
+                  {hud.contractsDone} contract{hud.contractsDone === 1 ? "" : "s"} filled this life
                 </p>
               )}
               <div className="mt-5 grid grid-cols-3 gap-2 text-center tabular-nums">

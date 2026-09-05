@@ -62,6 +62,12 @@ export interface StatsInfo {
   boss: { hp: number; x: number; y: number } | null;
   /** The wire id of your nemesis's snake while it is alive here, else 0. */
   nemesisNid: number;
+  /** The contract on offer: the target's wire id, clock, reward, last known position and name. */
+  hunt: { nid: number; secs: number; reward: number; x: number; y: number; name: string } | null;
+  /** Contracts filled in a row. */
+  huntStreak: number;
+  /** The mark on you: who hunts you, their clock, and what outliving it pays. */
+  mark: { nid: number; secs: number; reward: number; name: string } | null;
 }
 
 export interface ProfileInfo {
@@ -710,6 +716,9 @@ export class NetSession {
           mode: { id: 0, secsLeft: 0, secsToNext: 0 },
           boss: null,
           nemesisNid: 0,
+          hunt: null,
+          huntStreak: 0,
+          mark: null,
         };
         const nb = r.u8();
         for (let i = 0; i < nb; i++) {
@@ -746,6 +755,23 @@ export class NetSession {
             s.boss = hp === 255 ? null : { hp, x: bx, y: by };
           }
           if (r.remaining >= 2) s.nemesisNid = r.u16();
+          if (r.remaining >= 16) {
+            const nid = r.u16();
+            const secs = r.u16();
+            const reward = r.u16();
+            const x = r.f32();
+            const y = r.f32();
+            const name = r.str();
+            s.huntStreak = r.u8();
+            if (nid) s.hunt = { nid, secs, reward, x, y, name };
+          }
+          if (r.remaining >= 7) {
+            const nid = r.u16();
+            const secs = r.u16();
+            const reward = r.u16();
+            const name = r.str();
+            if (nid) s.mark = { nid, secs, reward, name };
+          }
         }
         this.hooks.onStats(s);
         break;

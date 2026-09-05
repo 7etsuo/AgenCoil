@@ -238,6 +238,9 @@ export interface LifeStats {
   remains: number;
   noboostLength: number;
   bounty: number;
+  /** Contracts filled and marks outlived this life (absent from older callers). */
+  contracts?: number;
+  marks?: number;
 }
 
 export function lifeValue(c: Challenge, life: LifeStats): number {
