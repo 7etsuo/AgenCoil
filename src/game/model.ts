@@ -72,6 +72,21 @@ export const BOSS_DURATION_S = 300;
 export const BOSS_HIT_MASS = 4;
 export const BOSS_NAME = "the leviathan";
 
+/** The boss hour: milliseconds until it next surfaces (0 while it is up), and whether it is up now. */
+export function nextBossAt(now = Date.now()): { inMs: number; up: boolean } {
+  const d = new Date(now);
+  const start = Date.UTC(
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate(),
+    d.getUTCHours(),
+    BOSS_MINUTE,
+  );
+  const end = start + BOSS_DURATION_S * 1000;
+  if (now >= start && now < end) return { inMs: 0, up: true };
+  return { inMs: (now < start ? start : start + 3_600_000) - now, up: false };
+}
+
 /**
  * The most length one death can drop as remains. Without a ceiling, two big
  * snakes trading deaths recycle each other's mass, and any multiplier above

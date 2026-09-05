@@ -82,7 +82,8 @@ function TopPage() {
           {kind === "crew"
             ? "Crews ranked by their members' best runs this week."
             : `Longest single run, ${kind === "alltime" ? "ever" : kind === "weekly" ? "this week" : "this season"}. Kills and games are all time.`}
-          {kind === "weekly" && " Leagues promote and relegate every Monday."}
+          {kind === "weekly" &&
+            " Three runs at a tier's length bank it for the week; the week rolls on Monday."}
         </p>
         {error && <p className="mt-6 text-sm text-danger">Could not reach the arena server.</p>}
         {rows && rows.length === 0 && !error && (

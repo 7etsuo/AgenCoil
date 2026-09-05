@@ -74,9 +74,11 @@ import {
   isoWeek,
   leagueOf,
   levelOf,
+  nextStreak,
   rewardText,
   modeNow,
   seasonOf,
+  todayUtc,
   type LifeStats,
 } from "../../src/game/challenges";
 import { playGateFromEnv } from "./play-gate";
@@ -1296,6 +1298,9 @@ export class GameServer {
     if (!p || !client.alive) return;
     const rank = await this.profiles.rank(p);
     if (!client.alive) return;
+    // What today's first life does to the streak, and whether it is played:
+    // the client cannot tell from the streak alone.
+    const streak = nextStreak(p.streak, p.streakLast, p.freezes, todayUtc());
     client.ws.send(
       new Writer()
         .u8(S2C.PROFILE)
@@ -1335,6 +1340,8 @@ export class GameServer {
         .u8(Math.min(255, p.weekRuns[4] ?? 0))
         .u8(p.seasonTier)
         .str(p.seasons.map(([season, tier]) => `${season}:${tier}`).join(","))
+        .u16(Math.min(65535, streak.streak))
+        .u8(streak.playedToday ? 1 : 0)
         .finish(),
     );
     const list = this.profiles.challenges(p);
@@ -1421,9 +1428,20 @@ export class GameServer {
       this.boss = null;
       for (const c of this.clients) c.bossHits = 0;
     }
+    // The boss surfaces any time in its window once someone is connected,
+    // not only at the exact minute, and always leaves at the window's end.
+    const minute = now.getUTCMinutes();
+    const windowStart = Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      hour,
+      BOSS_MINUTE,
+    );
     if (
       !this.boss &&
-      now.getUTCMinutes() === BOSS_MINUTE &&
+      minute >= BOSS_MINUTE &&
+      minute < BOSS_MINUTE + BOSS_DURATION_S / 60 &&
       this.bossHour !== hour &&
       this.clients.size
     ) {
@@ -1433,7 +1451,7 @@ export class GameServer {
       const boss = this.world.spawnBoss(at);
       this.boss = boss;
       this.nidOf(boss.id);
-      this.bossUntil = Date.now() + BOSS_DURATION_S * 1000;
+      this.bossUntil = windowStart + BOSS_DURATION_S * 1000;
       for (const c of this.clients)
         this.notice(c, 0, `${BOSS_NAME} has surfaced at ${lm.name}: cut it together`);
     }
@@ -1941,11 +1959,14 @@ export class GameServer {
       noboostLength: Math.floor(life.noboostLength),
       bounty: life.bounty,
     };
+    const bestBefore = c.profile.best;
     const { completed, milestones, freezeEarned, chest, banked } = this.profiles.recordLife(
       c.profile,
       stats,
       { x: s.x, y: s.y },
     );
+    if (stats.length > bestBefore)
+      this.events.log("feature", { key: c.key, s: "best", n: stats.length });
     if (banked) {
       const name = LEAGUES[banked - 1]!.name;
       this.notice(c, 2, `${name} banked for the week: ${rewardText(banked)} when it rolls`);

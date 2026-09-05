@@ -114,6 +114,23 @@ export class GameAudio {
     setTimeout(() => this.blip(880, 0.12, 0.09, "triangle"), 70);
   }
 
+  /** Passing a personal best: one note gliding up an octave. */
+  record(): void {
+    if (this.muted || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(440, t);
+    osc.frequency.exponentialRampToValueAtTime(880, t + 0.18);
+    g.gain.setValueAtTime(0.1, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.32);
+    osc.connect(g);
+    g.connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.34);
+  }
+
   /** A promotion: three rising sine notes, unlike the kill's two triangle notes. */
   rankUp(): void {
     this.blip(523, 0.12, 0.09, "sine");

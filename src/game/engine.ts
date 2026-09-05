@@ -2,6 +2,7 @@ import {
   COMEBACK_WINDOW_MS,
   FOOD_COLORS,
   MAX_BOTS,
+  nextBossAt,
   SKINS,
   START_MASS,
   WISP_BANK_MAX,
@@ -28,9 +29,13 @@ import {
   LEAGUE_BANK_RUNS,
   LEAGUE_COLORS,
   leagueOf,
+  nextUtcMidnight,
+  nextWeekRoll,
   seasonEndsAt,
   seasonOf,
+  todayUtc,
 } from "./challenges";
+import { recordTarget } from "./record";
 import {
   NetSession,
   defaultServerUrl,
@@ -120,6 +125,12 @@ export interface HudState {
   spawnTier: number;
   /** What last week (or the season) paid, until dismissed. */
   roll: { text: string; tier: number } | null;
+  /** The best this life is measured against (0 when none), and whether it has been passed. */
+  record: { best: number; passed: boolean };
+  /** The life that just ended set a new best. */
+  newBest: boolean;
+  /** Time to the next day, week and boss, for the exit clocks. */
+  clocks: { dayMs: number; weekMs: number; bossInMs: number; bossUp: boolean };
   firstLife: boolean;
   party: { name: string; mass: number }[];
   arenaMode: { id: number; secsLeft: number; secsToNext: number };
@@ -265,6 +276,11 @@ export class CoilEngine {
   /** The best arena rank reached this life, so "#3" and "#1" are said once each. */
   private bestRankThisLife = 0;
   private roll: { text: string; tier: number } | null = null;
+  private recordBest = 0;
+  private recordPassed = false;
+  private newBest = false;
+  /** The day the "your streak starts now" line was said, so it is said once a day. */
+  private streakSaid = "";
   /** The league legend has been shown once on this device (localStorage), or during this life. */
   private legendDone = readFlag("agencoil-hint-league");
   private legendShown = false;
@@ -579,6 +595,42 @@ export class CoilEngine {
     return this.profile ? leagueOf(this.profile.weekBest) + 1 : 1;
   }
 
+  /** What a life is measured against, decided as it starts. */
+  private startLife(spawnMass: number): void {
+    this.spawnTier = this.startTier();
+    this.bestRankThisLife = 0;
+    this.promo = null;
+    this.recordBest = recordTarget(this.profile?.best ?? 0, this.best, spawnMass);
+    this.recordPassed = false;
+    this.newBest = false;
+    // The day's first life: say what it does to the streak.
+    const p = this.profile;
+    const today = todayUtc();
+    if (p && !p.playedToday && p.streakNext > 0 && this.streakSaid !== today) {
+      this.streakSaid = today;
+      this.pushFeed(`day ${p.streakNext} of your streak starts now`);
+    }
+  }
+
+  /** The first time a life passes the best it started under: a floater, a pill, a note, a nudge. */
+  private recordMoment(): void {
+    if (this.phase !== "play" || !this.recordBest || this.recordPassed) return;
+    const p = this.world.player;
+    if (!p || p.mass <= this.recordBest) return;
+    this.recordPassed = true;
+    this.floaters.push({
+      x: p.x,
+      y: p.y - radiusOf(p.mass) * 2.2,
+      text: "past your best",
+      life: 1.2,
+      color: "#d7dde8",
+    });
+    this.killNotice = `past your best · ${Math.floor(p.mass)}`;
+    this.killTimer = 2.6;
+    this.audio.record();
+    this.cam.trauma = Math.min(1, this.cam.trauma + 0.15);
+  }
+
   /**
    * A known snake's league rose: everyone in view sees the frame burst and
    * the tier's name; the promoted player also gets the card, the sound and
@@ -615,9 +667,7 @@ export class CoilEngine {
     s.finish = this.profile?.prevTier ?? 0;
     this.phase = "play";
     this.spawnedAt = performance.now();
-    this.spawnTier = this.startTier();
-    this.bestRankThisLife = 0;
-    this.promo = null;
+    this.startLife(s.mass);
     this.snapCamTo(s);
     this.emitHud();
   }
@@ -634,9 +684,7 @@ export class CoilEngine {
     this.wispBank = 0;
     this.banked = 0;
     this.nearWin = null;
-    this.spawnTier = this.startTier();
-    this.bestRankThisLife = 0;
-    this.promo = null;
+    this.startLife(s.mass);
     this.snapCamTo(s);
     this.emitHud();
   }
@@ -761,6 +809,9 @@ export class CoilEngine {
           : null,
       spawnTier: this.spawnTier,
       roll: this.roll,
+      record: { best: this.recordBest, passed: this.recordPassed },
+      newBest: this.phase === "dead" && this.newBest,
+      clocks: this.clocks(),
       // The live snake knows its league before the profile is resent.
       league: p?.league || (this.profile ? leagueOf(this.profile.weekBest) + 1 : 0),
       might: this.profile?.achv.length ?? 0,
@@ -1173,6 +1224,7 @@ export class CoilEngine {
       }
     }
     this.arenaRankMoment();
+    this.recordMoment();
     if (this.phase === "dead" && this.wispWanted && this.wispSrv && nowMs > this.deathBeatUntil) {
       this.phase = "wisp";
       this.wispStartedAt = nowMs;
@@ -1204,6 +1256,18 @@ export class CoilEngine {
       }
     }
     this.exposeDebug();
+  }
+
+  /** Time to the next day, week and boss, for the exit clocks. */
+  private clocks(): HudState["clocks"] {
+    const now = Date.now();
+    const boss = nextBossAt(now);
+    return {
+      dayMs: nextUtcMidnight(now),
+      weekMs: nextWeekRoll(now),
+      bossInMs: boss.inMs,
+      bossUp: boss.up,
+    };
   }
 
   /** Once per life: reaching third and first place in an arena with at least four humans. */
@@ -1598,6 +1662,7 @@ export class CoilEngine {
     // only flag the wish here; the wisp state itself resets on spawn.
     this.wispWanted = this.online;
     this.promo = null;
+    this.newBest = this.recordPassed;
     this.phase = "dead";
     this.boosting = false;
     this.holdBoost = false;

@@ -19,6 +19,7 @@ import {
   dailyChallenges,
   isoWeek,
   lifeValue,
+  nextStreak,
   seasonOf,
   todayUtc,
   type Challenge,
@@ -612,16 +613,11 @@ export class ProfileStore {
    */
   private touchStreak(p: Profile): string[] {
     const today = p.day;
-    if (p.streakLast === today) return [];
+    const next = nextStreak(p.streak, p.streakLast, p.freezes, today);
+    if (next.playedToday) return [];
     const reached: string[] = [];
-    const last = p.streakLast ? Date.parse(p.streakLast + "T00:00:00Z") : NaN;
-    const now = Date.parse(today + "T00:00:00Z");
-    const gapDays = Number.isFinite(last) ? Math.round((now - last) / 86_400_000) : 99;
-    if (gapDays === 1) p.streak++;
-    else if (gapDays === 2 && p.freezes > 0) {
-      p.freezes--;
-      p.streak++;
-    } else p.streak = 1;
+    if (next.usesFreeze) p.freezes--;
+    p.streak = next.streak;
     p.streakLast = today;
     for (const m of STREAK_MILESTONES) {
       if (p.streak >= m.days && !(p.unlocks & m.unlock)) {

@@ -149,6 +149,40 @@ export function modeNow(now = Date.now()): { id: number; secsLeft: number; secsT
   return { id, secsLeft, secsToNext };
 }
 
+/** Milliseconds until the next UTC midnight, when the day (quests, streak) rolls. */
+export function nextUtcMidnight(now = Date.now()): number {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) - now;
+}
+
+/** Milliseconds until the next Monday 00:00 UTC, when the week (leagues) rolls; agrees with `isoWeek`. */
+export function nextWeekRoll(now = Date.now()): number {
+  const d = new Date(now);
+  const day = d.getUTCDay() || 7;
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + (8 - day)) - now;
+}
+
+/**
+ * The streak a profile holds after a life today: continued from yesterday,
+ * bridged over one missed day by a freeze, restarted, or already counted.
+ * The server applies it on the day's first life; the client shows it.
+ */
+export function nextStreak(
+  streak: number,
+  streakLast: string,
+  freezes: number,
+  today: string,
+): { streak: number; playedToday: boolean; usesFreeze: boolean } {
+  if (streakLast === today) return { streak, playedToday: true, usesFreeze: false };
+  const last = streakLast ? Date.parse(streakLast + "T00:00:00Z") : NaN;
+  const now = Date.parse(today + "T00:00:00Z");
+  const gapDays = Number.isFinite(last) ? Math.round((now - last) / 86_400_000) : 99;
+  if (gapDays === 1) return { streak: streak + 1, playedToday: false, usesFreeze: false };
+  if (gapDays === 2 && freezes > 0)
+    return { streak: streak + 1, playedToday: false, usesFreeze: true };
+  return { streak: 1, playedToday: false, usesFreeze: false };
+}
+
 /** Six-week seasons counted from an epoch. */
 const SEASON_EPOCH = Date.UTC(2026, 8, 7); // Monday 2026-09-07
 const SEASON_MS = 6 * 7 * 86_400_000;

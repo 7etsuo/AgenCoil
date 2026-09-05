@@ -65,6 +65,18 @@ const HANDLE_NOTES: Record<number, string> = {
   [HANDLE_TOO_SOON]: "one moment, then try again",
 };
 
+/** A duration for a countdown: "2d 4h", "5h 12m", "23m", or "4:07" under ten minutes. */
+function fmtDur(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86_400);
+  const h = Math.floor((s % 86_400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m >= 10) return `${m}m`;
+  return `${m}:${String(s % 60).padStart(2, "0")}`;
+}
+
 /** The handle a typed name would become: no @, lower case, spaces as underscores. */
 function typedHandle(raw: string): string {
   return raw.trim().replace(/^@/, "").toLowerCase().replace(/\s+/g, "_");
@@ -632,7 +644,13 @@ export function CoilApp() {
                   rank {hud.rank} of {hud.count} · kills {hud.kills}
                 </div>
                 <div className="flex items-center gap-1.5 text-xs text-subtle">
-                  <span>best {hud.best}</span>
+                  <span>
+                    {hud.phase === "play" && hud.record.best > 0
+                      ? hud.record.passed
+                        ? `best ${hud.record.best} · +${Math.max(0, hud.score - hud.record.best)} this life`
+                        : `best ${hud.record.best} · ${hud.record.best - hud.score} to go`
+                      : `best ${hud.best}`}
+                  </span>
                   {hud.league > 0 && (
                     <>
                       <span>·</span>
@@ -795,13 +813,34 @@ export function CoilApp() {
               </div>
             )
           )}
-          {hud.arenaMode.id > 0 && (
-            <div className="absolute left-1/2 bottom-[calc(1.25rem+env(safe-area-inset-bottom))] -translate-x-1/2 rounded-full border border-[#9b8cff]/60 bg-bg/80 px-3 py-1 text-xs text-[#c9bfff]">
-              {MODES.find((m) => m.id === hud.arenaMode.id)?.name ?? "event"} ·{" "}
-              {Math.floor(hud.arenaMode.secsLeft / 60)}:
-              {String(hud.arenaMode.secsLeft % 60).padStart(2, "0")} left
-            </div>
-          )}
+          <div className="absolute left-1/2 bottom-[calc(1.25rem+env(safe-area-inset-bottom))] flex -translate-x-1/2 flex-col items-center gap-1">
+            {hud.arenaMode.id > 0 && (
+              <div className="rounded-full border border-[#9b8cff]/60 bg-bg/80 px-3 py-1 text-xs text-[#c9bfff]">
+                {MODES.find((m) => m.id === hud.arenaMode.id)?.name ?? "event"} ·{" "}
+                {Math.floor(hud.arenaMode.secsLeft / 60)}:
+                {String(hud.arenaMode.secsLeft % 60).padStart(2, "0")} left
+              </div>
+            )}
+            {/* The exit clocks that matter right now: the boss about to surface, the week about to close on a bank in reach. */}
+            {hud.mode === "online" && !hud.clocks.bossUp && hud.clocks.bossInMs < 5 * 60_000 && (
+              <div className="rounded-full border border-[#ff5a6e]/50 bg-bg/80 px-3 py-1 text-xs text-[#ffb3c1]">
+                the leviathan surfaces in {fmtDur(hud.clocks.bossInMs)}
+              </div>
+            )}
+            {hud.profile &&
+              hud.clocks.weekMs < 6 * 3600_000 &&
+              (() => {
+                const tier = leagueOf(hud.profile.weekBest) + 1;
+                const runs = hud.profile.weekRuns[tier - 1] ?? 0;
+                if (tier < 2 || runs === 0 || runs >= LEAGUE_BANK_RUNS) return null;
+                return (
+                  <div className="rounded-full border border-line bg-bg/80 px-3 py-1 text-xs text-muted">
+                    week closes in {fmtDur(hud.clocks.weekMs)} · {runs}/{LEAGUE_BANK_RUNS} to bank{" "}
+                    {LEAGUES[tier - 1]!.name}
+                  </div>
+                );
+              })()}
+          </div>
           {hud.mode === "online" && hud.board.length > 0 && (
             <div className="absolute right-4 top-[calc(6.9rem+env(safe-area-inset-top))] w-[132px] rounded-lg border border-line/80 bg-bg/70 px-2 py-1 text-[11px] sm:hidden">
               {hud.board.slice(0, 3).map((r, i) => (
@@ -1009,6 +1048,7 @@ export function CoilApp() {
               </div>
             )}
 
+            {hud?.profile && <NextRow hud={hud} profile={hud.profile} />}
             {authEnabled && (signInReady || signedIn) && (
               <div className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-line bg-elevated/60 px-3 py-2 text-xs">
                 {signedIn ? (
@@ -1418,6 +1458,12 @@ export function CoilApp() {
                     minutes of a twist
                   </p>
                 )}
+                {hud && (
+                  <p className="mt-1 text-xs text-subtle">
+                    the leviathan surfaces every hour at :30
+                    {hud.clocks.bossUp ? " · up now" : ` · in ${fmtDur(hud.clocks.bossInMs)}`}
+                  </p>
+                )}
                 {hud && hud.arenaMode.id > 0 && (
                   <p className="mt-1 text-xs text-[#c9bfff]">
                     event now: {MODES.find((m) => m.id === hud.arenaMode.id)?.text} ·{" "}
@@ -1572,7 +1618,7 @@ export function CoilApp() {
             <div className="w-full max-w-sm rounded-xl border border-line bg-surface/92 p-6 text-center">
               <p className="text-xs tracking-[0.2em] text-muted uppercase">down</p>
               <h2 className="mt-2 text-3xl font-semibold tracking-tight">
-                {hud.nearWin ? "so close" : "you popped"}
+                {hud.newBest ? "new best" : hud.nearWin ? "so close" : "you popped"}
               </h2>
               <p className="mt-2 text-sm text-muted">
                 {hud.nearWin ? `${hud.nearWin} · ` : ""}
@@ -1649,8 +1695,12 @@ export function CoilApp() {
                 <div className="rounded-lg border border-line bg-elevated/70 px-2 py-2">
                   <div className="text-xs text-muted">best</div>
                   <div className="text-xl font-semibold">{hud.best}</div>
+                  {hud.newBest && hud.record.best > 0 && (
+                    <div className="text-[10px] text-subtle">was {hud.record.best}</div>
+                  )}
                 </div>
               </div>
+              {hud.profile && <NextBlock hud={hud} profile={hud.profile} />}
               {hud.unlocked.length > 0 && (
                 <div className="mt-3 rounded-lg border border-[#f0c14a]/50 bg-[#f0c14a]/10 px-3 py-2 text-left text-xs">
                   <div className="text-[10px] tracking-[0.2em] text-[#f0c14a] uppercase">
@@ -1722,9 +1772,9 @@ export function CoilApp() {
               <button
                 type="button"
                 onClick={() => engineRef.current?.respawn()}
-                className={`${hud.comebackLeft > 0 || hud.rematch ? "mt-2" : "mt-6"} h-12 w-full rounded-lg bg-accent font-medium text-accent-fg active:scale-[0.98] ${hud.nearWin ? "h-14 text-lg shadow-[0_0_28px_rgba(215,221,232,0.35)]" : ""}`}
+                className={`${hud.comebackLeft > 0 || hud.rematch ? "mt-2" : "mt-6"} h-12 w-full rounded-lg bg-accent font-medium text-accent-fg active:scale-[0.98] ${hud.nearWin || hud.newBest ? "h-14 text-lg shadow-[0_0_28px_rgba(215,221,232,0.35)]" : ""}`}
               >
-                {hud.nearWin ? "Run it back" : "Play again"}
+                {hud.nearWin || hud.newBest ? "Run it back" : "Play again"}
               </button>
               {hud.challenges.length > 0 && (
                 <ul className="mt-3 space-y-0.5 text-left text-xs text-muted">
@@ -1864,6 +1914,11 @@ async function renderShareCard(hud: HudState, nick: string, bands: string[]): Pr
       80,
       370,
     );
+    if (hud.newBest && hud.record.best > 0) {
+      ctx.fillStyle = "#f0c14a";
+      ctx.font = "600 26px Outfit, system-ui, sans-serif";
+      ctx.fillText(`NEW BEST · was ${hud.record.best}`, 80, 412);
+    }
     // The run's league, as a crest with its word.
     const tier = leagueOf(hud.score) + 1;
     drawCrest(ctx, tier, 1040, 150, 72);
@@ -1880,6 +1935,69 @@ async function renderShareCard(hud: HudState, nick: string, bands: string[]): Pr
   } catch {
     return null;
   }
+}
+
+/** The streak line: what today did, or will do, to it, and the next milestone. */
+function streakLine(p: NonNullable<HudState["profile"]>): string {
+  const after = p.playedToday ? p.streak : p.streakNext;
+  const next = STREAK_MILESTONES.find((m) => m.days > after);
+  const milestone = next
+    ? ` · ${next.label} in ${next.days - after} day${next.days - after === 1 ? "" : "s"}`
+    : "";
+  if (p.playedToday) return `day ${p.streak} kept · day ${p.streak + 1} tomorrow${milestone}`;
+  if (p.streak > 0 && p.streakNext === 1)
+    return "streak restarts today · day 1 with your next life";
+  return `day ${p.streakNext} starts with your next life${milestone}`;
+}
+
+/**
+ * The exit clocks on the death card: the streak, then the boss when it is up
+ * or close, else the week when a bank is one or two runs away or the week
+ * is in its last day. Durations only, never clock times.
+ */
+function NextBlock({ hud, profile }: { hud: HudState; profile: NonNullable<HudState["profile"]> }) {
+  const tier = leagueOf(profile.weekBest) + 1;
+  const runs = profile.weekRuns[tier - 1] ?? 0;
+  const bankClose = tier > 1 && runs > 0 && runs < LEAGUE_BANK_RUNS;
+  const lastDay = hud.clocks.weekMs < 24 * 3600_000;
+  const bossSoon = hud.clocks.bossUp || hud.clocks.bossInMs < 10 * 60_000;
+  const lines = [`🔥 ${streakLine(profile)} · resets in ${fmtDur(hud.clocks.dayMs)}`];
+  if (hud.mode === "online" && bossSoon)
+    lines.push(
+      hud.clocks.bossUp
+        ? "the leviathan is up now: cut it for a chest"
+        : `the leviathan surfaces in ${fmtDur(hud.clocks.bossInMs)}`,
+    );
+  else if (bankClose || lastDay)
+    lines.push(
+      `week closes in ${fmtDur(hud.clocks.weekMs)}${bankClose ? ` · ${LEAGUES[tier - 1]!.name} ${runs}/${LEAGUE_BANK_RUNS} runs to bank` : ""}`,
+    );
+  return (
+    <div className="mt-3 space-y-0.5 text-left text-xs text-muted">
+      {lines.map((l) => (
+        <div key={l}>{l}</div>
+      ))}
+    </div>
+  );
+}
+
+/** The "next" row in the menu: the day, the week, the leviathan, the season. */
+function NextRow({ hud, profile }: { hud: HudState; profile: NonNullable<HudState["profile"]> }) {
+  const items = [
+    profile.playedToday
+      ? `day ${profile.streak} kept · day ${profile.streak + 1} tomorrow`
+      : `day ${profile.streakNext || 1} with your first life today · ${fmtDur(hud.clocks.dayMs)} left`,
+    `week closes in ${fmtDur(hud.clocks.weekMs)}`,
+    hud.clocks.bossUp ? "leviathan up now" : `leviathan at :30 · in ${fmtDur(hud.clocks.bossInMs)}`,
+    `season ${hud.season} · ${fmtDur(Math.max(0, hud.seasonEnds - Date.now()))} left`,
+  ];
+  return (
+    <div className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-subtle">
+      {items.map((t) => (
+        <span key={t}>{t}</span>
+      ))}
+    </div>
+  );
 }
 
 /** What last week (or the season) paid: shown until the player puts it away. */

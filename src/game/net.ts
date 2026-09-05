@@ -100,6 +100,9 @@ export interface ProfileInfo {
   weekRuns: number[];
   seasonTier: number;
   seasons: [number, number][];
+  /** The streak after today's first life, and whether it is already played. */
+  streakNext: number;
+  playedToday: boolean;
 }
 
 export interface ChallengeInfo {
@@ -840,6 +843,8 @@ export class NetSession {
           weekRuns: [0, 0, 0, 0, 0],
           seasonTier: 0,
           seasons: [],
+          streakNext: 0,
+          playedToday: false,
         };
         if (r.remaining >= 14) {
           p.bestX = r.f32();
@@ -882,6 +887,10 @@ export class NetSession {
                 return [Number(season) || 0, Number(tier) || 0] as [number, number];
               })
             : [];
+        }
+        if (r.remaining >= 3) {
+          p.streakNext = r.u16();
+          p.playedToday = r.u8() === 1;
         }
         this.hooks.onProfile(p);
         break;

@@ -14,13 +14,15 @@ const root = new URL("..", import.meta.url).pathname;
 
 let rules;
 let crest;
+let record;
+let model;
 let ProfileStore;
 before(async () => {
   const dir = mkdtempSync(join(tmpdir(), "agencoil-rules-"));
   const entry = join(dir, "entry.ts");
   writeFileSync(
     entry,
-    `export * as rules from "${root}src/game/challenges.ts"; export * as crest from "${root}src/game/crest.ts"; export { ProfileStore } from "${root}game-server/src/profiles.ts";`,
+    `export * as rules from "${root}src/game/challenges.ts"; export * as crest from "${root}src/game/crest.ts"; export * as record from "${root}src/game/record.ts"; export * as model from "${root}src/game/model.ts"; export { ProfileStore } from "${root}game-server/src/profiles.ts";`,
   );
   // Emitted under the server's node_modules so the external "pg" resolves.
   const outDir = join(root, "game-server", "node_modules", ".cache");
@@ -39,6 +41,8 @@ before(async () => {
   const mod = await import(pathToFileURL(out).href);
   rules = mod.rules;
   crest = mod.crest;
+  record = mod.record;
+  model = mod.model;
   ProfileStore = mod.ProfileStore;
 });
 
@@ -92,6 +96,39 @@ test("every league has its own crest: a distinct shape, letter and colour, drawn
   // And the gem is the only one wider at its girdle than at its top.
   const gem = crest.crestPolygon("gem");
   assert.ok(Math.max(...gem.map(([x]) => x)) > gem[1][0]);
+});
+
+test("the exit clocks: midnight, Monday, the boss at :30, and the streak after a life today", () => {
+  const t = Date.UTC(2026, 8, 3, 14, 20, 0); // Thursday 3 September 2026
+  assert.equal(rules.nextUtcMidnight(t), Date.UTC(2026, 8, 4) - t);
+  assert.equal(rules.nextWeekRoll(t), Date.UTC(2026, 8, 7) - t, "Monday the 7th");
+  const monday = Date.UTC(2026, 8, 7, 0, 0, 1);
+  assert.equal(
+    rules.nextWeekRoll(monday),
+    Date.UTC(2026, 8, 14) - monday,
+    "a Monday counts to the next",
+  );
+  assert.notEqual(
+    rules.isoWeek(new Date(Date.UTC(2026, 8, 6))),
+    rules.isoWeek(new Date(Date.UTC(2026, 8, 7))),
+    "the roll and isoWeek agree that Monday starts a week",
+  );
+  assert.deepEqual(model.nextBossAt(t), { inMs: 10 * 60_000, up: false });
+  assert.deepEqual(model.nextBossAt(Date.UTC(2026, 8, 3, 14, 32)), { inMs: 0, up: true });
+  assert.equal(model.nextBossAt(Date.UTC(2026, 8, 3, 14, 40)).inMs, 50 * 60_000);
+  const next = (streak, last, freezes) => rules.nextStreak(streak, last, freezes, "2026-09-03");
+  assert.deepEqual(next(4, "2026-09-02", 0), { streak: 5, playedToday: false, usesFreeze: false });
+  assert.deepEqual(next(4, "2026-09-01", 1), { streak: 5, playedToday: false, usesFreeze: true });
+  assert.deepEqual(next(4, "2026-09-01", 0), { streak: 1, playedToday: false, usesFreeze: false });
+  assert.deepEqual(next(4, "2026-09-03", 0), { streak: 4, playedToday: true, usesFreeze: false });
+  assert.deepEqual(next(0, "", 0), { streak: 1, playedToday: false, usesFreeze: false });
+});
+
+test("a record is measured against the best at spawn, above a floor, never from a life that starts past it", () => {
+  assert.equal(record.recordTarget(540, 100, 10), 540);
+  assert.equal(record.recordTarget(100, 540, 10), 540, "the best kept in the browser counts too");
+  assert.equal(record.recordTarget(40, 0, 10), 0, "under the floor there is no moment");
+  assert.equal(record.recordTarget(120, 0, 130), 0, "a comeback past the record passes nothing");
 });
 
 test("a named mode runs for the first 15 minutes of every hour", () => {
