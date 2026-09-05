@@ -1291,6 +1291,22 @@ export class CoilEngine {
   private tick(dt: number): void {
     this.refreshAim();
     this.keyAim = this.applyKeyboardAim();
+    // A test harness may drive the snake: a function on the window that
+    // answers a heading and a boost for the live world, or null to leave the
+    // player's own input alone. Nothing else reads it.
+    const drive = (window as unknown as { __coilDrive?: unknown }).__coilDrive;
+    if (typeof drive === "function" && this.phase === "play") {
+      const me = this.world.player;
+      const cmd = me
+        ? (drive as (w: World, s: Snake) => { angle: number; boost: boolean } | null)(this.world, me)
+        : null;
+      if (cmd && me) {
+        this.aimScreen = null;
+        this.pointer.x = me.x + Math.cos(cmd.angle) * AIM_REACH;
+        this.pointer.y = me.y + Math.sin(cmd.angle) * AIM_REACH;
+        this.boosting = cmd.boost;
+      }
+    }
     const boost = (this.phase === "play" || this.phase === "wisp") && this.boosting;
     const localLife = this.local?.player != null;
     // The server did not answer Play in time: start a local game instead.

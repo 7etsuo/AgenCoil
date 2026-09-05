@@ -10,3 +10,7 @@ screenshots
 .DS_Store
 dist
 routeTree.gen.ts
+
+# reinforcement-learning tooling output
+rl/dist
+rl/runs
