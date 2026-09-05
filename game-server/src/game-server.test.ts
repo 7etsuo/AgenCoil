@@ -704,6 +704,138 @@ test("a live snake's view is pinned near its head, so a far snake is not sent", 
   }
 });
 
+/** A player's server-side record and snake, by name. */
+function clientOf(game: GameServerT, name: string) {
+  const g = game as unknown as { clients: Set<{ sid: string | null; name: string }> };
+  const s = game.world.snakes.find((x) => x.name === name)!;
+  return { snake: s, client: [...g.clients].find((c) => c.sid === s.id)! };
+}
+
+test("a snake watched from the menu is reported gone once the player spawns out of its view", async () => {
+  const arena = await startArena();
+  try {
+    const game = arena.game as unknown as {
+      nids: Map<string, number>;
+      stopLoop(): void;
+      sendSnapshot(c: unknown): void;
+    };
+    const b = await joinArena(arena.url, "dev-gone-b", "target");
+    const sb = arena.game.world.snakes.find((s) => s.name === "target")!;
+    const nidB = game.nids.get(sb.id)!;
+    // A sits in the menu with its view on the target, and holds it.
+    const a = new Player(arena.url);
+    await a.open();
+    a.send(ident("dev-gone-a", "watcher"));
+    await a.next(S2C.PROFILE);
+    const viewOn = (x: number, y: number): Uint8Array =>
+      new Writer()
+        .u8(C2S.INPUT)
+        .u16(1)
+        .angle(0)
+        .u8(0)
+        .f32(x)
+        .f32(y)
+        .f32(900)
+        .f32(600)
+        .u8(0)
+        .finish();
+    a.send(viewOn(sb.x, sb.y));
+    const deadline = Date.now() + 3000;
+    let held = false;
+    while (!held && Date.now() < deadline)
+      held = parseSnap(await a.next(S2C.SNAP), 2).some((e) => e.nid === nidB && e.full);
+    assert.ok(held, "the watcher holds the target");
+    // Now A spawns, looks at its own head, and the target is far away: the
+    // very next snapshot must name the target as gone.
+    game.stopLoop();
+    await sleep(60);
+    a.send(hello("watcher", "dev-gone-a"));
+    await a.next(S2C.SPAWNED);
+    const { snake: sa, client } = clientOf(arena.game, "watcher");
+    sb.x = sa.x + 5000;
+    sb.y = sa.y;
+    sb.points = [];
+    arena.game.world.ensureTrail(sb);
+    a.send(viewOn(sa.x, sa.y));
+    await sleep(100);
+    a.drain(S2C.SNAP);
+    game.sendSnapshot(client);
+    const r = await a.next(S2C.SNAP);
+    r.u32();
+    r.u32();
+    const n = r.u16();
+    for (let i = 0; i < n; i++) {
+      const e = protocol.readSnakeEntry(r);
+      if (e.full) r.u8();
+      assert.notEqual(e.nid, nidB, "the far target is not in the snapshot");
+    }
+    const gone: number[] = [];
+    const g = r.u16();
+    for (let i = 0; i < g; i++) gone.push(r.u16());
+    assert.ok(gone.includes(nidB), `the target is reported gone (${JSON.stringify(gone)})`);
+    await a.close();
+    await b.close();
+  } finally {
+    await arena.stop();
+  }
+});
+
+test("a snake that was just promoted still dies on everyone's screen", async () => {
+  const arena = await startArena();
+  try {
+    const game = arena.game as unknown as {
+      nids: Map<string, number>;
+      stopLoop(): void;
+      step(dt: number): void;
+      sendSnapshot(c: unknown): void;
+      checkPromotions(): void;
+    };
+    const a = await joinArena(arena.url, "dev-promo-a", "witness");
+    const b = await joinArena(arena.url, "dev-promo-b", "climber");
+    game.stopLoop();
+    await sleep(60);
+    const world = arena.game.world;
+    const { snake: sa, client: ca } = clientOf(arena.game, "witness");
+    const sb = world.snakes.find((s) => s.name === "climber")!;
+    const nidB = game.nids.get(sb.id)!;
+    sb.x = sa.x + 150;
+    sb.y = sa.y;
+    sb.points = [];
+    world.ensureTrail(sb);
+    a.send(
+      new Writer()
+        .u8(C2S.INPUT)
+        .u16(1)
+        .angle(0)
+        .u8(0)
+        .f32(sa.x)
+        .f32(sa.y)
+        .f32(900)
+        .f32(600)
+        .u8(0)
+        .finish(),
+    );
+    await sleep(100);
+    a.drain(S2C.SNAP);
+    game.sendSnapshot(ca);
+    assert.ok(
+      parseSnap(await a.next(S2C.SNAP), 2).some((e) => e.nid === nidB && e.full),
+      "the witness holds the climber",
+    );
+    // Silver, then dead before the next snapshot.
+    sb.mass = 350;
+    game.checkPromotions();
+    world.killSnake(sb.id);
+    game.step(1 / 40);
+    const d = await a.next(S2C.DEATH, 1500);
+    assert.equal(d.u16(), nidB, "the witness hears the climber die");
+    await a.close();
+    await b.close();
+  } finally {
+    await arena.stop();
+  }
+});
+
 test("a death between ticks still starts a wisp that follows the input", async () => {
   const arena = await startArena();
   try {

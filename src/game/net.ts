@@ -182,6 +182,10 @@ interface Look {
  * aura); 5 adds a level byte and a flags byte (crown, linked) per
  * leaderboard row. The server answers with what it honours in WELCOME.
  */
+/** A remote snake no snapshot has mentioned for this long is dropped, while snapshots keep coming. */
+const STALE_SNAKE_MS = 2500;
+/** Snapshots are "coming" when the last one is younger than this; a stall drops nothing. */
+const STALE_STREAM_MS = 1000;
 const PROTO = 5;
 const INPUT_HZ = 30;
 /** A predicted eat the server has not confirmed by then is put back. */
@@ -1161,10 +1165,22 @@ export class NetSession {
   update(dt: number, aim: Vec, wantBoost: boolean): void {
     const now = performance.now();
     const at = now - this.interpDelay;
+    // While snapshots are arriving, every snake the server tracks for us is
+    // in one at least every other snapshot, and one it stopped tracking is
+    // named in a gone list or a death. A snake nothing has mentioned for a
+    // while is one the server no longer knows we hold (a reconnect to the
+    // same process starts its bookkeeping over): it is dropped here rather
+    // than left frozen on the map. During a stall nothing is dropped.
+    const live = this.lastSnapAt > 0 && now - this.lastSnapAt < STALE_STREAM_MS;
+    let stale: string[] | null = null;
     for (const s of this.world.snakes) {
       if (s.id === this.selfId) continue;
       const buf = this.buffers.get(s.id);
       if (!buf || !buf.length) continue;
+      if (live && now - buf[buf.length - 1]!.t > STALE_SNAKE_MS) {
+        (stale ??= []).push(s.id);
+        continue;
+      }
       const snap = sample(buf, at);
       s.x = snap.x;
       s.y = snap.y;
@@ -1173,6 +1189,12 @@ export class NetSession {
       s.boosting = snap.boosting;
       s.invuln = snap.invuln ? 1 : 0;
       this.world.recordTrail(s);
+    }
+    if (stale) {
+      for (const id of stale) {
+        this.world.removeSnake(id, false);
+        this.buffers.delete(id);
+      }
     }
 
     const me = this.world.player;

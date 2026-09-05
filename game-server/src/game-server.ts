@@ -115,6 +115,14 @@ interface Client {
   bands?: string[];
   view: View;
   known: Set<string>;
+  /**
+   * Known snakes whose next entry must be full again (a new name, a new
+   * league). They stay known: a client only hears about a death or a
+   * departure for a snake the server knows it holds, so forgetting one to
+   * force a full entry left its body behind on that client's map whenever
+   * it died or left the view before the next snapshot.
+   */
+  refresh: Set<string>;
   /** Orb ids the client holds. */
   sentFood: Set<number>;
   /** Per food cell in view: the stamp last synced and the ids the client holds there. */
@@ -855,6 +863,7 @@ export class GameServer {
       skin: 0,
       view: { cx: 0, cy: 0, hw: 900, hh: 600 },
       known: new Set(),
+      refresh: new Set(),
       sentFood: new Set(),
       foodCells: new Map(),
       seq: 0,
@@ -1104,10 +1113,7 @@ export class GameServer {
           resumed = previous.life;
           previous.life = null;
         }
-        if (owner && owner !== client) {
-          owner.sid = null;
-          owner.known.clear();
-        }
+        if (owner && owner !== client) owner.sid = null;
         snake = held;
         snake.skin = client.skin;
         snake.bands = client.bands;
@@ -1220,7 +1226,6 @@ export class GameServer {
     snake.might = client.profile ? Object.keys(client.profile.achv).length : 0;
     snake.finish = client.profile?.prevTier ?? 0;
     client.sid = snake.id;
-    client.known.clear();
     client.life = resumed ?? {
       startAt: Date.now(),
       near: 0,
@@ -1381,8 +1386,8 @@ export class GameServer {
     const s = client.sid ? this.world.snakes.find((x) => x.id === client.sid) : undefined;
     if (s) {
       s.name = p.crew ? `[${p.crew}] ${client.name}` : client.name;
-      // Every client forgets the snake, so its full entry is resent with the new name.
-      for (const o of this.clients) o.known.delete(s.id);
+      // Every client gets a full entry again, with the new name.
+      for (const o of this.clients) o.refresh.add(s.id);
     }
     this.events.log("feature", { key: client.key, s: "handle" });
     reply(HANDLE_OK);
@@ -1986,7 +1991,7 @@ export class GameServer {
       if (tier <= c.life.tier) continue;
       c.life.tier = tier;
       s.league = tier + 1;
-      for (const o of this.clients) o.known.delete(s.id);
+      for (const o of this.clients) o.refresh.add(s.id);
       const name = LEAGUES[tier]!.name;
       const runs = Math.min(LEAGUE_BANK_RUNS, (c.profile?.weekRuns[tier] ?? 0) + 1);
       this.notice(
@@ -2123,6 +2128,7 @@ export class GameServer {
         if (c.known.has(s.id) || c.sid === s.id || (d.killerId && c.sid === d.killerId))
           c.ws.send(msg);
         c.known.delete(s.id);
+        c.refresh.delete(s.id);
         if (c.sid === s.id) this.endLife(c, s, true, killerNid);
       }
       // A snake whose socket left dies in its grace window: the life still
@@ -2337,7 +2343,7 @@ export class GameServer {
     }
     w.u16(visible.length);
     for (const s of visible) {
-      const full = !c.known.has(s.id);
+      const full = !c.known.has(s.id) || c.refresh.delete(s.id);
       writeSnakeEntry(w, this.nidOf(s.id), s, full, MAX_NET_POINTS, packSkin(s.skin, s.trail ?? 0));
       if (full && c.proto >= 2) w.u8(Math.min(255, s.level ?? 0));
       if (full && c.proto >= 3) w.u8(s.league ?? 0).u8(Math.min(255, s.might ?? 0));
@@ -2349,6 +2355,7 @@ export class GameServer {
       if (!seen.has(sid)) {
         gone.push(this.nidOf(sid));
         c.known.delete(sid);
+        c.refresh.delete(sid);
       }
     }
     w.u16(gone.length);
