@@ -2,7 +2,8 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { SKINS } from "@/game/model";
-import { LEAGUES, leagueOf } from "@/game/challenges";
+import { LEAGUES, LEAGUE_COLORS, leagueOf } from "@/game/challenges";
+import { Crest } from "@/components/crest";
 import { serverHttpUrl } from "@/game/net";
 
 export const Route = createFileRoute("/top")({ component: TopPage });
@@ -118,7 +119,11 @@ function TopPage() {
                     </>
                   )}
                   {kind === "weekly" && (
-                    <span className="ml-2 text-xs text-subtle">
+                    <span
+                      className="ml-2 inline-flex items-center gap-1 align-middle text-xs"
+                      style={{ color: LEAGUE_COLORS[leagueOf(r.best)] }}
+                    >
+                      <Crest tier={leagueOf(r.best) + 1} size={14} />
                       {LEAGUES[leagueOf(r.best)]!.name}
                     </span>
                   )}

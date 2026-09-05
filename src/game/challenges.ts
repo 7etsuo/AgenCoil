@@ -43,8 +43,18 @@ export const LEAGUES = [
   { name: "Diamond", min: 3000 },
 ] as const;
 
-/** One colour per league, in LEAGUES order: the ring around a head and the chip in a tag. */
-export const LEAGUE_COLORS = ["#cd7f32", "#c0c8d4", "#f0c14a", "#9fe3e0", "#7fd4ff"] as const;
+/**
+ * The crest of each league, in LEAGUES order: a silhouette nobody confuses
+ * with another, its letter, and a colour that supports the shape. Colour
+ * alone could not carry five tiers at tag size (the upper three sat within
+ * a few deltaE of each other, closer still for red-green vision), so the
+ * shape is the signal everywhere a tier is drawn: the frame around a head,
+ * the crest in a tag, the rows of the player list, the pages.
+ */
+export const LEAGUE_SHAPES = ["circle", "square", "shield", "hexagon", "gem"] as const;
+export type LeagueShape = (typeof LEAGUE_SHAPES)[number];
+export const LEAGUE_LETTERS = ["B", "S", "G", "P", "D"] as const;
+export const LEAGUE_COLORS = ["#c8783a", "#9da7b5", "#f0c14a", "#e9edf5", "#5ec8ff"] as const;
 
 /** Lives finishing at or above a tier's length needed in one week to bank that tier. */
 export const LEAGUE_BANK_RUNS = 3;

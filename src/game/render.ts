@@ -21,8 +21,8 @@ import {
   zoomOf,
 } from "./model";
 import { pathLength, type World } from "./world";
-import { LEAGUE_COLORS } from "./challenges";
-import { mightPips } from "./achievements";
+import { LEAGUE_COLORS, LEAGUE_SHAPES } from "./challenges";
+import { crestPath, drawCrest } from "./crest";
 
 const HEX = 44;
 const SPRITE = 64;
@@ -297,52 +297,47 @@ export class Renderer {
   }
 
   /**
-   * The weekly league as a ring around the head in the league's colour, so
-   * a real player's standing reads at a glance; platinum and diamond glow.
+   * The weekly league as a frame around the head in the league's own shape
+   * and colour: the only outline a head carries, so the tier reads from the
+   * silhouette at any zoom. The stroke never drops under 2.2 screen pixels;
+   * Diamond alone glows.
    */
-  private drawLeagueRing(ctx: CanvasRenderingContext2D, s: Snake, r: number): void {
-    const color = LEAGUE_COLORS[(s.league ?? 1) - 1] ?? LEAGUE_COLORS[0];
-    const ring = r * 1.34;
-    if ((s.league ?? 0) >= 4) {
+  private drawLeagueRing(ctx: CanvasRenderingContext2D, s: Snake, r: number, z: number): void {
+    const i = (s.league ?? 0) - 1;
+    const shape = LEAGUE_SHAPES[i];
+    if (!shape) return;
+    const color = LEAGUE_COLORS[i]!;
+    const size = r * 1.34 * 2;
+    ctx.lineJoin = "round";
+    if (i === 4) {
       ctx.globalCompositeOperation = "lighter";
       ctx.globalAlpha = 0.22 + Math.sin(this.time * 4) * 0.06;
-      ctx.beginPath();
-      ctx.arc(s.x, s.y, ring, 0, Math.PI * 2);
+      crestPath(ctx, shape, s.x, s.y, size);
       ctx.strokeStyle = color;
       ctx.lineWidth = Math.max(3, r * 0.5);
       ctx.stroke();
       ctx.globalCompositeOperation = "source-over";
       ctx.globalAlpha = 1;
     }
-    ctx.beginPath();
-    ctx.arc(s.x, s.y, ring, 0, Math.PI * 2);
+    crestPath(ctx, shape, s.x, s.y, size);
     ctx.strokeStyle = color;
-    ctx.lineWidth = Math.max(1.5, r * 0.16);
+    ctx.lineWidth = Math.max(2.2 / z, r * 0.16);
     ctx.stroke();
   }
 
   /**
-   * Last week's banked finish, Gold and up: a wide soft aura outside the
-   * league ring, so this week's standing sits inside last week's reward.
+   * Last week's banked finish, Gold and up: a soft glow behind the head in
+   * that tier's colour, drawn under the head so it never competes with the
+   * frame that says what this week is.
    */
   private drawFinishAura(ctx: CanvasRenderingContext2D, s: Snake, r: number): void {
-    const color = LEAGUE_COLORS[(s.finish ?? 3) - 1] ?? LEAGUE_COLORS[2];
-    // Two passes: a wide soft wash and a thinner bright band, so it reads at
-    // a fresh snake's size as well as a giant's.
-    ctx.globalCompositeOperation = "lighter";
-    ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.18 + Math.sin(this.time * 1.6) * 0.05;
-    ctx.beginPath();
-    ctx.arc(s.x, s.y, r * 1.9, 0, Math.PI * 2);
-    ctx.lineWidth = Math.max(6, r * 0.9);
-    ctx.stroke();
-    ctx.globalAlpha = 0.5;
-    ctx.beginPath();
-    ctx.arc(s.x, s.y, r * 1.75, 0, Math.PI * 2);
-    ctx.lineWidth = Math.max(1.5, r * 0.12);
-    ctx.stroke();
-    ctx.globalCompositeOperation = "source-over";
-    ctx.globalAlpha = 1;
+    const [cr, cg, cb] = hexRgb(LEAGUE_COLORS[(s.finish ?? 3) - 1] ?? LEAGUE_COLORS[2]);
+    const pulse = 0.22 + Math.sin(this.time * 1.6) * 0.04;
+    const g = ctx.createRadialGradient(s.x, s.y, r * 1.1, s.x, s.y, r * 2.2);
+    g.addColorStop(0, `rgba(${cr},${cg},${cb},${pulse})`);
+    g.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
+    ctx.fillStyle = g;
+    ctx.fillRect(s.x - r * 2.2, s.y - r * 2.2, r * 4.4, r * 4.4);
   }
 
   /** A gold crown floating above a crowned head. */
@@ -722,6 +717,8 @@ export class Renderer {
     }
     if (s.x >= x0 - r && s.x <= x1 + r && s.y >= y0 - r && s.y <= y1 + r) {
       const hs = size * 1.06;
+      // Last week's finish glows behind the head, under everything else.
+      if ((s.finish ?? 0) >= 3) this.drawFinishAura(ctx, s, r);
       // Squash along the heading for 220 ms after a boost starts.
       if (s.boosting && !this.boostSince.has(s.id)) this.boostSince.set(s.id, this.time);
       if (!s.boosting) this.boostSince.delete(s.id);
@@ -738,8 +735,7 @@ export class Renderer {
         ctx.drawImage(sprites[0]!.canvas, s.x - hs / 2, s.y - hs / 2, hs, hs);
       }
       if ((s.level ?? 0) >= 20) this.drawShimmer(ctx, s, r);
-      if ((s.finish ?? 0) >= 3) this.drawFinishAura(ctx, s, r);
-      if (s.league) this.drawLeagueRing(ctx, s, r);
+      if (s.league) this.drawLeagueRing(ctx, s, r, z);
       if (s.crown) this.drawCrown(ctx, s, r);
       if (s.boss) this.drawBossMarks(ctx, s, r);
       this.drawEvolution(ctx, s, r);
@@ -764,17 +760,10 @@ export class Renderer {
     ctx.globalCompositeOperation = "source-over";
   }
 
-  /** Evolution marks: dorsal dots from level 5, fins from 10, a gold halo from 20. */
+  /** Evolution marks: dorsal dots from level 5, fins from 10 (level 20 adds the shimmer). */
   private drawEvolution(ctx: CanvasRenderingContext2D, s: Snake, r: number): void {
     const lv = s.level ?? 0;
     if (lv < 5) return;
-    if (lv >= 20) {
-      ctx.beginPath();
-      ctx.arc(s.x, s.y, r * 1.18, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(240,193,74,0.85)";
-      ctx.lineWidth = Math.max(1, r * 0.12);
-      ctx.stroke();
-    }
     const pts = s.points;
     const step = Math.max(4, Math.floor(pts.length / 12));
     for (let i = pts.length - 4; i > 0; i -= step) {
@@ -898,48 +887,61 @@ export class Renderer {
     ranks: ReadonlyMap<string, number> | null,
   ): void {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.font = "500 13px Outfit, sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "bottom";
     const cssW = w / dpr;
     const cssH = h / dpr;
+    // The tag carries exactly two rank marks: the league crest and, for the
+    // arena's top three, a numeral square. Level and might live in the
+    // player list and the profile, so the tag stays a name.
+    const font = "500 13px Outfit, sans-serif";
     for (const s of snakes) {
       const sx = (s.x - cam.x - ox) * z + cssW / 2;
       const sy = (s.y - cam.y - oy) * z + cssH / 2;
       if (sx < -40 || sy < -40 || sx > cssW + 40 || sy > cssH + 40) continue;
       const r = radiusOf(s.mass) * z;
       const rank = ranks?.get(s.id);
+      const tier = s.boss ? 0 : (s.league ?? 0);
       const label = s.boss
         ? `BOSS · ${s.name}`
-        : `${rank ? `#${rank} ` : ""}${s.crown ? "👑 " : ""}${s.linked ? "✓ " : ""}${s.level ? `Lv${s.level} ` : ""}${s.name} · ${Math.floor(s.mass)}`;
+        : `${s.crown ? "👑 " : ""}${s.linked ? "✓ " : ""}${s.name} · ${Math.floor(s.mass)}`;
+      ctx.font = font;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "bottom";
       const tw = ctx.measureText(label).width;
-      // A league chip sits in the tag before the text.
-      const chip = s.league && !s.boss ? 12 : 0;
+      const crestW = tier ? 18 : 0;
+      const rankW = rank && rank <= 3 && !s.boss ? 18 : 0;
       const pad = 6;
       const y = sy - r - 10;
-      const left = sx - (tw + chip) / 2 - pad;
-      ctx.fillStyle = rank === 1 ? "rgba(60,44,8,0.7)" : "rgba(7,9,15,0.5)";
-      roundRect(ctx, left, y - 16, tw + chip + pad * 2, 18, 9);
+      const width = crestW + rankW + tw + pad * 2;
+      const left = sx - width / 2;
+      ctx.fillStyle = "rgba(7,9,15,0.5)";
+      roundRect(ctx, left, y - 16, width, 18, 9);
       ctx.fill();
-      if (chip) {
-        ctx.beginPath();
-        ctx.arc(left + pad + 4, y - 7, 4, 0, Math.PI * 2);
-        ctx.fillStyle = LEAGUE_COLORS[(s.league ?? 1) - 1] ?? LEAGUE_COLORS[0];
+      if (rank === 1) {
+        ctx.strokeStyle = "#d7dde8";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      let x = left + pad;
+      if (crestW) {
+        drawCrest(ctx, tier, x + 7, y - 7, 14);
+        x += crestW;
+      }
+      if (rankW) {
+        ctx.fillStyle = "rgba(7,9,15,0.85)";
+        roundRect(ctx, x, y - 14, 14, 14, 3);
         ctx.fill();
+        ctx.font = "700 10px Outfit, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(String(rank), x + 7, y - 6.5);
+        x += rankW;
       }
-      ctx.fillStyle = rank === 1 ? "#ffe9ad" : "rgba(238,241,246,0.92)";
-      ctx.fillText(label, sx + chip / 2, y);
-      // Might: up to five pips above the tag.
-      const pips = s.boss ? 0 : mightPips(s.might ?? 0);
-      if (pips) {
-        ctx.fillStyle = "#f0c14a";
-        const x0 = sx - ((pips - 1) * 7) / 2;
-        for (let i = 0; i < pips; i++) {
-          ctx.beginPath();
-          ctx.arc(x0 + i * 7, y - 21, 2.2, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
+      ctx.font = font;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "bottom";
+      ctx.fillStyle = "rgba(238,241,246,0.92)";
+      ctx.fillText(label, x, y);
     }
   }
 

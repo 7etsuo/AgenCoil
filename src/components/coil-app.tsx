@@ -41,13 +41,13 @@ import { authEnabled, signIn, signOut } from "@/lib/auth/client";
 import { authStatus, mintIdentity } from "@/lib/identity";
 import {
   ACHIEVEMENTS,
-  MIGHT_PIPS,
-  mightPips,
   ACHIEVEMENT_BY_ID,
   groupSummary,
   nextSteps,
   type Totals,
 } from "@/game/achievements";
+import { BankSlots, Crest } from "@/components/crest";
+import { drawCrest } from "@/game/crest";
 import {
   HANDLE_INVALID,
   HANDLE_NOT_LINKED,
@@ -633,21 +633,16 @@ export function CoilApp() {
                   {hud.league > 0 && (
                     <>
                       <span>·</span>
-                      <span
-                        className="inline-block h-2.5 w-2.5 rounded-full"
-                        style={{ background: LEAGUE_COLORS[hud.league - 1] }}
-                      />
+                      <Crest tier={hud.league} size={16} />
                       <span style={{ color: LEAGUE_COLORS[hud.league - 1] }}>
                         {LEAGUES[hud.league - 1]?.name}
                       </span>
-                      <span
-                        className="tracking-[0.15em] text-[#f0c14a]"
-                        title={`might: ${hud.might} of ${ACHIEVEMENTS.length} achievements`}
-                      >
-                        {"●".repeat(mightPips(hud.might))}
-                        <span className="text-subtle/60">
-                          {"●".repeat(MIGHT_PIPS - mightPips(hud.might))}
-                        </span>
+                      <BankSlots
+                        tier={hud.league}
+                        runs={hud.profile?.weekRuns[hud.league - 1] ?? 0}
+                      />
+                      <span title={`might: ${hud.might} of ${ACHIEVEMENTS.length} achievements`}>
+                        might {hud.might}/{ACHIEVEMENTS.length}
                       </span>
                     </>
                   )}
@@ -725,10 +720,10 @@ export function CoilApp() {
                   >
                     <span className="inline-block w-5 text-subtle">{i + 1}</span>
                     {row.league > 0 && (
-                      <span
-                        className="mr-1 inline-block h-2 w-2 rounded-full align-middle"
-                        style={{ background: LEAGUE_COLORS[row.league - 1] }}
-                        title={LEAGUES[row.league - 1]?.name}
+                      <Crest
+                        tier={row.league}
+                        size={16}
+                        className="mr-1 inline-block align-middle"
                       />
                     )}
                     <span className="font-medium">{row.name}</span>
@@ -869,6 +864,41 @@ export function CoilApp() {
                 )}
               </p>
             </div>
+            {hud?.profile &&
+              (() => {
+                const tier = leagueOf(hud.profile.weekBest) + 1;
+                const name = LEAGUES[tier - 1]!.name;
+                const runs = hud.profile.weekRuns[tier - 1] ?? 0;
+                const banked = hud.profile.bankedTier;
+                const state =
+                  banked >= tier
+                    ? `${LEAGUES[banked - 1]!.name} banked for the week`
+                    : tier > 1
+                      ? `${runs}/${LEAGUE_BANK_RUNS} to bank ${name}${banked > 0 ? ` · ${LEAGUES[banked - 1]!.name} banked` : ""}`
+                      : `Silver at ${LEAGUES[1]!.min}`;
+                return (
+                  <div className="mt-3 flex items-center gap-3 rounded-lg border border-line bg-bg/40 px-3 py-2">
+                    <Crest tier={tier} size={40} />
+                    <div className="min-w-0">
+                      <div className="text-sm" style={{ color: LEAGUE_COLORS[tier - 1] }}>
+                        {name} this week
+                      </div>
+                      <div className="flex items-center gap-1.5 text-xs text-subtle">
+                        <span>{state}</span>
+                        <BankSlots tier={tier} runs={runs} />
+                      </div>
+                    </div>
+                    {hud.profile.prevTier > 0 && (
+                      <div
+                        className="ml-auto flex shrink-0 items-center gap-1.5 text-xs text-subtle"
+                        title={`finished last week in ${LEAGUES[hud.profile.prevTier - 1]?.name}`}
+                      >
+                        <Crest tier={hud.profile.prevTier} size={20} /> last week
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             {hud?.profile && (
               <div className="mt-3 flex flex-wrap gap-1.5 text-[11px]">
                 <Chip>Lv{levelOf(hud.profile.eaten)}</Chip>
@@ -881,22 +911,16 @@ export function CoilApp() {
                 <Chip tone={hud.profile.streak > 0 ? "fire" : undefined}>
                   🔥 {hud.profile.streak > 0 ? `${hud.profile.streak}d` : "start a streak"}
                 </Chip>
-                <Chip color={LEAGUE_COLORS[leagueOf(hud.profile.weekBest)]}>
-                  {LEAGUES[leagueOf(hud.profile.weekBest)]!.name}
-                  {hud.profile.bankedTier > 0
-                    ? ` · banked ${LEAGUES[hud.profile.bankedTier - 1]?.name}`
-                    : " · nothing banked"}
-                </Chip>
-                {hud.profile.prevTier > 0 && (
-                  <Chip color={LEAGUE_COLORS[hud.profile.prevTier - 1]}>
-                    last week {LEAGUES[hud.profile.prevTier - 1]?.name}
-                  </Chip>
-                )}
                 {hud.profile.seasons.length > 0 &&
                   (() => {
                     const best = [...hud.profile.seasons].sort((a, b) => b[1] - a[1])[0]!;
                     return (
                       <Chip color={LEAGUE_COLORS[best[1] - 1]}>
+                        <Crest
+                          tier={best[1]}
+                          size={12}
+                          className="mr-1 inline-block align-middle"
+                        />
                         S{best[0]} {LEAGUES[best[1] - 1]?.name}
                       </Chip>
                     );
@@ -1345,7 +1369,8 @@ export function CoilApp() {
                     </div>
                     <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-subtle">
                       {LEAGUES.map((l, i) => (
-                        <span key={l.name}>
+                        <span key={l.name} className="inline-flex items-center gap-1">
+                          <Crest tier={i + 1} size={14} />
                           <span style={{ color: LEAGUE_COLORS[i] }}>{l.name}</span>{" "}
                           {i > 0 ? `${l.min}+` : "any"} · {hud.profile!.weekRuns[i] ?? 0}/
                           {LEAGUE_BANK_RUNS}
@@ -1500,10 +1525,17 @@ export function CoilApp() {
                 const runs = hud.profile.weekRuns[tier] ?? 0;
                 const name = LEAGUES[tier]!.name;
                 return (
-                  <p className="mt-1 text-xs" style={{ color: LEAGUE_COLORS[tier] }}>
-                    {runs >= LEAGUE_BANK_RUNS
-                      ? `${name} is banked for the week`
-                      : `a ${name} run · ${runs}/${LEAGUE_BANK_RUNS} to bank it`}
+                  <p
+                    className="mt-2 flex items-center justify-center gap-2 text-xs"
+                    style={{ color: LEAGUE_COLORS[tier] }}
+                  >
+                    <Crest tier={tier + 1} size={24} />
+                    <span>
+                      {runs >= LEAGUE_BANK_RUNS
+                        ? `${name} is banked for the week`
+                        : `a ${name} run · ${runs}/${LEAGUE_BANK_RUNS} to bank it`}
+                    </span>
+                    <BankSlots tier={tier + 1} runs={runs} />
                   </p>
                 );
               })()}
@@ -1741,6 +1773,15 @@ async function renderShareCard(hud: HudState, nick: string, bands: string[]): Pr
       80,
       370,
     );
+    // The run's league, as a crest with its word.
+    const tier = leagueOf(hud.score) + 1;
+    drawCrest(ctx, tier, 1040, 150, 72);
+    ctx.font = "600 28px Outfit, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = LEAGUE_COLORS[tier - 1] ?? "#e8eaee";
+    ctx.fillText(LEAGUES[tier - 1]?.name ?? "", 1040, 225);
+    ctx.textAlign = "left";
     ctx.fillStyle = "#5c6573";
     ctx.font = "500 26px Outfit, system-ui, sans-serif";
     ctx.fillText(window.location.host, 80, 590);

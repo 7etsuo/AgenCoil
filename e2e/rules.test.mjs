@@ -13,13 +13,14 @@ const esbuild = require("../game-server/node_modules/esbuild");
 const root = new URL("..", import.meta.url).pathname;
 
 let rules;
+let crest;
 let ProfileStore;
 before(async () => {
   const dir = mkdtempSync(join(tmpdir(), "agencoil-rules-"));
   const entry = join(dir, "entry.ts");
   writeFileSync(
     entry,
-    `export * as rules from "${root}src/game/challenges.ts"; export { ProfileStore } from "${root}game-server/src/profiles.ts";`,
+    `export * as rules from "${root}src/game/challenges.ts"; export * as crest from "${root}src/game/crest.ts"; export { ProfileStore } from "${root}game-server/src/profiles.ts";`,
   );
   // Emitted under the server's node_modules so the external "pg" resolves.
   const outDir = join(root, "game-server", "node_modules", ".cache");
@@ -37,6 +38,7 @@ before(async () => {
   delete process.env.DATABASE_URL;
   const mod = await import(pathToFileURL(out).href);
   rules = mod.rules;
+  crest = mod.crest;
   ProfileStore = mod.ProfileStore;
 });
 
@@ -65,6 +67,31 @@ test("leagues, levels and titles follow the documented thresholds", () => {
     rules.titleOf({ kills: 50, survive: 0, nearTotal: 200, bountyTotal: 0 }),
     "Untouchable",
   );
+});
+
+test("every league has its own crest: a distinct shape, letter and colour, drawn inside the unit square", () => {
+  const n = rules.LEAGUES.length;
+  assert.equal(rules.LEAGUE_SHAPES.length, n);
+  assert.equal(rules.LEAGUE_LETTERS.length, n);
+  assert.equal(rules.LEAGUE_COLORS.length, n);
+  assert.equal(new Set(rules.LEAGUE_SHAPES).size, n, "no two tiers share a shape");
+  assert.equal(new Set(rules.LEAGUE_LETTERS).size, n, "no two tiers share a letter");
+  assert.equal(new Set(rules.LEAGUE_COLORS).size, n, "no two tiers share a colour");
+  assert.equal(crest.crestPolygon("circle"), null);
+  assert.equal(crest.crestPolygon("square"), null);
+  for (const shape of ["shield", "hexagon", "gem"]) {
+    const pts = crest.crestPolygon(shape);
+    assert.ok(pts.length >= 5, `${shape} is a polygon`);
+    for (const [x, y] of pts) assert.ok(Math.abs(x) <= 0.5 && Math.abs(y) <= 0.5, `${shape} fits`);
+    assert.ok(pts[0][1] === -0.5 && pts[1][1] === -0.5, `${shape} has a flat top`);
+  }
+  // The bottoms differ: the shield and the gem come to a point, the hexagon stays flat.
+  assert.equal(crest.crestPolygon("shield").filter(([, y]) => y === 0.5).length, 1);
+  assert.equal(crest.crestPolygon("gem").filter(([, y]) => y === 0.5).length, 1);
+  assert.equal(crest.crestPolygon("hexagon").filter(([, y]) => y === 0.5).length, 2);
+  // And the gem is the only one wider at its girdle than at its top.
+  const gem = crest.crestPolygon("gem");
+  assert.ok(Math.max(...gem.map(([x]) => x)) > gem[1][0]);
 });
 
 test("a named mode runs for the first 15 minutes of every hour", () => {

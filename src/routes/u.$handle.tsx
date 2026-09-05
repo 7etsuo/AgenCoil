@@ -4,6 +4,7 @@ import { ArrowLeft, Share2 } from "lucide-react";
 import { SKINS } from "@/game/model";
 import { LEAGUES, LEAGUE_COLORS, leagueOf, levelOf, titleOf } from "@/game/challenges";
 import { ACHIEVEMENTS } from "@/game/achievements";
+import { Crest } from "@/components/crest";
 import { serverHttpUrl } from "@/game/net";
 
 export const Route = createFileRoute("/u/$handle")({ component: ProfilePage });
@@ -152,6 +153,14 @@ function ProfilePage() {
                     className="mt-2 h-2 w-40 rounded-full"
                     style={{ background: bands.length ? stripe(bands) : "#3ee0c4" }}
                   />
+                </div>
+                <div
+                  className="flex shrink-0 flex-col items-center gap-1 text-[11px]"
+                  style={{ color: LEAGUE_COLORS[leagueOf(p.weekBest)] }}
+                  title={`${LEAGUES[leagueOf(p.weekBest)]!.name} this week`}
+                >
+                  <Crest tier={leagueOf(p.weekBest) + 1} size={40} />
+                  {LEAGUES[leagueOf(p.weekBest)]!.name}
                 </div>
                 <button
                   type="button"

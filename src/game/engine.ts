@@ -236,6 +236,9 @@ export class CoilEngine {
   private keyAim = false;
   private unlocked: string[] = [];
   private handleResult: { status: number; handle: string } | null = null;
+  /** The league legend has been shown once on this device (localStorage), or during this life. */
+  private legendDone = readFlag("agencoil-hint-league");
+  private legendShown = false;
   private banked = 0;
   private nearWin: string | null = null;
   private beat: { by: string; target: number; done: boolean } | null = null;
@@ -1200,9 +1203,10 @@ export class CoilEngine {
     }
   }
 
-  /** Timed coaching for a first life; null otherwise. */
+  /** Timed coaching for a first life; from the second life on, the league legend once. */
   private hint(): string | null {
-    if (this.phase !== "play" || !this.isFirstLife()) return null;
+    if (this.phase !== "play") return null;
+    if (!this.isFirstLife()) return this.leagueLegend();
     const t = (performance.now() - this.spawnedAt) / 1000;
     if (t < 5) return "move the mouse or drag to steer";
     if (t < 10) return "hold click, space or a second finger to boost";
@@ -1219,6 +1223,20 @@ export class CoilEngine {
     }
     if (t < 40) return "eat orbs to grow; never touch another snake with your head";
     return null;
+  }
+
+  /**
+   * What the frame around a head means, said once per device: early in a
+   * life, while a snake that carries one is in view, and never on the first
+   * life, whose hint slot is busy with steering.
+   */
+  private leagueLegend(): string | null {
+    if (this.legendDone || !this.online) return null;
+    if (performance.now() - this.spawnedAt > 25_000) return null;
+    const me = this.world.player;
+    if (!this.world.snakes.some((s) => s !== me && s.alive && (s.league ?? 0) > 0)) return null;
+    this.legendShown = true;
+    return "the shape around a head is its league this week";
   }
 
   /** Rough direction from the player (or camera) to a point. */
@@ -1486,6 +1504,10 @@ export class CoilEngine {
     } catch {
       /* ignore */
     }
+    if (this.legendShown && !this.legendDone) {
+      this.legendDone = true;
+      writeFlag("agencoil-hint-league");
+    }
     this.net?.idle();
     this.deathReason =
       why ??
@@ -1668,6 +1690,22 @@ export class CoilEngine {
       deathsSnake: this.dbgSnake,
       fps: Math.round(this.fps),
     };
+  }
+}
+
+function readFlag(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeFlag(key: string): void {
+  try {
+    localStorage.setItem(key, "1");
+  } catch {
+    /* ignore */
   }
 }
 
