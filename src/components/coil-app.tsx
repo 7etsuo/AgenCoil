@@ -269,7 +269,7 @@ export function CoilApp() {
       .then((t) => {
         if (cancelled) return;
         setIdentity(t);
-        // Signed in: the X handle is the name, in the arena and offline alike.
+        // Signed in: the account handle is the name, in the arena and offline alike.
         setNick(`@${t.handle}`.slice(0, 16));
       })
       .catch(() => undefined);
@@ -945,7 +945,7 @@ export function CoilApp() {
                 value={nick}
                 maxLength={16}
                 readOnly={signedIn && identity !== null}
-                title={signedIn && identity ? "your X handle is your name in the arena" : undefined}
+                title={signedIn && identity ? "your handle is your name in the arena" : undefined}
                 onChange={(e) => setNick(e.target.value)}
                 className={`h-12 flex-1 mt-1 h-11 w-full rounded-md border border-line bg-elevated px-3 text-base text-fg outline-none focus:border-accent ${signedIn && identity ? "text-muted" : ""}`}
               />

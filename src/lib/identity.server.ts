@@ -6,6 +6,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { getSql } from "./db";
+import { pickHandle } from "./handle";
 
 const TICKET_HOURS = 12;
 
@@ -17,17 +18,6 @@ export interface TicketInfo {
   expiresAt: string;
 }
 
-/** Lower-case [a-z0-9_], 2 to 15 long (X's limit), or "". */
-export function toHandle(raw: string): string {
-  const h = raw
-    .toLowerCase()
-    .replace(/^@/, "")
-    .replace(/[\s-]+/g, "_")
-    .replace(/[^a-z0-9_]/g, "")
-    .slice(0, 15);
-  return h.length >= 2 ? h : "";
-}
-
 interface UserRow {
   id: string;
   name: string | null;
@@ -35,33 +25,6 @@ interface UserRow {
   image: string | null;
   username?: string | null;
   displayUsername?: string | null;
-}
-
-/**
- * The broker's userinfo carries only sub, name and email (its discovery
- * document lists no username claim). For X sign-ins the email is synthetic,
- * and its local part is the X screen name, so that is the first choice.
- * Any username column a future broker adds comes next, then the display
- * name as a slug.
- */
-export function pickHandle(u: UserRow, viaX: boolean): { handle: string; from: string } {
-  const [local = "", domain = ""] = (u.email ?? "").split("@");
-  const mailbox = /gmail|googlemail|icloud|outlook|hotmail|yahoo|proton/i;
-  if (viaX && /^[A-Za-z0-9_]{1,15}$/.test(local) && domain && !mailbox.test(domain)) {
-    const h = toHandle(local);
-    if (h) return { handle: h, from: "email" };
-  }
-  const fromColumn = toHandle(u.username ?? u.displayUsername ?? "");
-  if (fromColumn) return { handle: fromColumn, from: "username" };
-  const fromName = toHandle(u.name ?? "");
-  if (fromName) return { handle: fromName, from: "name" };
-  return {
-    handle: `player_${u.id
-      .replace(/[^a-z0-9]/gi, "")
-      .slice(-8)
-      .toLowerCase()}`,
-    from: "id",
-  };
 }
 
 export async function mintTicket(userId: string): Promise<TicketInfo> {
@@ -74,9 +37,10 @@ export async function mintTicket(userId: string): Promise<TicketInfo> {
     providerId: string;
   }>`SELECT "providerId" FROM "account" WHERE "userId" = ${userId}`;
   const viaX = providers.some((p) => p.providerId === "grok-x");
-  const picked = pickHandle(u, viaX);
+  const picked = pickHandle(u);
   const handle = picked.handle;
-  // Domain and source only: enough to see what the broker sends, without the handle itself.
+  // Provider, email domain and source only: enough to see what the broker
+  // sends, without the handle itself.
   console.log(
     `[identity] provider=${viaX ? "x" : providers.map((p) => p.providerId).join("+") || "none"} emailDomain=${(u.email ?? "").split("@")[1] ?? ""} handleFrom=${picked.from}`,
   );
