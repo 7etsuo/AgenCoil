@@ -59,6 +59,47 @@ export const ARENA_BOOT_MS = 120_000;
 const BOOT_WAIT_MS = 5000;
 /** Ticks closer together than this answer with the last result: the endpoint is public. */
 const TICK_MIN_MS = 15_000;
+/**
+ * A running arena Sandbox with no row is stopped once it is this old. A
+ * create in progress has no row until its first probe answers, so a young
+ * one is left alone.
+ */
+const SANDBOX_ORPHAN_MS = 5 * 60_000;
+const ARENA_PREFIX = "snek-arena-";
+
+/**
+ * What the coordinator does to arena Sandboxes beyond creating them. Every
+ * Sandbox runs until its session times out (23 hours) unless it is stopped,
+ * and a roll happens on every deploy, so an arena that is drained or
+ * forgotten must be stopped or the Sandboxes pile up, each billed for its
+ * memory the whole time. A test passes a stub.
+ */
+export interface SandboxControl {
+  /** Stop a Sandbox by name; one that is gone or already stopped is fine. */
+  stop(name: string): Promise<void>;
+  /** Every running Sandbox tagged as this app's, with its creation time in ms. */
+  running(): Promise<{ name: string; createdAt: number }[]>;
+}
+
+function sdkSandboxes(): SandboxControl {
+  return {
+    async stop(name) {
+      const s = await Sandbox.get({ name });
+      await s.stop();
+    },
+    async running() {
+      const out: { name: string; createdAt: number }[] = [];
+      const list = await Sandbox.list({ tags: { app: "snek" } });
+      for await (const s of list) {
+        if (s.status !== "running") continue;
+        // Defensive about the unit: an epoch in seconds is under 1e12.
+        const at = s.createdAt < 1e12 ? s.createdAt * 1000 : s.createdAt;
+        out.push({ name: s.name, createdAt: at });
+      }
+      return out;
+    },
+  };
+}
 const HEALTH_TTL_MS = 10_000;
 /** Lookups reuse the arena rows for this long: a roll makes every client ask again within a second. */
 const ROWS_TTL_MS = 2000;
@@ -94,12 +135,17 @@ export class ArenaHost {
   private lastRows: ArenaRow[] = [];
   private lastRowsAt = 0;
   private ready: Promise<void> | null = null;
+  /** Sandbox control; null where there is no token to call the API with (tests, local runs). */
+  private readonly sandboxes: SandboxControl | null;
 
   constructor(
     private readonly pool: pg.Pool | null,
     private readonly env: Record<string, string | undefined>,
+    sandboxes?: SandboxControl,
   ) {
     this.enabled = Boolean(pool && env.VERCEL);
+    this.sandboxes =
+      sandboxes ?? (env.VERCEL_OIDC_TOKEN || env.VERCEL_TOKEN ? sdkSandboxes() : null);
   }
 
   /** Tables exist; a failed attempt (cold Neon connection) is retried next call. */
@@ -190,14 +236,20 @@ export class ArenaHost {
     let created = false;
     const drained: string[] = [];
     const build = this.build;
+    // Every row's health first, so a stale arena whose successor is already
+    // up drains in this tick rather than the next: each tick of overlap is
+    // a second Sandbox running.
+    for (const r of rows) await this.checkHealth(r);
     for (const r of rows) {
       const h = await this.checkHealth(r);
       // A static arena is someone's machine: leave its row alone when it is
       // down (players simply are not sent there) and never roll it.
       if (isStatic(r)) continue;
       if (!h.ok && now - r.createdAt > ARENA_BOOT_MS) {
-        // Unreachable and not just booting: forget it.
+        // Unreachable and not just booting: forget it, and stop what may
+        // still be running behind it.
         await this.q(`DELETE FROM agencoil_arena WHERE name = $1`, [r.name]);
+        await this.stopSandbox(r.name);
         continue;
       }
       // Roll an arena that is near its session end, or that runs an older
@@ -228,7 +280,36 @@ export class ArenaHost {
         }
       }
     }
+    await this.sweepSandboxes(rows, now);
     return { arenas: rows.length, created, drained };
+  }
+
+  /**
+   * Stop every running arena Sandbox no row names: what a roll drained, a
+   * create that failed after starting, a row deleted by another instance.
+   * Rows are the truth; a Sandbox without one serves nobody.
+   */
+  private async sweepSandboxes(rows: ArenaRow[], now: number): Promise<void> {
+    if (!this.sandboxes) return;
+    try {
+      const named = new Set(rows.map((r) => r.name));
+      for (const s of await this.sandboxes.running()) {
+        if (!s.name.startsWith(ARENA_PREFIX) || named.has(s.name)) continue;
+        if (now - s.createdAt < SANDBOX_ORPHAN_MS) continue;
+        await this.stopSandbox(s.name);
+      }
+    } catch (err) {
+      console.error("[arena] sandbox sweep failed:", (err as Error)?.message ?? err);
+    }
+  }
+
+  private async stopSandbox(name: string): Promise<void> {
+    if (!this.sandboxes || !name.startsWith(ARENA_PREFIX)) return;
+    try {
+      await this.sandboxes.stop(name);
+    } catch (err) {
+      console.error(`[arena] stopping ${name} failed:`, (err as Error)?.message ?? err);
+    }
   }
 
   /** The deployment this function runs; arenas built from another are rolled. */
@@ -340,7 +421,7 @@ export class ArenaHost {
       return false;
     }
     try {
-      const name = `snek-arena-${now.toString(36)}`;
+      const name = `${ARENA_PREFIX}${now.toString(36)}`;
       const sandbox = await Sandbox.create({
         name,
         timeout: ARENA_SESSION_MS,
@@ -401,7 +482,7 @@ export class ArenaHost {
     }
   }
 
-  /** Ask an old arena to send its players to the coordinator, then forget it. */
+  /** Ask an old arena to send its players to the coordinator, forget it, and stop its Sandbox. */
   private async drain(r: ArenaRow): Promise<void> {
     try {
       await fetch(`${r.domain}/api/drain`, {
@@ -414,6 +495,7 @@ export class ArenaHost {
     }
     await this.q(`DELETE FROM agencoil_arena WHERE name = $1`, [r.name]);
     this.health.delete(r.name);
+    await this.stopSandbox(r.name);
   }
 }
 

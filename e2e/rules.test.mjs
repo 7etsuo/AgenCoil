@@ -493,6 +493,81 @@ test("a tick that finds several stale arenas starts one successor, not one each"
   }
 });
 
+test("a drained arena's Sandbox is stopped, and a tick stops running arena Sandboxes with no row", async () => {
+  const { mkdirSync: mk } = await import("node:fs");
+  const outDir = join(root, "game-server", "node_modules", ".cache");
+  mk(outDir, { recursive: true });
+  const out = join(outDir, "agencoil-arena-sweep.test.mjs");
+  await esbuild.build({
+    entryPoints: [join(root, "game-server", "src", "arena-host.ts")],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    external: ["pg", "@vercel/sandbox"],
+    outfile: out,
+    logLevel: "silent",
+  });
+  const { ArenaHost } = await import(pathToFileURL(out).href);
+  const now = Date.now();
+  // An old arena on the previous deploy and its healthy successor on this one.
+  const rows = [
+    {
+      name: "snek-arena-old",
+      domain: "https://old",
+      created_at: now - 3600_000,
+      expires_at: now + 20 * 3600_000,
+      build: "dpl_old",
+    },
+    {
+      name: "snek-arena-new",
+      domain: "https://new",
+      created_at: now - 600_000,
+      expires_at: now + 22 * 3600_000,
+      build: "dpl_new",
+    },
+  ];
+  const pool = {
+    query: async (text) =>
+      text.includes("FROM agencoil_arena WHERE expires_at")
+        ? { rows, rowCount: rows.length }
+        : { rows: [], rowCount: 0 },
+  };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ ok: true, players: 0 }), { status: 200 });
+  const stopped = [];
+  const sandboxes = {
+    stop: async (name) => {
+      stopped.push(name);
+    },
+    // What the Sandbox API lists as running: both rows, a leftover from an
+    // earlier roll, a create still in progress, and something else entirely.
+    running: async () => [
+      { name: "snek-arena-old", createdAt: now - 3600_000 },
+      { name: "snek-arena-new", createdAt: now - 600_000 },
+      { name: "snek-arena-leftover", createdAt: now - 2 * 3600_000 },
+      { name: "snek-arena-booting", createdAt: now - 20_000 },
+      { name: "other-sandbox", createdAt: now - 3600_000 },
+    ],
+  };
+  try {
+    const host = new ArenaHost(
+      pool,
+      { VERCEL: "1", GAME_SECRET: "s", VERCEL_DEPLOYMENT_ID: "dpl_new" },
+      sandboxes,
+    );
+    const t = await host.tick();
+    assert.deepEqual(t.drained, ["snek-arena-old"], "the stale arena drained into its successor");
+    assert.ok(stopped.includes("snek-arena-old"), "the drained arena's Sandbox was stopped");
+    assert.ok(stopped.includes("snek-arena-leftover"), "a running arena with no row was stopped");
+    assert.ok(!stopped.includes("snek-arena-new"), "the live arena keeps running");
+    assert.ok(!stopped.includes("snek-arena-booting"), "a young Sandbox is left to finish booting");
+    assert.ok(!stopped.includes("other-sandbox"), "nothing outside the arena prefix is touched");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("ticks closer than fifteen seconds answer with the last result", async () => {
   const { mkdirSync: mk } = await import("node:fs");
   const outDir = join(root, "game-server", "node_modules", ".cache");
