@@ -71,7 +71,9 @@ export function drawBodyItem(
   if (!segs.length) return;
   switch (id) {
     case "dorsal_ridge":
-      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      ctx.fillStyle = "rgba(255,255,255,0.55)";
+      ctx.strokeStyle = "rgba(0,0,0,0.55)";
+      ctx.lineWidth = Math.max(0.6, r * 0.06);
       for (const s of segs) {
         if (s.i % 3) continue;
         const nx = -s.ty;
@@ -86,6 +88,7 @@ export function drawBodyItem(
           s.y - s.ty * r * 0.25 - ny * r * 0.25,
         );
         ctx.fill();
+        ctx.stroke();
       }
       return;
     case "racing_stripes": {
@@ -255,7 +258,7 @@ export function drawBodyItem(
       }
       return;
     case "bone_segments":
-      ctx.strokeStyle = "rgba(255,255,255,0.4)";
+      ctx.strokeStyle = "rgba(255,255,255,0.6)";
       ctx.lineWidth = Math.max(1, r * 0.09);
       for (const s of segs) {
         const a = Math.atan2(s.ty, s.tx);
@@ -649,17 +652,26 @@ export function drawEyes(
     ctx.fill();
   }
   if (id === "angry_brows") {
-    ctx.strokeStyle = "#101318";
-    ctx.lineWidth = Math.max(1, r * 0.13);
+    // A pale edge under the dark stroke, so the brows read on a dark head.
     ctx.lineCap = "round";
-    for (const side of [-1, 1]) {
-      ctx.beginPath();
-      ctx.moveTo(x + ex * r * 0.2 + px * side * r * 0.95, y + ey * r * 0.2 + py * side * r * 0.95);
-      ctx.lineTo(
-        x + ex * r * 0.75 + px * side * r * 0.45,
-        y + ey * r * 0.75 + py * side * r * 0.45,
-      );
-      ctx.stroke();
+    for (const [color, width] of [
+      ["rgba(255,255,255,0.7)", 0.22],
+      ["#101318", 0.12],
+    ] as const) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(1, r * width);
+      for (const side of [-1, 1]) {
+        ctx.beginPath();
+        ctx.moveTo(
+          x + ex * r * 0.2 + px * side * r * 0.95,
+          y + ey * r * 0.2 + py * side * r * 0.95,
+        );
+        ctx.lineTo(
+          x + ex * r * 0.75 + px * side * r * 0.45,
+          y + ey * r * 0.75 + py * side * r * 0.45,
+        );
+        ctx.stroke();
+      }
     }
   } else if (id === "cyber_visor") {
     ctx.save();
