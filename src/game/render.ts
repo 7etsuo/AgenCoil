@@ -27,6 +27,15 @@ import { crestPath, drawCrest } from "./crest";
 const HEX = 44;
 const SPRITE = 64;
 
+/** A minimap mark beyond the plain dot: the arena's top three, a bounty carrier, a high-tier player. */
+export interface MapMark {
+  x: number;
+  y: number;
+  kind: "top" | "bounty" | "tier";
+  /** For "tier": 4 Platinum or 5 Diamond, drawn in the tier's colour. */
+  tier?: number;
+}
+
 interface Sprite {
   canvas: HTMLCanvasElement;
   size: number;
@@ -102,6 +111,7 @@ export class Renderer {
     emotes: Map<string, { id: number; until: number }> | null = null,
     wisp: { x: number; y: number; angle: number; trail: Vec[] } | null = null,
     ranks: ReadonlyMap<string, number> | null = null,
+    marks: readonly MapMark[] = [],
   ): void {
     const shake = cam.trauma * cam.trauma;
     const ox = (Math.random() * 2 - 1) * shake * 14;
@@ -159,7 +169,7 @@ export class Renderer {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.drawVignette(ctx, w, h, localId ? snakes.find((s) => s.id === localId) : undefined);
     this.drawNames(ctx, snakes, cam, w, h, dpr, z, ox, oy, ranks);
-    this.drawMinimap(ctx, snakes, localId, w, h, dpr, phase, insets, event, ghost, wisp);
+    this.drawMinimap(ctx, snakes, localId, w, h, dpr, phase, insets, event, ghost, wisp, marks);
   }
 
   /**
@@ -957,6 +967,7 @@ export class Renderer {
     event: Vec | null,
     ghost: Vec | null,
     wisp: Vec | null = null,
+    marks: readonly MapMark[] = [],
   ): void {
     if (phase === "menu") return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -987,6 +998,23 @@ export class Renderer {
       ctx.fill();
     }
     ctx.globalAlpha = 1;
+    // Who matters on the map: the top three (white ring), bounty carriers
+    // (gold ring) and Platinum or Diamond players (a dot in their colour).
+    for (const mk of marks) {
+      const mx = cx + mk.x * k;
+      const my = cy + mk.y * k;
+      ctx.beginPath();
+      if (mk.kind === "tier") {
+        ctx.arc(mx, my, 2.4, 0, Math.PI * 2);
+        ctx.fillStyle = LEAGUE_COLORS[(mk.tier ?? 4) - 1] ?? LEAGUE_COLORS[3];
+        ctx.fill();
+        continue;
+      }
+      ctx.arc(mx, my, mk.kind === "top" ? 4.2 : 5.2, 0, Math.PI * 2);
+      ctx.strokeStyle = mk.kind === "top" ? "rgba(255,255,255,0.85)" : "rgba(240,193,74,0.9)";
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+    }
     if (event) {
       const pulse = 4 + Math.sin(this.time * 6) * 1.5;
       ctx.beginPath();

@@ -20,7 +20,7 @@ import {
 } from "./model";
 import { World } from "./world";
 import { moveWisp, slideAlongRim, steerWisp } from "./wisp";
-import { Renderer, desiredZoom } from "./render";
+import { Renderer, desiredZoom, type MapMark } from "./render";
 import { GameAudio } from "./audio";
 import { ACHIEVEMENT_BY_ID } from "./achievements";
 import { LEAGUES, LEAGUE_BANK_RUNS, leagueOf, seasonEndsAt, seasonOf } from "./challenges";
@@ -47,7 +47,16 @@ export interface HudState {
   rank: number;
   count: number;
   kills: number;
-  board: { name: string; mass: number; you: boolean; bounty: number; league: number }[];
+  board: {
+    name: string;
+    mass: number;
+    you: boolean;
+    bounty: number;
+    league: number;
+    level: number;
+    crown: boolean;
+    linked: boolean;
+  }[];
   /** Your weekly league (1 Bronze to 5 Diamond, 0 unknown) and might (achievements unlocked). */
   league: number;
   might: number;
@@ -621,6 +630,9 @@ export class CoilEngine {
           you: b.nid === this.net!.selfNid,
           bounty: b.bounty,
           league: b.league,
+          level: b.level,
+          crown: b.crown,
+          linked: b.linked,
         }))
       : alive.slice(0, 10).map((s) => ({
           name: s.name,
@@ -628,6 +640,9 @@ export class CoilEngine {
           you: s.id === world.playerId,
           bounty: 0,
           league: s.league ?? 0,
+          level: s.level ?? 0,
+          crown: Boolean(s.crown),
+          linked: Boolean(s.linked),
         }));
     const now = performance.now();
     const ev = this.event;
@@ -1607,6 +1622,7 @@ export class CoilEngine {
       this.emotes,
       this.phase === "wisp" ? this.wisp : null,
       this.topRanks(),
+      this.mapMarks(),
     );
     const nowMs = performance.now();
     for (const [id, e] of this.emotes) if (e.until < nowMs) this.emotes.delete(id);
@@ -1619,6 +1635,30 @@ export class CoilEngine {
         y: this.stick.y - rect.top,
       });
     }
+  }
+
+  /**
+   * What the minimap marks beyond plain dots: the arena's top three, bounty
+   * carriers, and Platinum or Diamond players, from the board (whose rows
+   * carry positions) online, or the local world offline. Never yourself.
+   */
+  private mapMarks(): MapMark[] {
+    const out: MapMark[] = [];
+    const st = this.online && this.world !== this.local ? this.stats : null;
+    if (st) {
+      st.board.forEach((b, i) => {
+        if (b.nid === this.net!.selfNid) return;
+        if (i < 3) out.push({ x: b.x, y: b.y, kind: "top" });
+        if (b.bounty > 0) out.push({ x: b.x, y: b.y, kind: "bounty" });
+        if (b.league >= 4) out.push({ x: b.x, y: b.y, kind: "tier", tier: b.league });
+      });
+      return out;
+    }
+    const alive = this.world.snakes.filter((s) => s.alive).sort((a, b) => b.mass - a.mass);
+    alive.slice(0, 3).forEach((s) => {
+      if (s.id !== this.world.playerId) out.push({ x: s.x, y: s.y, kind: "top" });
+    });
+    return out;
   }
 
   /** Snake id to arena rank for the top three, from the board online or the local world offline. */

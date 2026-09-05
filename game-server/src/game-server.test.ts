@@ -659,10 +659,10 @@ function parseProfile(r: InstanceType<typeof Reader>) {
   return out;
 }
 
-test("protocol 4 full entries carry league, might and finish; older protocols keep their layouts", async () => {
+test("protocol 4 full entries carry league, might and finish, protocol 5 board rows level and flags; older protocols keep their layouts", async () => {
   const arena = await startArena();
   try {
-    for (const proto of [2, 3, 4]) {
+    for (const proto of [2, 3, 4, 5]) {
       const url = arena.url.replace(/v=2$/, `v=${proto}`);
       const p = new Player(url);
       await p.open();
@@ -697,6 +697,10 @@ test("protocol 4 full entries carry league, might and finish; older protocols ke
         stats.f32();
         stats.u32();
         if (proto >= 3) assert.ok(stats.u8() <= 5, "league byte in range");
+        if (proto >= 5) {
+          stats.u8();
+          assert.ok(stats.u8() <= 3, "flags byte: crown 1, linked 2");
+        }
       }
       const nd = stats.u8();
       for (let i = 0; i < nd; i++) {

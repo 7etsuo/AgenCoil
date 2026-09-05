@@ -620,8 +620,8 @@ export function CoilApp() {
       {phase !== "menu" && hud && (
         <div className="pointer-events-none absolute inset-0 p-4 pt-[max(1rem,env(safe-area-inset-top))]">
           <div className="flex items-start justify-between gap-3">
-            {/* The left stack flows, so the arena line, a beat target and the feed never cover the panel. */}
-            <div className="flex flex-col items-start gap-1.5">
+            {/* The left stack flows, so the arena line, a beat target and the feed never cover the panel; on phones it stops short of the map and the strip under it. */}
+            <div className="flex max-w-[calc(100vw-10.5rem)] flex-col items-start gap-1.5 sm:max-w-none">
               <div className="rounded-xl border border-line/80 bg-bg/70 px-3 py-2 tabular-nums">
                 <div className="text-xs tracking-wide text-muted">your length</div>
                 <div className="text-2xl font-semibold leading-tight">{hud.score}</div>
@@ -679,7 +679,7 @@ export function CoilApp() {
             </div>
             <div
               data-ui
-              className="pointer-events-auto hidden min-w-48 rounded-xl border border-line/80 bg-bg/70 px-3 py-2 sm:block"
+              className="pointer-events-auto hidden min-w-56 rounded-xl border border-line/80 bg-bg/70 px-3 py-2 sm:block"
             >
               <div className="mb-1 flex gap-3 text-xs tracking-wide text-muted">
                 <button
@@ -697,42 +697,56 @@ export function CoilApp() {
                   today
                 </button>
               </div>
-              <ol className="space-y-0.5 text-sm">
+              <ol className="text-sm">
                 {(boardTab === "arena"
-                  ? hud.board.map((r) => ({
-                      name: r.name,
-                      n: r.mass,
-                      you: r.you,
-                      bounty: r.bounty,
-                      league: r.league,
-                    }))
+                  ? hud.board.map((r) => ({ ...r, n: r.mass }))
                   : hud.daily.map((r) => ({
                       name: r.name,
                       n: r.best,
                       you: r.name === nick,
                       bounty: 0,
                       league: 0,
+                      level: 0,
+                      crown: false,
+                      linked: false,
                     }))
                 ).map((row, i) => (
                   <li
                     key={`${row.name}-${i}`}
-                    className={row.you ? "font-semibold text-fg" : "text-muted"}
+                    className={`flex h-[22px] items-center gap-1.5 ${row.you ? "font-semibold text-fg" : "text-muted"}`}
                   >
-                    <span className="inline-block w-5 text-subtle">{i + 1}</span>
-                    {row.league > 0 && (
-                      <Crest
+                    <span
+                      className={`w-5 shrink-0 tabular-nums ${i < 3 ? "border-l border-accent pl-1 font-bold text-fg" : "text-subtle"}`}
+                    >
+                      {i + 1}
+                    </span>
+                    {boardTab === "arena" &&
+                      (row.league > 0 ? (
+                        <Crest tier={row.league} size={16} className="shrink-0" />
+                      ) : (
+                        <span className="w-4 shrink-0" />
+                      ))}
+                    <span className="truncate font-medium">
+                      {row.crown ? "👑 " : ""}
+                      {row.linked ? "✓ " : ""}
+                      {row.name}
+                    </span>
+                    {row.level > 0 && (
+                      <span className="shrink-0 text-[10px] text-muted">Lv{row.level}</span>
+                    )}
+                    {row.you && row.league > 1 && (
+                      <BankSlots
                         tier={row.league}
-                        size={16}
-                        className="mr-1 inline-block align-middle"
+                        runs={hud.profile?.weekRuns[row.league - 1] ?? 0}
+                        size={8}
                       />
                     )}
-                    <span className="font-medium">{row.name}</span>
                     {row.bounty > 0 && (
-                      <span className="ml-1 text-xs text-[#f0c14a]" title="bounty">
+                      <span className="shrink-0 text-xs text-[#f0c14a]" title="bounty">
                         ★{row.bounty}
                       </span>
                     )}
-                    <span className="float-right tabular-nums">{row.n}</span>
+                    <span className="ml-auto shrink-0 tabular-nums">{row.n}</span>
                   </li>
                 ))}
                 {boardTab === "today" && hud.daily.length === 0 && (
@@ -755,7 +769,7 @@ export function CoilApp() {
             </div>
           )}
           {hud.hint && (
-            <div className="absolute left-1/2 top-[calc(9.5rem+env(safe-area-inset-top))] w-max max-w-[80vw] -translate-x-1/2 rounded-full border border-accent/50 bg-bg/85 px-4 py-1.5 text-center text-sm text-fg sm:top-[calc(3.2rem+env(safe-area-inset-top))]">
+            <div className="absolute left-1/2 top-[calc(12.4rem+env(safe-area-inset-top))] w-max max-w-[80vw] -translate-x-1/2 rounded-full border border-accent/50 bg-bg/85 px-4 py-1.5 text-center text-sm text-fg sm:top-[calc(3.2rem+env(safe-area-inset-top))]">
               {hud.hint}
             </div>
           )}
@@ -766,14 +780,38 @@ export function CoilApp() {
               {String(hud.arenaMode.secsLeft % 60).padStart(2, "0")} left
             </div>
           )}
+          {hud.mode === "online" && hud.board.length > 0 && (
+            <div className="absolute right-4 top-[calc(6.9rem+env(safe-area-inset-top))] w-[132px] rounded-lg border border-line/80 bg-bg/70 px-2 py-1 text-[11px] sm:hidden">
+              {hud.board.slice(0, 3).map((r, i) => (
+                <div
+                  key={`${r.name}-${i}`}
+                  className={`flex h-[15px] items-center gap-1 ${r.you ? "font-semibold text-fg" : "text-muted"}`}
+                >
+                  <span className="w-2.5 shrink-0 font-bold text-fg">{i + 1}</span>
+                  {r.league > 0 ? (
+                    <Crest tier={r.league} size={12} className="shrink-0" />
+                  ) : (
+                    <span className="w-3 shrink-0" />
+                  )}
+                  <span className="truncate">{r.name.slice(0, 8)}</span>
+                  <span className="ml-auto shrink-0 tabular-nums">{r.mass}</span>
+                </div>
+              ))}
+              {hud.rank > 3 && (
+                <div className="mt-0.5 text-subtle">
+                  you · #{hud.rank} · {hud.score}
+                </div>
+              )}
+            </div>
+          )}
           {hud.party.length > 0 && (
-            <div className="absolute right-4 top-[calc(3.2rem+env(safe-area-inset-top))] rounded-full border border-line bg-bg/70 px-3 py-1 text-xs text-muted sm:top-[calc(19.5rem+env(safe-area-inset-top))]">
+            <div className="absolute right-4 top-[calc(12rem+env(safe-area-inset-top))] rounded-full border border-line bg-bg/70 px-3 py-1 text-xs text-muted sm:top-[calc(19.5rem+env(safe-area-inset-top))]">
               party {hud.party.map((m) => `${m.name} ${m.mass}`).join(" · ")} · total{" "}
               {hud.party.reduce((a, m) => a + m.mass, hud.score)}
             </div>
           )}
           {hud.bountyOnYou > 0 && (
-            <div className="absolute right-4 top-[calc(6.5rem+env(safe-area-inset-top))] rounded-full border border-[#f0c14a]/60 bg-bg/80 px-3 py-1 text-xs text-[#f0c14a] sm:top-[calc(17rem+env(safe-area-inset-top))]">
+            <div className="absolute right-4 top-[calc(14rem+env(safe-area-inset-top))] rounded-full border border-[#f0c14a]/60 bg-bg/80 px-3 py-1 text-xs text-[#f0c14a] sm:top-[calc(17rem+env(safe-area-inset-top))]">
               ★ bounty on you: {hud.bountyOnYou}
             </div>
           )}

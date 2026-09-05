@@ -50,6 +50,10 @@ export interface StatsInfo {
     bounty: number;
     /** Weekly league, 1 Bronze to 5 Diamond, 0 unknown. */
     league: number;
+    /** Evolution level, and the crown and account badge (protocol 5; 0 and false before). */
+    level: number;
+    crown: boolean;
+    linked: boolean;
   }[];
   daily: { name: string; best: number }[];
   party: { name: string; mass: number }[];
@@ -166,9 +170,10 @@ interface Look {
  * Wire protocol this client speaks, announced on the socket URL. 2 added a
  * level byte to full snake entries; 3 adds league and might bytes there and
  * a league byte per leaderboard row; 4 adds last week's banked tier (the
- * aura). The server answers with what it honours in WELCOME.
+ * aura); 5 adds a level byte and a flags byte (crown, linked) per
+ * leaderboard row. The server answers with what it honours in WELCOME.
  */
-const PROTO = 4;
+const PROTO = 5;
 const INPUT_HZ = 30;
 /** A predicted eat the server has not confirmed by then is put back. */
 const EAT_CONFIRM_MS = 700;
@@ -693,8 +698,8 @@ export class NetSession {
           boss: null,
         };
         const nb = r.u8();
-        for (let i = 0; i < nb; i++)
-          s.board.push({
+        for (let i = 0; i < nb; i++) {
+          const row = {
             nid: r.u16(),
             name: r.str(),
             mass: r.u32(),
@@ -702,7 +707,18 @@ export class NetSession {
             y: r.f32(),
             bounty: v2 ? r.u32() : 0,
             league: v2 && this.serverVersion >= 3 ? r.u8() : 0,
-          });
+            level: 0,
+            crown: false,
+            linked: false,
+          };
+          if (v2 && this.serverVersion >= 5) {
+            row.level = r.u8();
+            const flags = r.u8();
+            row.crown = (flags & 1) !== 0;
+            row.linked = (flags & 2) !== 0;
+          }
+          s.board.push(row);
+        }
         const nd = r.u8();
         for (let i = 0; i < nd; i++) s.daily.push({ name: r.str(), best: r.u32() });
         if (v2 && r.remaining >= 1) {

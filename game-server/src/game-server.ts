@@ -642,9 +642,10 @@ export class GameServer {
   private onConnection(ws: WebSocket, req: IncomingMessage): void {
     const ip = clientIp(req);
     // Wire protocol the client speaks: 2 adds a level byte to full entries,
-    // 3 adds league and might bytes and a league byte per board row.
+    // 3 adds league and might bytes and a league byte per board row, 4 the
+    // finish byte, 5 a level byte and a flags byte (crown, linked) per board row.
     const asked = Number(new URL(req.url ?? "/", "http://x").searchParams.get("v"));
-    const proto = Number.isFinite(asked) ? Math.max(1, Math.min(4, Math.floor(asked))) : 1;
+    const proto = Number.isFinite(asked) ? Math.max(1, Math.min(5, Math.floor(asked))) : 1;
     const now = Date.now();
     const recent = (this.connectLog.get(ip) ?? []).filter((t) => now - t < 60_000);
     recent.push(now);
@@ -2167,24 +2168,27 @@ export class GameServer {
     alive.forEach((s, i) => rankOf.set(s.id, i + 1));
     const top = alive.slice(0, 10);
     const daily = this.daily.top(10);
-    const encodeBoard = (v2: boolean, v3: boolean) => {
+    const encodeBoard = (v2: boolean, v3: boolean, v5: boolean) => {
       const board = new Writer();
       board.u8(top.length);
       for (const s of top) {
         board.u16(this.nidOf(s.id)).str(s.name).u32(Math.floor(s.mass)).f32(s.x).f32(s.y);
         if (v2) board.u32(this.bountyOf.get(s.id) ?? 0);
         if (v3) board.u8(s.league ?? 0);
+        // The player list draws level, crown and badge per row.
+        if (v5) board.u8(Math.min(255, s.level ?? 0)).u8((s.crown ? 1 : 0) | (s.linked ? 2 : 0));
       }
       board.u8(daily.length);
       for (const e of daily) board.str(e.name).u32(e.best);
       return board.finish();
     };
-    const tail1 = encodeBoard(false, false);
-    const tail2 = encodeBoard(true, false);
-    const tail3 = encodeBoard(true, true);
+    const tail1 = encodeBoard(false, false, false);
+    const tail2 = encodeBoard(true, false, false);
+    const tail3 = encodeBoard(true, true, false);
+    const tail5 = encodeBoard(true, true, true);
     for (const c of this.clients) {
       const me = c.sid ? alive.find((s) => s.id === c.sid) : undefined;
-      const tail = c.v2 ? (c.proto >= 3 ? tail3 : tail2) : tail1;
+      const tail = c.v2 ? (c.proto >= 5 ? tail5 : c.proto >= 3 ? tail3 : tail2) : tail1;
       const w = new Writer()
         .u8(c.v2 ? S2C.STATS2 : S2C.STATS)
         .f32(me?.mass ?? 0)
