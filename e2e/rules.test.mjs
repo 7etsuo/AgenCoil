@@ -310,6 +310,125 @@ test("static arenas are placed on, never rolled or forgotten, and absorb a stale
   }
 });
 
+test("a lookup that finds only a booting arena waits for it instead of starting another", async () => {
+  const { mkdirSync: mk } = await import("node:fs");
+  const outDir = join(root, "game-server", "node_modules", ".cache");
+  mk(outDir, { recursive: true });
+  const out = join(outDir, "agencoil-arena-boot.test.mjs");
+  await esbuild.build({
+    entryPoints: [join(root, "game-server", "src", "arena-host.ts")],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    external: ["pg", "@vercel/sandbox"],
+    outfile: out,
+    logLevel: "silent",
+  });
+  const { ArenaHost } = await import(pathToFileURL(out).href);
+  const now = Date.now();
+  const rows = [
+    {
+      name: "snek-arena-young",
+      domain: "https://young",
+      created_at: now - 5000,
+      expires_at: now + 22 * 3600_000,
+      build: "dpl_new",
+    },
+  ];
+  let leaseTries = 0;
+  const pool = {
+    query: async (text) => {
+      if (text.includes("FROM agencoil_arena WHERE expires_at"))
+        return { rows, rowCount: rows.length };
+      if (text.includes("agencoil_arena_lock SET until = $1")) {
+        leaseTries++;
+        return { rows: [], rowCount: 0 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  let probes = 0;
+  const realFetch = globalThis.fetch;
+  // The young arena fails its first two probes (a cold Sandbox), then answers.
+  globalThis.fetch = async (url) => {
+    if (!String(url).startsWith("https://young/")) return new Response("{}", { status: 404 });
+    probes++;
+    return probes < 3
+      ? new Response("", { status: 503 })
+      : new Response(JSON.stringify({ ok: true, players: 0 }), { status: 200 });
+  };
+  try {
+    const env = { VERCEL: "1", GAME_SECRET: "s", VERCEL_DEPLOYMENT_ID: "dpl_new" };
+    const host = new ArenaHost(pool, env);
+    host.lastTick = Date.now();
+    const pick = await host.resolve("");
+    assert.equal(pick.name, "snek-arena-young", "the young arena is waited for");
+    assert.ok(probes >= 3, `probed until it answered (${probes})`);
+    assert.equal(leaseTries, 0, "no second arena was started");
+    // Still silent after the wait: the player is sent there anyway and will ask again.
+    globalThis.fetch = async () => new Response("", { status: 503 });
+    const host2 = new ArenaHost(pool, env);
+    host2.lastTick = Date.now();
+    const again = await host2.resolve("");
+    assert.equal(again.name, "snek-arena-young");
+    assert.equal(leaseTries, 0, "and still no second arena");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a tick that finds several stale arenas starts one successor, not one each", async () => {
+  const { mkdirSync: mk } = await import("node:fs");
+  const outDir = join(root, "game-server", "node_modules", ".cache");
+  mk(outDir, { recursive: true });
+  const out = join(outDir, "agencoil-arena-roll.test.mjs");
+  await esbuild.build({
+    entryPoints: [join(root, "game-server", "src", "arena-host.ts")],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    external: ["pg", "@vercel/sandbox"],
+    outfile: out,
+    logLevel: "silent",
+  });
+  const { ArenaHost } = await import(pathToFileURL(out).href);
+  const now = Date.now();
+  const rows = ["one", "two"].map((n, i) => ({
+    name: `snek-arena-${n}`,
+    domain: `https://${n}`,
+    created_at: now - 3600_000 + i,
+    expires_at: now + 20 * 3600_000,
+    build: "dpl_old",
+  }));
+  const pool = {
+    query: async (text) =>
+      text.includes("FROM agencoil_arena WHERE expires_at")
+        ? { rows, rowCount: rows.length }
+        : { rows: [], rowCount: 0 },
+  };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ ok: true, players: 1 }), { status: 200 });
+  try {
+    const host = new ArenaHost(pool, {
+      VERCEL: "1",
+      GAME_SECRET: "s",
+      VERCEL_DEPLOYMENT_ID: "dpl_new",
+    });
+    let creations = 0;
+    host.createArena = async () => {
+      creations++;
+      return true;
+    };
+    const t = await host.tick();
+    assert.equal(t.created, true);
+    assert.equal(creations, 1, "both stale arenas share one successor");
+    assert.deepEqual(t.drained, [], "they drain once it is up, on a later tick");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("league stakes: three runs bank a tier, and each tier's payout is fixed", () => {
   assert.equal(rules.bankedTierOf([0, 0, 0, 0, 0]), 0);
   assert.equal(rules.bankedTierOf([3, 2, 0, 0, 0]), 1, "Bronze after three lives of any length");

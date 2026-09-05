@@ -49,6 +49,14 @@ export const ARENA_SESSION_MS = 23 * 3600_000;
 export const STATIC_BUILD = "static";
 export const isStatic = (r: { build: string }): boolean => r.build === STATIC_BUILD;
 export const ARENA_ROLL_BEFORE_MS = 90 * 60_000;
+/**
+ * An arena row younger than this whose probe fails is booting, not dead: a
+ * fresh Sandbox answers its first requests slowly or not at all. Lookups
+ * wait for it instead of starting another, and the tick keeps its row.
+ */
+export const ARENA_BOOT_MS = 120_000;
+/** How long one lookup waits on a booting arena before answering with it anyway. */
+const BOOT_WAIT_MS = 5000;
 const HEALTH_TTL_MS = 10_000;
 const LOCK_MS = 60_000;
 const PARTY_ROUTE_MS = 15 * 60_000;
@@ -129,15 +137,23 @@ export class ArenaHost {
       void this.tick().catch(() => undefined);
     }
     let arenas = await this.liveArenas();
-    if (
-      !arenas.some((a) => a.health.ok) ||
-      arenas.every((a) => !a.health.ok || !hasRoom(a.health))
-    ) {
-      const made = await this.createArena();
-      if (made) arenas = await this.liveArenas();
+    const ready = (list: { health: ArenaHealth }[]): boolean =>
+      list.some((a) => a.health.ok && hasRoom(a.health));
+    let booting: ArenaRow | null = null;
+    if (!ready(arenas)) {
+      // A row created moments ago is still coming up. Starting another
+      // arena here is how two ended up running side by side; wait for it
+      // instead, and if it is still quiet send the player there anyway,
+      // since the client retries and asks again.
+      booting = arenas.find((a) => isBooting(a, now)) ?? null;
+      if (booting) arenas = await this.awaitBoot(booting, arenas);
+      else {
+        const made = await this.createArena();
+        if (made) arenas = await this.liveArenas();
+      }
     }
     const routed = party ? await this.partyRoute(party) : null;
-    const pick = pickArena(arenas, routed);
+    const pick = pickArena(arenas, routed) ?? booting;
     if (!pick) return null;
     if (party && routed !== pick.name) await this.setPartyRoute(party, pick.name);
     return { url: `${pick.domain.replace(/^https:/, "wss:")}/api/ws`, name: pick.name };
@@ -157,7 +173,7 @@ export class ArenaHost {
       // A static arena is someone's machine: leave its row alone when it is
       // down (players simply are not sent there) and never roll it.
       if (isStatic(r)) continue;
-      if (!h.ok && now - r.createdAt > 120_000) {
+      if (!h.ok && now - r.createdAt > ARENA_BOOT_MS) {
         // Unreachable and not just booting: forget it.
         await this.q(`DELETE FROM agencoil_arena WHERE name = $1`, [r.name]);
         continue;
@@ -176,15 +192,17 @@ export class ArenaHost {
                 o.build === build &&
                 o.expiresAt - now > ARENA_ROLL_BEFORE_MS)),
         );
+        // One successor per tick serves every stale arena (a deploy makes
+        // them all stale at once); they drain into it on the next tick.
         if (!successor) {
-          created = (await this.createArena()) || created;
+          if (!created) created = await this.createArena();
         } else if (this.health.get(successor.name)?.ok) {
           await this.drain(r);
           drained.push(r.name);
         } else if (!isStatic(successor)) {
           /* the successor is still booting: wait for the next tick */
-        } else {
-          created = (await this.createArena()) || created;
+        } else if (!created) {
+          created = await this.createArena();
         }
       }
     }
@@ -231,6 +249,24 @@ export class ArenaHost {
         live.push({ ...r, health: h });
     }
     return pickArena(live, null);
+  }
+
+  /**
+   * Probe a booting arena afresh, past the health cache, for a few seconds.
+   * Once it answers the list is re-read so placement sees it healthy.
+   */
+  private async awaitBoot(
+    row: ArenaRow,
+    arenas: (ArenaRow & { health: ArenaHealth })[],
+  ): Promise<(ArenaRow & { health: ArenaHealth })[]> {
+    const until = Date.now() + BOOT_WAIT_MS;
+    for (;;) {
+      const h = await probe(row.domain);
+      this.health.set(row.name, h);
+      if (h.ok) return this.liveArenas();
+      if (Date.now() >= until) return arenas;
+      await new Promise((r) => setTimeout(r, 500));
+    }
   }
 
   private async liveArenas(): Promise<(ArenaRow & { health: ArenaHealth })[]> {
@@ -354,6 +390,11 @@ export class ArenaHost {
     await this.q(`DELETE FROM agencoil_arena WHERE name = $1`, [r.name]);
     this.health.delete(r.name);
   }
+}
+
+/** A Sandbox arena that is not answering yet but was created only moments ago. */
+function isBooting(a: ArenaRow & { health: ArenaHealth }, now: number): boolean {
+  return !a.health.ok && !isStatic(a) && now - a.createdAt < ARENA_BOOT_MS;
 }
 
 async function probe(domain: string): Promise<ArenaHealth> {
